@@ -49,3 +49,32 @@ pub struct Upgrade {
     /// Height at which the upgrade activates.
     pub activationheight: u64,
 }
+
+/// Response of the verbose (`verbosity = 1`) `getblock` RPC (only the fields we use).
+#[derive(Debug, Deserialize)]
+pub struct GetBlockVerbose {
+    /// Block hash, big-endian hex (display order).
+    pub hash: String,
+    /// Note-commitment tree sizes as of this block.
+    #[serde(default)]
+    pub trees: Trees,
+}
+
+/// Note-commitment tree sizes reported by verbose `getblock`.
+#[derive(Debug, Default, Deserialize)]
+pub struct Trees {
+    /// Sapling tree.
+    #[serde(default)]
+    pub sapling: TreeSize,
+    /// Orchard tree.
+    #[serde(default)]
+    pub orchard: TreeSize,
+}
+
+/// The `size` of a note-commitment tree.
+#[derive(Debug, Default, Deserialize)]
+pub struct TreeSize {
+    /// Number of leaves in the tree as of the end of this block.
+    #[serde(default)]
+    pub size: u32,
+}

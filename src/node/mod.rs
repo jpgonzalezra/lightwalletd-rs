@@ -5,7 +5,7 @@
 
 mod types;
 
-pub use types::{GetBlockchainInfo, GetInfo};
+pub use types::{GetBlockVerbose, GetBlockchainInfo, GetInfo};
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +28,9 @@ pub enum NodeError {
     /// The JSON-RPC `result` could not be decoded into the expected type.
     #[error("decoding RPC result: {0}")]
     Decode(#[from] serde_json::Error),
+    /// A hex-encoded field could not be decoded.
+    #[error("decoding hex: {0}")]
+    Hex(#[from] hex::FromHexError),
     /// The response had neither a `result` nor an `error`.
     #[error("RPC response had no result")]
     EmptyResult,
@@ -96,6 +99,23 @@ impl NodeClient {
             .raw_request("getblockchaininfo", serde_json::json!([]))
             .await?;
         Ok(serde_json::from_value(value)?)
+    }
+
+    /// Call `getblock <height> 1` (verbose) to obtain the block hash and tree sizes.
+    pub async fn get_block_verbose(&self, height: u64) -> Result<GetBlockVerbose, NodeError> {
+        let value = self
+            .raw_request("getblock", serde_json::json!([height.to_string(), 1]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Call `getblock <hash> 0` (raw) and return the decoded block bytes.
+    pub async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {
+        let value = self
+            .raw_request("getblock", serde_json::json!([hash, 0]))
+            .await?;
+        let hex_str: String = serde_json::from_value(value)?;
+        Ok(hex::decode(hex_str)?)
     }
 }
 

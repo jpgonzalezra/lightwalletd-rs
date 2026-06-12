@@ -1,13 +1,14 @@
 //! Implementation of the `CompactTxStreamer` gRPC service.
 //!
-//! In this phase only the two pure-proxy methods are implemented (`GetLightdInfo` and
-//! `GetLatestBlock`); every other method returns `unimplemented` and is filled in by later phases.
+//! Implemented so far: `GetLightdInfo`, `GetLatestBlock`, and `GetBlock`. Every other method returns
+//! `unimplemented` and is filled in by later phases.
 
 use std::pin::Pin;
 
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
+use crate::compact;
 use crate::node::{NodeClient, NodeError};
 use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
 use crate::proto::{
@@ -86,11 +87,24 @@ impl CompactTxStreamer for Streamer {
         Ok(Response::new(info))
     }
 
-    async fn get_block(
-        &self,
-        _request: Request<BlockId>,
-    ) -> Result<Response<CompactBlock>, Status> {
-        Err(Status::unimplemented("get_block: implemented in F1"))
+    async fn get_block(&self, request: Request<BlockId>) -> Result<Response<CompactBlock>, Status> {
+        let block_id = request.into_inner();
+        if !block_id.hash.is_empty() {
+            return Err(Status::unimplemented(
+                "get_block by hash is not yet supported",
+            ));
+        }
+        // Fetch the hash and tree sizes (verbose), then the raw bytes by hash so both calls refer to
+        // the same block even if a reorg happens between them.
+        let verbose = self.node.get_block_verbose(block_id.height).await?;
+        let raw = self.node.get_block_raw(&verbose.hash).await?;
+        let mut block = compact::to_compact_block(&raw)
+            .map_err(|e| Status::internal(format!("parsing block: {e}")))?;
+        if let Some(meta) = block.chain_metadata.as_mut() {
+            meta.sapling_commitment_tree_size = verbose.trees.sapling.size;
+            meta.orchard_commitment_tree_size = verbose.trees.orchard.size;
+        }
+        Ok(Response::new(block))
     }
 
     async fn get_block_nullifiers(
