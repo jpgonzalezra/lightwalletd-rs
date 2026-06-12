@@ -1,6 +1,10 @@
+use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+mod config;
 mod proto;
+
+use config::Cli;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -8,6 +12,11 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    tracing::info!("lightwalletd-rs starting");
+    let config = Cli::parse().resolve()?;
+    tracing::info!(
+        grpc_bind = %config.grpc_bind,
+        node_url = %config.node.url,
+        "lightwalletd-rs starting"
+    );
     Ok(())
 }
