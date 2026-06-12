@@ -2,6 +2,7 @@ use clap::Parser;
 use tonic::transport::Server;
 use tracing_subscriber::EnvFilter;
 
+mod compact;
 mod config;
 mod node;
 mod proto;

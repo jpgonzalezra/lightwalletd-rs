@@ -1,0 +1,213 @@
+//! Convert a raw Zcash block into a [`CompactBlock`].
+//!
+//! A block is `[header][CompactSize tx_count][tx]*`. The header is parsed by hand (fixed layout); each
+//! transaction is parsed with `librustzcash`, which also computes the correct txid (legacy and ZIP-244).
+//! The compact form keeps only what a shielded wallet needs: Sapling spends/outputs, Orchard actions, and
+//! transparent inputs/outputs.
+
+use std::io::Cursor;
+
+use sha2::{Digest, Sha256};
+use zcash_encoding::CompactSize;
+use zcash_primitives::transaction::Transaction;
+use zcash_protocol::consensus::BranchId;
+
+use crate::proto::{
+    ChainMetadata, CompactBlock, CompactOrchardAction, CompactSaplingOutput, CompactSaplingSpend,
+    CompactTx, CompactTxIn, TxOut,
+};
+
+/// Header layout up to (but not including) the equihash solution: version(4) + prevHash(32) +
+/// merkleRoot(32) + blockCommitments(32) + time(4) + nBits(4) + nonce(32).
+const HEADER_PREFIX_LEN: usize = 140;
+
+/// First 52 bytes of a note's `encCiphertext`: the compact note plaintext used for trial decryption.
+const COMPACT_CIPHERTEXT_LEN: usize = 52;
+
+/// Errors produced while parsing a raw block.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    /// The buffer is shorter than the structure being read.
+    #[error("block data is truncated")]
+    Truncated,
+    /// A transaction (or a CompactSize length prefix) failed to parse.
+    #[error("reading block: {0}")]
+    Io(#[from] std::io::Error),
+    /// The block height could not be read from the coinbase transaction.
+    #[error("could not read height from coinbase")]
+    NoHeight,
+}
+
+/// Parse a raw block and build its [`CompactBlock`]. The `chainMetadata` tree sizes are left at zero;
+/// the caller fills them in from the node (they are not part of the raw block).
+pub fn to_compact_block(raw: &[u8]) -> Result<CompactBlock, ParseError> {
+    if raw.len() < HEADER_PREFIX_LEN {
+        return Err(ParseError::Truncated);
+    }
+
+    let prev_hash = raw[4..36].to_vec();
+    let time = u32::from_le_bytes(raw[100..104].try_into().expect("4 bytes"));
+
+    // The solution length prefix sits right after the fixed header prefix; the header ends after it.
+    let mut header_cursor = Cursor::new(&raw[HEADER_PREFIX_LEN..]);
+    let solution_len = CompactSize::read(&mut header_cursor)? as usize;
+    let header_end = HEADER_PREFIX_LEN + header_cursor.position() as usize + solution_len;
+    if raw.len() < header_end {
+        return Err(ParseError::Truncated);
+    }
+    let hash = sha256d(&raw[..header_end]);
+
+    let mut tx_cursor = Cursor::new(&raw[header_end..]);
+    let tx_count = CompactSize::read(&mut tx_cursor)? as usize;
+    let mut vtx = Vec::with_capacity(tx_count);
+    let mut height = None;
+    for index in 0..tx_count {
+        let tx = Transaction::read(&mut tx_cursor, BranchId::Nu5)?;
+        if index == 0 {
+            height = Some(coinbase_height(&tx)?);
+        }
+        vtx.push(to_compact_tx(index as u64, &tx));
+    }
+
+    Ok(CompactBlock {
+        proto_version: 0,
+        height: height.ok_or(ParseError::NoHeight)?,
+        hash,
+        prev_hash,
+        time,
+        header: Vec::new(),
+        vtx,
+        chain_metadata: Some(ChainMetadata::default()),
+    })
+}
+
+/// Double SHA-256, in protocol (little-endian) byte order — the on-wire block hash.
+fn sha256d(data: &[u8]) -> Vec<u8> {
+    Sha256::digest(Sha256::digest(data)).to_vec()
+}
+
+/// Read the block height from the coinbase transaction's BIP34 scriptSig.
+fn coinbase_height(tx: &Transaction) -> Result<u64, ParseError> {
+    let bundle = tx.transparent_bundle().ok_or(ParseError::NoHeight)?;
+    let script = &bundle
+        .vin
+        .first()
+        .ok_or(ParseError::NoHeight)?
+        .script_sig()
+        .0
+        .0;
+    let n = *script.first().ok_or(ParseError::NoHeight)? as usize;
+    if n == 0 || n > 8 || script.len() < 1 + n {
+        return Err(ParseError::NoHeight);
+    }
+    let mut bytes = [0u8; 8];
+    bytes[..n].copy_from_slice(&script[1..1 + n]);
+    Ok(u64::from_le_bytes(bytes))
+}
+
+/// Build the compact form of a single transaction. The coinbase (`index == 0`) omits its inputs.
+fn to_compact_tx(index: u64, tx: &Transaction) -> CompactTx {
+    let mut spends = Vec::new();
+    let mut outputs = Vec::new();
+    if let Some(sapling) = tx.sapling_bundle() {
+        for spend in sapling.shielded_spends() {
+            spends.push(CompactSaplingSpend {
+                nf: spend.nullifier().0.to_vec(),
+            });
+        }
+        for output in sapling.shielded_outputs() {
+            outputs.push(CompactSaplingOutput {
+                cmu: output.cmu().to_bytes().to_vec(),
+                ephemeral_key: output.ephemeral_key().0.to_vec(),
+                ciphertext: output.enc_ciphertext()[..COMPACT_CIPHERTEXT_LEN].to_vec(),
+            });
+        }
+    }
+
+    let mut actions = Vec::new();
+    if let Some(orchard) = tx.orchard_bundle() {
+        for action in orchard.actions().iter() {
+            let note = action.encrypted_note();
+            actions.push(CompactOrchardAction {
+                nullifier: action.nullifier().to_bytes().to_vec(),
+                cmx: action.cmx().to_bytes().to_vec(),
+                ephemeral_key: note.epk_bytes.to_vec(),
+                ciphertext: note.enc_ciphertext[..COMPACT_CIPHERTEXT_LEN].to_vec(),
+            });
+        }
+    }
+
+    let mut vin = Vec::new();
+    let mut vout = Vec::new();
+    if let Some(transparent) = tx.transparent_bundle() {
+        if index != 0 {
+            for input in &transparent.vin {
+                vin.push(CompactTxIn {
+                    prevout_txid: input.prevout().hash().to_vec(),
+                    prevout_index: input.prevout().n(),
+                });
+            }
+        }
+        for output in &transparent.vout {
+            vout.push(TxOut {
+                value: output.value().into_u64(),
+                script_pub_key: output.script_pubkey().0.0.clone(),
+            });
+        }
+    }
+
+    CompactTx {
+        index,
+        txid: tx.txid().as_ref().to_vec(),
+        fee: 0,
+        spends,
+        outputs,
+        actions,
+        vin,
+        vout,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct Fixture {
+        block: u64,
+        full: String,
+        compact: String,
+    }
+
+    // The reference fixtures were generated without transaction IDs (the txids are 32 zero bytes),
+    // so we normalize ours to zero before comparing the rest of the structure byte-for-byte, while
+    // separately asserting that we do compute a real txid for every transaction.
+    #[test]
+    fn compact_block_structure_matches_golden_fixtures() {
+        let json = std::fs::read_to_string("testdata/compact_blocks.json").unwrap();
+        let fixtures: Vec<Fixture> = serde_json::from_str(&json).unwrap();
+        assert!(!fixtures.is_empty());
+        for fixture in &fixtures {
+            let raw = hex::decode(&fixture.full).unwrap();
+            let mut compact = to_compact_block(&raw).unwrap();
+            for tx in &mut compact.vtx {
+                assert_eq!(tx.txid.len(), 32, "txid length at height {}", fixture.block);
+                assert_ne!(
+                    tx.txid,
+                    vec![0u8; 32],
+                    "missing txid at height {}",
+                    fixture.block
+                );
+                tx.txid = vec![0u8; 32];
+            }
+            assert_eq!(
+                hex::encode(compact.encode_to_vec()),
+                fixture.compact,
+                "compact block structure mismatch at height {}",
+                fixture.block
+            );
+        }
+    }
+}
