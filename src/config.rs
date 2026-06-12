@@ -83,7 +83,11 @@ impl Cli {
 
         Ok(Config {
             grpc_bind: self.grpc_bind,
-            node: NodeConfig { url, user, password },
+            node: NodeConfig {
+                url,
+                user,
+                password,
+            },
         })
     }
 }

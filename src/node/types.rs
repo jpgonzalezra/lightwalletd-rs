@@ -1,0 +1,51 @@
+//! Typed deserialization targets for the zebrad JSON-RPC responses we consume.
+//!
+//! Field names use zebrad's lowercase JSON keys.
+
+use std::collections::HashMap;
+
+use serde::Deserialize;
+
+/// Response of the `getinfo` RPC (only the fields we use).
+#[derive(Debug, Deserialize)]
+pub struct GetInfo {
+    /// Node build string, e.g. `v2.4.0`.
+    pub build: String,
+    /// Node subversion string, e.g. `/MagicBean:5.10.0/`.
+    pub subversion: String,
+}
+
+/// Response of the `getblockchaininfo` RPC (only the fields we use).
+#[derive(Debug, Deserialize)]
+pub struct GetBlockchainInfo {
+    /// Network name: `main`, `test`, or `regtest`.
+    pub chain: String,
+    /// Height of the best chain tip.
+    pub blocks: u64,
+    /// Hash of the best chain tip, big-endian hex (display order).
+    pub bestblockhash: String,
+    /// Estimated height of the chain; may exceed `blocks` while syncing.
+    #[serde(default)]
+    pub estimatedheight: u64,
+    /// Consensus branch IDs for the current and next block.
+    pub consensus: Consensus,
+    /// Network upgrades keyed by branch ID.
+    #[serde(default)]
+    pub upgrades: HashMap<String, Upgrade>,
+}
+
+/// Consensus branch IDs reported by `getblockchaininfo`.
+#[derive(Debug, Deserialize)]
+pub struct Consensus {
+    /// Branch ID in effect at the chain tip.
+    pub chaintip: String,
+}
+
+/// A single network upgrade entry from `getblockchaininfo`.
+#[derive(Debug, Deserialize)]
+pub struct Upgrade {
+    /// Upgrade name, e.g. `Sapling`, `Orchard`.
+    pub name: String,
+    /// Height at which the upgrade activates.
+    pub activationheight: u64,
+}

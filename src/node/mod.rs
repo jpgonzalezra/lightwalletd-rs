@@ -1,0 +1,123 @@
+//! JSON-RPC client for the backend zebrad node.
+//!
+//! Exposes a generic [`NodeClient::raw_request`] plus typed wrappers for the specific RPCs the
+//! service needs. The transport is plain HTTP `POST` with HTTP Basic auth.
+
+mod types;
+
+pub use types::{GetBlockchainInfo, GetInfo};
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::NodeConfig;
+
+/// Errors returned by the node client.
+#[derive(Debug, thiserror::Error)]
+pub enum NodeError {
+    /// The HTTP request itself failed (connection, timeout, decoding the body).
+    #[error("node HTTP transport error: {0}")]
+    Http(#[from] reqwest::Error),
+    /// The node returned a JSON-RPC error object.
+    #[error("node RPC error {code}: {message}")]
+    Rpc {
+        /// JSON-RPC error code.
+        code: i64,
+        /// Human-readable error message.
+        message: String,
+    },
+    /// The JSON-RPC `result` could not be decoded into the expected type.
+    #[error("decoding RPC result: {0}")]
+    Decode(#[from] serde_json::Error),
+    /// The response had neither a `result` nor an `error`.
+    #[error("RPC response had no result")]
+    EmptyResult,
+}
+
+/// A client for the zebrad JSON-RPC endpoint.
+#[derive(Debug, Clone)]
+pub struct NodeClient {
+    http: reqwest::Client,
+    url: String,
+    user: String,
+    password: String,
+}
+
+impl NodeClient {
+    /// Build a client from the resolved node configuration.
+    pub fn new(config: &NodeConfig) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            url: config.url.clone(),
+            user: config.user.clone(),
+            password: config.password.clone(),
+        }
+    }
+
+    /// Issue a raw JSON-RPC call and return the decoded `result` value.
+    pub async fn raw_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, NodeError> {
+        let request = RpcRequest {
+            jsonrpc: "1.0",
+            id: "lwd",
+            method,
+            params,
+        };
+        let response: RpcResponse = self
+            .http
+            .post(&self.url)
+            .basic_auth(&self.user, Some(&self.password))
+            .json(&request)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(error) = response.error {
+            return Err(NodeError::Rpc {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        response.result.ok_or(NodeError::EmptyResult)
+    }
+
+    /// Call `getinfo`.
+    pub async fn get_info(&self) -> Result<GetInfo, NodeError> {
+        let value = self.raw_request("getinfo", serde_json::json!([])).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Call `getblockchaininfo`.
+    pub async fn get_blockchain_info(&self) -> Result<GetBlockchainInfo, NodeError> {
+        let value = self
+            .raw_request("getblockchaininfo", serde_json::json!([]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+}
+
+/// JSON-RPC request envelope.
+#[derive(Serialize)]
+struct RpcRequest<'a> {
+    jsonrpc: &'a str,
+    id: &'a str,
+    method: &'a str,
+    params: serde_json::Value,
+}
+
+/// JSON-RPC response envelope.
+#[derive(Deserialize)]
+struct RpcResponse {
+    result: Option<serde_json::Value>,
+    error: Option<RpcErrorObject>,
+}
+
+/// JSON-RPC error object.
+#[derive(Deserialize)]
+struct RpcErrorObject {
+    code: i64,
+    message: String,
+}
