@@ -63,6 +63,23 @@ Short ADRs live under [`docs/decisions/`](decisions/). Notable ones:
   verbose call is still made to obtain the note-commitment tree sizes (`ChainMetadata`), which are not part of the
   raw block.
 
+## Running
+
+```sh
+cargo run -- --rpc-url http://127.0.0.1:18232 --rpc-user USER --rpc-password PASS
+# or point at a zcash.conf:
+cargo run -- --zcash-conf ~/.zcash/zcash.conf
+```
+
+The server listens on `--grpc-bind` (default `127.0.0.1:9067`). Probe it with `grpcurl`:
+
+```sh
+grpcurl -plaintext 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
+grpcurl -plaintext 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLatestBlock
+```
+
 ## Phase status
 
-- **F0 — Skeleton**: in progress. gRPC server + JSON-RPC client, `GetLightdInfo` + `GetLatestBlock`.
+- **F0 — Skeleton**: done. The gRPC server serves `GetLightdInfo` (from `getinfo` + `getblockchaininfo`)
+  and `GetLatestBlock` (from `getblockchaininfo`); every other method returns `unimplemented`. The JSON-RPC
+  client (`src/node`) and configuration (`src/config`) are in place.

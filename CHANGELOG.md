@@ -5,5 +5,9 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
-### F0 — Skeleton (in progress)
-- Project scaffold, dependencies, and initial architecture docs.
+### F0 — Skeleton
+- Project scaffold, dependencies, and architecture docs.
+- gRPC `CompactTxStreamer` service generated from the `.proto` contract.
+- JSON-RPC client for the zebrad backend (generic `raw_request` + typed `getinfo`/`getblockchaininfo`).
+- Configuration from CLI flags and an optional `zcash.conf`.
+- Implemented `GetLightdInfo` and `GetLatestBlock`; remaining methods return `unimplemented`.
