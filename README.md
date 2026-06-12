@@ -15,7 +15,7 @@ into `CompactBlock`s (a pruned form with the zk proofs stripped out) and streams
 Under active development, built in vertical slices.
 
 - [x] F0 — Skeleton: gRPC server + JSON-RPC client, `GetLightdInfo` + `GetLatestBlock`
-- [ ] F1 — Parser → `CompactBlock` → `GetBlock`
+- [x] F1 — Parser → `CompactBlock` → `GetBlock`
 - [ ] F2 — Cache + ingestor + `GetBlockRange`
 - [ ] F3 — Proxies (send, tx, balance, utxos, treestate)
 - [ ] F4 — Mempool, subtrees, t-addr txns, nullifiers

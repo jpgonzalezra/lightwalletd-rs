@@ -76,10 +76,30 @@ The server listens on `--grpc-bind` (default `127.0.0.1:9067`). Probe it with `g
 ```sh
 grpcurl -plaintext 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
 grpcurl -plaintext 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLatestBlock
+grpcurl -plaintext -d '{"height": 419200}' 127.0.0.1:9067 \
+  cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlock
 ```
+
+## Block parsing
+
+`src/compact.rs` turns a raw block into a `CompactBlock`. The header is parsed by hand (fixed layout) to
+recover the block hash (double SHA-256, little-endian), previous hash, and time; each transaction is parsed
+with `librustzcash`, which also yields the correct transaction ID for both legacy and v5 (ZIP-244)
+transactions. The compact form keeps only what a shielded wallet needs — Sapling spends/outputs, Orchard
+actions, and transparent inputs/outputs — and the block height is read from the coinbase (BIP34).
+
+The note-commitment tree sizes in `ChainMetadata` are not part of the raw block; `GetBlock` fills them in
+from the verbose `getblock` response.
+
+The parser is validated byte-for-byte against the golden fixtures in `testdata/compact_blocks.json` (the
+reference fixtures carry zeroed txids, so the test normalizes ours before comparing the rest of the
+structure, and asserts that a real txid is computed for every transaction).
 
 ## Phase status
 
 - **F0 — Skeleton**: done. The gRPC server serves `GetLightdInfo` (from `getinfo` + `getblockchaininfo`)
-  and `GetLatestBlock` (from `getblockchaininfo`); every other method returns `unimplemented`. The JSON-RPC
-  client (`src/node`) and configuration (`src/config`) are in place.
+  and `GetLatestBlock` (from `getblockchaininfo`); the JSON-RPC client (`src/node`) and configuration
+  (`src/config`) are in place.
+- **F1 — Parser & GetBlock**: done. `src/compact.rs` parses raw blocks into `CompactBlock`s, and `GetBlock`
+  serves a block by height (verbose `getblock` for hash + tree sizes, raw `getblock` for the bytes). Lookup
+  by hash is not yet supported.
