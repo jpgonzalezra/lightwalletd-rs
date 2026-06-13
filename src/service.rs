@@ -1,10 +1,13 @@
 //! Implementation of the `CompactTxStreamer` gRPC service.
 //!
-//! Implemented so far: `GetLightdInfo`, `GetLatestBlock`, and `GetBlock`. Every other method returns
-//! `unimplemented` and is filled in by later phases.
+//! Implemented: chain info, block serving (`GetBlock`/`GetBlockRange`), `GetTransaction`,
+//! `SendTransaction`, tree state, transparent-address balance and UTXOs, and `Ping`. The mempool
+//! streams, subtree roots, transparent-address transaction listings, and the nullifier-only block
+//! variants still return `unimplemented`.
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use async_stream::try_stream;
 use tokio_stream::Stream;
@@ -30,6 +33,8 @@ pub struct Streamer {
     node: NodeClient,
     cache: Arc<Cache>,
     network: String,
+    /// Number of `Ping` calls currently in flight, shared across cloned services (testing only).
+    ping_count: Arc<AtomicI64>,
 }
 
 impl Streamer {
@@ -39,6 +44,7 @@ impl Streamer {
             node,
             cache,
             network,
+            ping_count: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -413,10 +419,15 @@ impl CompactTxStreamer for Streamer {
         Ok(Response::new(Box::pin(stream)))
     }
 
-    async fn ping(&self, _request: Request<Duration>) -> Result<Response<PingResponse>, Status> {
-        Err(Status::unimplemented(
-            "ping: testing-only, implemented in P3",
-        ))
+    async fn ping(&self, request: Request<Duration>) -> Result<Response<PingResponse>, Status> {
+        let interval_us = request.into_inner().interval_us;
+        let entry = self.ping_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if interval_us > 0 {
+            tokio::time::sleep(std::time::Duration::from_micros(interval_us as u64)).await;
+        }
+        let exit = self.ping_count.load(Ordering::SeqCst);
+        self.ping_count.fetch_sub(1, Ordering::SeqCst);
+        Ok(Response::new(PingResponse { entry, exit }))
     }
 }
 
