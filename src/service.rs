@@ -16,12 +16,13 @@ use tonic::{Request, Response, Status};
 use crate::cache::{Cache, CacheError};
 use crate::encoding;
 use crate::fetch::{self, FetchError};
+use crate::filter;
 use crate::node::{self, NodeError, NodeRpc};
 use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
 use crate::proto::{
     Address, AddressList, Balance, BlockId, BlockRange, ChainSpec, CompactBlock, CompactTx,
     Duration, Empty, GetAddressUtxosArg, GetAddressUtxosReply, GetAddressUtxosReplyList,
-    GetMempoolTxRequest, GetSubtreeRootsArg, LightdInfo, PingResponse, PoolType, RawTransaction,
+    GetMempoolTxRequest, GetSubtreeRootsArg, LightdInfo, PingResponse, RawTransaction,
     SendResponse, SubtreeRoot, TransparentAddressBlockFilter, TreeState, TxFilter,
 };
 
@@ -112,28 +113,6 @@ impl From<CacheError> for Status {
     fn from(err: CacheError) -> Self {
         Status::internal(err.to_string())
     }
-}
-
-/// Prune a compact block to the requested value pools. An empty `pool_types` means the legacy default:
-/// shielded (Sapling + Orchard) data only, with transparent inputs/outputs stripped.
-fn filter_to_pools(mut block: CompactBlock, pool_types: &[i32]) -> CompactBlock {
-    let transparent = pool_types.contains(&(PoolType::Transparent as i32));
-    let sapling = pool_types.is_empty() || pool_types.contains(&(PoolType::Sapling as i32));
-    let orchard = pool_types.is_empty() || pool_types.contains(&(PoolType::Orchard as i32));
-    for tx in &mut block.vtx {
-        if !sapling {
-            tx.spends.clear();
-            tx.outputs.clear();
-        }
-        if !orchard {
-            tx.actions.clear();
-        }
-        if !transparent {
-            tx.vin.clear();
-            tx.vout.clear();
-        }
-    }
-    block
 }
 
 #[tonic::async_trait]
@@ -228,7 +207,7 @@ impl CompactTxStreamer for Streamer {
                     Some(block) => block,
                     None => fetch::compact_block(node.as_ref(), height).await?,
                 };
-                yield filter_to_pools(block, &pool_types);
+                yield filter::filter_block_to_pools(block, &pool_types);
             }
         };
         Ok(Response::new(Box::pin(stream)))
@@ -429,9 +408,6 @@ impl CompactTxStreamer for Streamer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{
-        CompactOrchardAction, CompactSaplingOutput, CompactSaplingSpend, CompactTxIn, TxOut,
-    };
     use crate::testutil::FakeNode;
     use serde_json::json;
 
@@ -651,36 +627,5 @@ mod tests {
             .into_inner();
 
         assert_eq!(response, Balance { value_zat: 4242 });
-    }
-
-    fn block_with_every_pool() -> CompactBlock {
-        let tx = CompactTx {
-            spends: vec![CompactSaplingSpend::default()],
-            outputs: vec![CompactSaplingOutput::default()],
-            actions: vec![CompactOrchardAction::default()],
-            vin: vec![CompactTxIn::default()],
-            vout: vec![TxOut::default()],
-            ..Default::default()
-        };
-        CompactBlock {
-            vtx: vec![tx],
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn empty_pool_types_keeps_shielded_and_strips_transparent() {
-        let block = filter_to_pools(block_with_every_pool(), &[]);
-        let tx = &block.vtx[0];
-        assert!(tx.vin.is_empty() && tx.vout.is_empty());
-        assert!(!tx.outputs.is_empty() && !tx.actions.is_empty() && !tx.spends.is_empty());
-    }
-
-    #[test]
-    fn transparent_only_strips_shielded() {
-        let block = filter_to_pools(block_with_every_pool(), &[PoolType::Transparent as i32]);
-        let tx = &block.vtx[0];
-        assert!(!tx.vin.is_empty() && !tx.vout.is_empty());
-        assert!(tx.spends.is_empty() && tx.outputs.is_empty() && tx.actions.is_empty());
     }
 }

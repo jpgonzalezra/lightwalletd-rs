@@ -9,6 +9,7 @@ mod compact;
 mod config;
 mod encoding;
 mod fetch;
+mod filter;
 mod ingestor;
 mod node;
 mod proto;
