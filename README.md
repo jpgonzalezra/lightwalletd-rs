@@ -14,12 +14,12 @@ into `CompactBlock`s (a pruned form with the zk proofs stripped out) and streams
 
 Under active development, built in vertical slices.
 
-- [x] F0 — Skeleton: gRPC server + JSON-RPC client, `GetLightdInfo` + `GetLatestBlock`
-- [x] F1 — Parser → `CompactBlock` → `GetBlock`
-- [x] F2 — Cache + ingestor + `GetBlockRange`
-- [ ] F3 — Proxies (send, tx, balance, utxos, treestate)
-- [ ] F4 — Mempool, subtrees, t-addr txns, nullifiers
-- [ ] F5 — Hardening (TLS, metrics, darkside, Docker)
+- [x] P0 — Skeleton: gRPC server + JSON-RPC client, `GetLightdInfo` + `GetLatestBlock`
+- [x] P1 — Parser → `CompactBlock` → `GetBlock`
+- [x] P2 — Cache + ingestor + `GetBlockRange`
+- [ ] P3 — Proxies (send, tx, balance, utxos, treestate)
+- [ ] P4 — Mempool, subtrees, t-addr txns, nullifiers
+- [ ] P5 — Hardening (TLS, metrics, darkside, Docker)
 
 ## Requirements
 

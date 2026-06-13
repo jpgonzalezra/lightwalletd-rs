@@ -36,14 +36,14 @@ The backend is **`zebrad`**. The connection is plain HTTP `POST` JSON-RPC (no TL
 
 | Path | Responsibility | Phase |
 |---|---|---|
-| `proto/` + `build.rs` + `src/proto.rs` | The `.proto` contract and the `tonic`/`prost` generated code. | F0 |
-| `src/config.rs` | Configuration: CLI flags + `zcash.conf` parsing. | F0 |
-| `src/node/` | JSON-RPC client to `zebrad`: a generic `raw_request` plus typed wrappers. | F0 |
-| `src/service.rs` | Implementation of the `CompactTxStreamer` gRPC service. | F0+ |
-| `src/compact.rs` | Raw block bytes → `CompactBlock`, via `librustzcash`. | F1 |
-| `src/fetch.rs` | Fetch a block from the node and assemble its `CompactBlock` (shared by `GetBlock` and the ingestor). | F2 |
-| `src/cache.rs` | On-disk compact-block store (`redb`). | F2 |
-| `src/ingestor.rs` | Background task that polls the node and fills the cache; reorg handling. | F2 |
+| `proto/` + `build.rs` + `src/proto.rs` | The `.proto` contract and the `tonic`/`prost` generated code. | P0 |
+| `src/config.rs` | Configuration: CLI flags + `zcash.conf` parsing. | P0 |
+| `src/node/` | JSON-RPC client to `zebrad`: a generic `raw_request` plus typed wrappers. | P0 |
+| `src/service.rs` | Implementation of the `CompactTxStreamer` gRPC service. | P0+ |
+| `src/compact.rs` | Raw block bytes → `CompactBlock`, via `librustzcash`. | P1 |
+| `src/fetch.rs` | Fetch a block from the node and assemble its `CompactBlock` (shared by `GetBlock` and the ingestor). | P2 |
+| `src/cache.rs` | On-disk compact-block store (`redb`). | P2 |
+| `src/ingestor.rs` | Background task that polls the node and fills the cache; reorg handling. | P2 |
 
 ## Method classification
 
@@ -123,12 +123,12 @@ stripped).
 
 ## Phase status
 
-- **F0 — Skeleton**: done. The gRPC server serves `GetLightdInfo` (from `getinfo` + `getblockchaininfo`)
+- **P0 — Skeleton**: done. The gRPC server serves `GetLightdInfo` (from `getinfo` + `getblockchaininfo`)
   and `GetLatestBlock` (from `getblockchaininfo`); the JSON-RPC client (`src/node`) and configuration
   (`src/config`) are in place.
-- **F1 — Parser & GetBlock**: done. `src/compact.rs` parses raw blocks into `CompactBlock`s, and `GetBlock`
+- **P1 — Parser & GetBlock**: done. `src/compact.rs` parses raw blocks into `CompactBlock`s, and `GetBlock`
   serves a block by height (verbose `getblock` for hash + tree sizes, raw `getblock` for the bytes). Lookup
   by hash is not yet supported.
-- **F2 — Cache, ingestor & GetBlockRange**: done. A `redb`-backed cache (`src/cache.rs`) is filled by a
+- **P2 — Cache, ingestor & GetBlockRange**: done. A `redb`-backed cache (`src/cache.rs`) is filled by a
   background ingestor (`src/ingestor.rs`); `GetBlock` and `GetBlockRange` serve from it (falling back to the
   node), and `GetBlockRange` streams with `poolTypes` filtering.

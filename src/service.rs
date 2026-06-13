@@ -147,7 +147,7 @@ impl CompactTxStreamer for Streamer {
         _request: Request<BlockId>,
     ) -> Result<Response<CompactBlock>, Status> {
         Err(Status::unimplemented(
-            "get_block_nullifiers: implemented in F4",
+            "get_block_nullifiers: implemented in P4",
         ))
     }
 
@@ -187,7 +187,7 @@ impl CompactTxStreamer for Streamer {
         _request: Request<BlockRange>,
     ) -> Result<Response<Self::GetBlockRangeNullifiersStream>, Status> {
         Err(Status::unimplemented(
-            "get_block_range_nullifiers: implemented in F4",
+            "get_block_range_nullifiers: implemented in P4",
         ))
     }
 
@@ -195,14 +195,14 @@ impl CompactTxStreamer for Streamer {
         &self,
         _request: Request<TxFilter>,
     ) -> Result<Response<RawTransaction>, Status> {
-        Err(Status::unimplemented("get_transaction: implemented in F3"))
+        Err(Status::unimplemented("get_transaction: implemented in P3"))
     }
 
     async fn send_transaction(
         &self,
         _request: Request<RawTransaction>,
     ) -> Result<Response<SendResponse>, Status> {
-        Err(Status::unimplemented("send_transaction: implemented in F3"))
+        Err(Status::unimplemented("send_transaction: implemented in P3"))
     }
 
     type GetTaddressTxidsStream = BoxStream<RawTransaction>;
@@ -211,7 +211,7 @@ impl CompactTxStreamer for Streamer {
         _request: Request<TransparentAddressBlockFilter>,
     ) -> Result<Response<Self::GetTaddressTxidsStream>, Status> {
         Err(Status::unimplemented(
-            "get_taddress_txids: implemented in F4",
+            "get_taddress_txids: implemented in P4",
         ))
     }
 
@@ -221,7 +221,7 @@ impl CompactTxStreamer for Streamer {
         _request: Request<TransparentAddressBlockFilter>,
     ) -> Result<Response<Self::GetTaddressTransactionsStream>, Status> {
         Err(Status::unimplemented(
-            "get_taddress_transactions: implemented in F4",
+            "get_taddress_transactions: implemented in P4",
         ))
     }
 
@@ -230,7 +230,7 @@ impl CompactTxStreamer for Streamer {
         _request: Request<AddressList>,
     ) -> Result<Response<Balance>, Status> {
         Err(Status::unimplemented(
-            "get_taddress_balance: implemented in F3",
+            "get_taddress_balance: implemented in P3",
         ))
     }
 
@@ -239,7 +239,7 @@ impl CompactTxStreamer for Streamer {
         _request: Request<tonic::Streaming<Address>>,
     ) -> Result<Response<Balance>, Status> {
         Err(Status::unimplemented(
-            "get_taddress_balance_stream: implemented in F3",
+            "get_taddress_balance_stream: implemented in P3",
         ))
     }
 
@@ -248,7 +248,7 @@ impl CompactTxStreamer for Streamer {
         &self,
         _request: Request<GetMempoolTxRequest>,
     ) -> Result<Response<Self::GetMempoolTxStream>, Status> {
-        Err(Status::unimplemented("get_mempool_tx: implemented in F4"))
+        Err(Status::unimplemented("get_mempool_tx: implemented in P4"))
     }
 
     type GetMempoolStreamStream = BoxStream<RawTransaction>;
@@ -257,7 +257,7 @@ impl CompactTxStreamer for Streamer {
         _request: Request<Empty>,
     ) -> Result<Response<Self::GetMempoolStreamStream>, Status> {
         Err(Status::unimplemented(
-            "get_mempool_stream: implemented in F4",
+            "get_mempool_stream: implemented in P4",
         ))
     }
 
@@ -265,7 +265,7 @@ impl CompactTxStreamer for Streamer {
         &self,
         _request: Request<BlockId>,
     ) -> Result<Response<TreeState>, Status> {
-        Err(Status::unimplemented("get_tree_state: implemented in F3"))
+        Err(Status::unimplemented("get_tree_state: implemented in P3"))
     }
 
     async fn get_latest_tree_state(
@@ -273,7 +273,7 @@ impl CompactTxStreamer for Streamer {
         _request: Request<Empty>,
     ) -> Result<Response<TreeState>, Status> {
         Err(Status::unimplemented(
-            "get_latest_tree_state: implemented in F3",
+            "get_latest_tree_state: implemented in P3",
         ))
     }
 
@@ -283,7 +283,7 @@ impl CompactTxStreamer for Streamer {
         _request: Request<GetSubtreeRootsArg>,
     ) -> Result<Response<Self::GetSubtreeRootsStream>, Status> {
         Err(Status::unimplemented(
-            "get_subtree_roots: implemented in F4",
+            "get_subtree_roots: implemented in P4",
         ))
     }
 
@@ -292,7 +292,7 @@ impl CompactTxStreamer for Streamer {
         _request: Request<GetAddressUtxosArg>,
     ) -> Result<Response<GetAddressUtxosReplyList>, Status> {
         Err(Status::unimplemented(
-            "get_address_utxos: implemented in F3",
+            "get_address_utxos: implemented in P3",
         ))
     }
 
@@ -302,13 +302,13 @@ impl CompactTxStreamer for Streamer {
         _request: Request<GetAddressUtxosArg>,
     ) -> Result<Response<Self::GetAddressUtxosStreamStream>, Status> {
         Err(Status::unimplemented(
-            "get_address_utxos_stream: implemented in F3",
+            "get_address_utxos_stream: implemented in P3",
         ))
     }
 
     async fn ping(&self, _request: Request<Duration>) -> Result<Response<PingResponse>, Status> {
         Err(Status::unimplemented(
-            "ping: testing-only, implemented in F3",
+            "ping: testing-only, implemented in P3",
         ))
     }
 }
