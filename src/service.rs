@@ -6,6 +6,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use async_stream::try_stream;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
@@ -16,7 +17,7 @@ use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
 use crate::proto::{
     Address, AddressList, Balance, BlockId, BlockRange, ChainSpec, CompactBlock, CompactTx,
     Duration, Empty, GetAddressUtxosArg, GetAddressUtxosReply, GetAddressUtxosReplyList,
-    GetMempoolTxRequest, GetSubtreeRootsArg, LightdInfo, PingResponse, RawTransaction,
+    GetMempoolTxRequest, GetSubtreeRootsArg, LightdInfo, PingResponse, PoolType, RawTransaction,
     SendResponse, SubtreeRoot, TransparentAddressBlockFilter, TreeState, TxFilter,
 };
 
@@ -56,6 +57,28 @@ impl From<CacheError> for Status {
     fn from(err: CacheError) -> Self {
         Status::internal(err.to_string())
     }
+}
+
+/// Prune a compact block to the requested value pools. An empty `pool_types` means the legacy default:
+/// shielded (Sapling + Orchard) data only, with transparent inputs/outputs stripped.
+fn filter_to_pools(mut block: CompactBlock, pool_types: &[i32]) -> CompactBlock {
+    let transparent = pool_types.contains(&(PoolType::Transparent as i32));
+    let sapling = pool_types.is_empty() || pool_types.contains(&(PoolType::Sapling as i32));
+    let orchard = pool_types.is_empty() || pool_types.contains(&(PoolType::Orchard as i32));
+    for tx in &mut block.vtx {
+        if !sapling {
+            tx.spends.clear();
+            tx.outputs.clear();
+        }
+        if !orchard {
+            tx.actions.clear();
+        }
+        if !transparent {
+            tx.vin.clear();
+            tx.vout.clear();
+        }
+    }
+    block
 }
 
 #[tonic::async_trait]
@@ -131,9 +154,31 @@ impl CompactTxStreamer for Streamer {
     type GetBlockRangeStream = BoxStream<CompactBlock>;
     async fn get_block_range(
         &self,
-        _request: Request<BlockRange>,
+        request: Request<BlockRange>,
     ) -> Result<Response<Self::GetBlockRangeStream>, Status> {
-        Err(Status::unimplemented("get_block_range: implemented in F2"))
+        let range = request.into_inner();
+        let start = range.start.map(|b| b.height).unwrap_or(0);
+        let end = range.end.map(|b| b.height).unwrap_or(0);
+        let pool_types = range.pool_types;
+        let node = self.node.clone();
+        let cache = self.cache.clone();
+
+        let stream = try_stream! {
+            // start <= end yields ascending heights; otherwise descending.
+            let heights: Vec<u64> = if start <= end {
+                (start..=end).collect()
+            } else {
+                (end..=start).rev().collect()
+            };
+            for height in heights {
+                let block = match cache.get(height)? {
+                    Some(block) => block,
+                    None => fetch::compact_block(&node, height).await?,
+                };
+                yield filter_to_pools(block, &pool_types);
+            }
+        };
+        Ok(Response::new(Box::pin(stream)))
     }
 
     type GetBlockRangeNullifiersStream = BoxStream<CompactBlock>;
@@ -265,5 +310,44 @@ impl CompactTxStreamer for Streamer {
         Err(Status::unimplemented(
             "ping: testing-only, implemented in F3",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::{
+        CompactOrchardAction, CompactSaplingOutput, CompactSaplingSpend, CompactTxIn, TxOut,
+    };
+
+    fn block_with_every_pool() -> CompactBlock {
+        let tx = CompactTx {
+            spends: vec![CompactSaplingSpend::default()],
+            outputs: vec![CompactSaplingOutput::default()],
+            actions: vec![CompactOrchardAction::default()],
+            vin: vec![CompactTxIn::default()],
+            vout: vec![TxOut::default()],
+            ..Default::default()
+        };
+        CompactBlock {
+            vtx: vec![tx],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_pool_types_keeps_shielded_and_strips_transparent() {
+        let block = filter_to_pools(block_with_every_pool(), &[]);
+        let tx = &block.vtx[0];
+        assert!(tx.vin.is_empty() && tx.vout.is_empty());
+        assert!(!tx.outputs.is_empty() && !tx.actions.is_empty() && !tx.spends.is_empty());
+    }
+
+    #[test]
+    fn transparent_only_strips_shielded() {
+        let block = filter_to_pools(block_with_every_pool(), &[PoolType::Transparent as i32]);
+        let tx = &block.vtx[0];
+        assert!(!tx.vin.is_empty() && !tx.vout.is_empty());
+        assert!(tx.spends.is_empty() && tx.outputs.is_empty() && tx.actions.is_empty());
     }
 }
