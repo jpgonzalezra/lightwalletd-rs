@@ -12,6 +12,8 @@ mod ingestor;
 mod node;
 mod proto;
 mod service;
+#[cfg(test)]
+mod testutil;
 
 use cache::Cache;
 use config::Cli;

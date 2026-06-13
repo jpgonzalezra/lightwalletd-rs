@@ -437,6 +437,226 @@ mod tests {
     use crate::proto::{
         CompactOrchardAction, CompactSaplingOutput, CompactSaplingSpend, CompactTxIn, TxOut,
     };
+    use crate::testutil::FakeNode;
+    use serde_json::json;
+
+    fn streamer_with(node: Arc<dyn NodeRpc>) -> (tempfile::TempDir, Streamer) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(Cache::open(&dir.path().join("blocks.redb")).unwrap());
+        (dir, Streamer::new(node, cache, "main".to_string()))
+    }
+
+    fn address_utxo(txid: &str, height: u64) -> node::AddressUtxo {
+        serde_json::from_value(json!({
+            "address": "t1",
+            "txid": txid,
+            "outputIndex": 2,
+            "script": "abcd",
+            "satoshis": 7,
+            "height": height,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_latest_block_reverses_display_hash_to_wire() {
+        let display_hash = "0011223344556677889900aabbccddeeff00112233445566778899aabbccddee";
+        let fake = Arc::new(FakeNode {
+            blockchain_info: Some(
+                serde_json::from_value(json!({
+                    "chain": "main",
+                    "blocks": 1000,
+                    "bestblockhash": display_hash,
+                    "consensus": { "chaintip": "00000000" },
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        });
+        let (_dir, streamer) = streamer_with(fake);
+
+        let response = streamer
+            .get_latest_block(Request::new(ChainSpec::default()))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mut wire = hex::decode(display_hash).unwrap();
+        wire.reverse();
+        assert_eq!(
+            response,
+            BlockId {
+                height: 1000,
+                hash: wire
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn get_transaction_reverses_filter_txid_and_maps_offchain_height() {
+        let fake = Arc::new(FakeNode {
+            raw_transaction: Some(
+                serde_json::from_value(json!({ "hex": "deadbeef", "height": -1 })).unwrap(),
+            ),
+            ..Default::default()
+        });
+        let (_dir, streamer) = streamer_with(fake.clone());
+
+        let wire_txid = vec![0xaa, 0xbb, 0xcc, 0xdd];
+        let response = streamer
+            .get_transaction(Request::new(TxFilter {
+                hash: wire_txid.clone(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // The node is called with the display-order (reversed) hex of the wire txid.
+        let mut display = wire_txid;
+        display.reverse();
+        assert_eq!(
+            *fake.requested_txid.lock().unwrap(),
+            Some(hex::encode(display))
+        );
+        assert_eq!(
+            response,
+            RawTransaction {
+                data: hex::decode("deadbeef").unwrap(),
+                height: u64::MAX,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn send_transaction_returns_txid_on_success() {
+        let fake = Arc::new(FakeNode {
+            send_ok: Some("txid-abc".to_string()),
+            ..Default::default()
+        });
+        let (_dir, streamer) = streamer_with(fake);
+
+        let response = streamer
+            .send_transaction(Request::new(RawTransaction {
+                data: vec![1, 2, 3],
+                height: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            response,
+            SendResponse {
+                error_code: 0,
+                error_message: "txid-abc".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn send_transaction_reports_node_rejection_in_band() {
+        let fake = Arc::new(FakeNode {
+            send_err: Some((-26, "tx rejected".to_string())),
+            ..Default::default()
+        });
+        let (_dir, streamer) = streamer_with(fake);
+
+        let response = streamer
+            .send_transaction(Request::new(RawTransaction {
+                data: vec![1, 2, 3],
+                height: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            response,
+            SendResponse {
+                error_code: -26,
+                error_message: "tx rejected".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_utxos_reverses_txid_and_applies_start_height_and_max_entries() {
+        let utxos = vec![
+            address_utxo("00112233", 100),
+            address_utxo("44556677", 200),
+            address_utxo("8899aabb", 300),
+        ];
+        let fake = Arc::new(FakeNode {
+            address_utxos: Some(utxos),
+            ..Default::default()
+        });
+        let (_dir, streamer) = streamer_with(fake);
+
+        let replies = streamer
+            .collect_utxos(&GetAddressUtxosArg {
+                addresses: vec!["t1".to_string()],
+                start_height: 150,
+                max_entries: 1,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            replies,
+            vec![GetAddressUtxosReply {
+                address: "t1".to_string(),
+                txid: vec![0x77, 0x66, 0x55, 0x44],
+                index: 2,
+                script: vec![0xab, 0xcd],
+                value_zat: 7,
+                height: 200,
+            }]
+        );
+    }
+
+    #[test]
+    fn to_tree_state_maps_final_state_per_pool() {
+        let tree_state: node::GetTreeState = serde_json::from_value(json!({
+            "hash": "abcd",
+            "height": 1234,
+            "time": 42,
+            "sapling": { "commitments": { "finalState": "aa" } },
+            "orchard": { "commitments": { "finalState": "bb" } },
+        }))
+        .unwrap();
+
+        assert_eq!(
+            to_tree_state("main", tree_state),
+            TreeState {
+                network: "main".to_string(),
+                height: 1234,
+                hash: "abcd".to_string(),
+                time: 42,
+                sapling_tree: "aa".to_string(),
+                orchard_tree: "bb".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn get_taddress_balance_returns_value_zat() {
+        let fake = Arc::new(FakeNode {
+            address_balance: Some(serde_json::from_value(json!({ "balance": 4242 })).unwrap()),
+            ..Default::default()
+        });
+        let (_dir, streamer) = streamer_with(fake);
+
+        let response = streamer
+            .get_taddress_balance(Request::new(AddressList {
+                addresses: vec!["t1".to_string()],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response, Balance { value_zat: 4242 });
+    }
 
     fn block_with_every_pool() -> CompactBlock {
         let tx = CompactTx {

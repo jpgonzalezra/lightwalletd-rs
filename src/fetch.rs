@@ -31,3 +31,36 @@ pub async fn compact_block(node: &dyn NodeRpc, height: u64) -> Result<CompactBlo
     }
     Ok(block)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    use crate::testutil::FakeNode;
+
+    #[tokio::test]
+    async fn compact_block_fills_tree_sizes_from_verbose() {
+        let json_text = std::fs::read_to_string("testdata/compact_blocks.json").unwrap();
+        let fixtures: Vec<serde_json::Value> = serde_json::from_str(&json_text).unwrap();
+        let raw = hex::decode(fixtures[0]["full"].as_str().unwrap()).unwrap();
+
+        let fake = FakeNode {
+            block_verbose: Some(
+                serde_json::from_value(json!({
+                    "hash": "00",
+                    "trees": { "sapling": { "size": 11 }, "orchard": { "size": 22 } },
+                }))
+                .unwrap(),
+            ),
+            block_raw: Some(raw),
+            ..Default::default()
+        };
+
+        let block = compact_block(&fake, 0).await.unwrap();
+        let meta = block.chain_metadata.unwrap();
+
+        assert_eq!(meta.sapling_commitment_tree_size, 11);
+        assert_eq!(meta.orchard_commitment_tree_size, 22);
+    }
+}

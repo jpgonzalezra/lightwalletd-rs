@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 /// Response of the `getinfo` RPC (only the fields we use).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetInfo {
     /// Node build string, e.g. `v2.4.0`.
     pub build: String,
@@ -16,7 +16,7 @@ pub struct GetInfo {
 }
 
 /// Response of the `getblockchaininfo` RPC (only the fields we use).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetBlockchainInfo {
     /// Network name: `main`, `test`, or `regtest`.
     pub chain: String,
@@ -35,14 +35,14 @@ pub struct GetBlockchainInfo {
 }
 
 /// Consensus branch IDs reported by `getblockchaininfo`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Consensus {
     /// Branch ID in effect at the chain tip.
     pub chaintip: String,
 }
 
 /// A single network upgrade entry from `getblockchaininfo`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Upgrade {
     /// Upgrade name, e.g. `Sapling`, `Orchard`.
     pub name: String,
@@ -51,7 +51,7 @@ pub struct Upgrade {
 }
 
 /// Response of the verbose (`verbosity = 1`) `getblock` RPC (only the fields we use).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetBlockVerbose {
     /// Block hash, big-endian hex (display order).
     pub hash: String,
@@ -61,7 +61,7 @@ pub struct GetBlockVerbose {
 }
 
 /// Note-commitment tree sizes reported by verbose `getblock`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Trees {
     /// Sapling tree.
     #[serde(default)]
@@ -72,7 +72,7 @@ pub struct Trees {
 }
 
 /// The `size` of a note-commitment tree.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TreeSize {
     /// Number of leaves in the tree as of the end of this block.
     #[serde(default)]
@@ -80,7 +80,7 @@ pub struct TreeSize {
 }
 
 /// Response of the verbose (`verbosity = 1`) `getrawtransaction` RPC (only the fields we use).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetRawTransaction {
     /// The raw transaction, hex-encoded.
     pub hex: String,
@@ -91,7 +91,7 @@ pub struct GetRawTransaction {
 }
 
 /// Response of the `z_gettreestate` RPC (only the fields we use).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetTreeState {
     /// Block hash, big-endian hex (display order).
     pub hash: String,
@@ -108,7 +108,7 @@ pub struct GetTreeState {
 }
 
 /// A shielded pool's tree state inside `z_gettreestate`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TreePool {
     /// Commitment tree data.
     #[serde(default)]
@@ -116,7 +116,7 @@ pub struct TreePool {
 }
 
 /// The commitment tree data of a shielded pool.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TreeCommitments {
     /// Hex-encoded serialized commitment tree as of this block.
     #[serde(default, rename = "finalState")]
@@ -124,14 +124,14 @@ pub struct TreeCommitments {
 }
 
 /// Response of the `getaddressbalance` RPC (only the fields we use).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetAddressBalance {
     /// Confirmed balance, in zatoshis.
     pub balance: i64,
 }
 
 /// One entry of the `getaddressutxos` RPC response.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AddressUtxo {
     /// The transparent address holding this UTXO.
     pub address: String,

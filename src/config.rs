@@ -166,4 +166,58 @@ mod tests {
             }
         );
     }
+
+    fn cli_with(
+        rpc_user: Option<&str>,
+        rpc_password: Option<&str>,
+        rpc_url: Option<&str>,
+        rpc_host: &str,
+        rpc_port: u16,
+        zcash_conf: Option<PathBuf>,
+    ) -> Cli {
+        Cli {
+            grpc_bind: "127.0.0.1:9067".parse().unwrap(),
+            rpc_url: rpc_url.map(str::to_string),
+            rpc_host: rpc_host.to_string(),
+            rpc_port,
+            rpc_user: rpc_user.map(str::to_string),
+            rpc_password: rpc_password.map(str::to_string),
+            zcash_conf,
+            data_dir: PathBuf::from("./data"),
+            start_height: None,
+        }
+    }
+
+    #[test]
+    fn resolve_prefers_explicit_flags_over_zcash_conf() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "rpcuser=fileuser\nrpcpassword=filepass\nrpcport=18232\n").unwrap();
+
+        let config = cli_with(
+            Some("flaguser"),
+            Some("flagpass"),
+            None,
+            "127.0.0.1",
+            8232,
+            Some(f.path().to_path_buf()),
+        )
+        .resolve()
+        .unwrap();
+
+        assert_eq!(config.node.user, "flaguser");
+        assert_eq!(config.node.password, "flagpass");
+        // No rpcbind in the file, so the host falls back to the flag; the port comes from the file.
+        assert_eq!(config.node.url, "http://127.0.0.1:18232");
+    }
+
+    #[test]
+    fn resolve_builds_url_from_host_and_port_when_rpc_url_absent() {
+        let config = cli_with(None, None, None, "192.168.0.5", 8232, None)
+            .resolve()
+            .unwrap();
+
+        assert_eq!(config.node.url, "http://192.168.0.5:8232");
+        assert_eq!(config.node.user, "");
+        assert_eq!(config.node.password, "");
+    }
 }

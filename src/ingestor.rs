@@ -68,3 +68,89 @@ enum StepError {
     #[error(transparent)]
     Cache(#[from] CacheError),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    use crate::proto::CompactBlock;
+    use crate::testutil::FakeNode;
+
+    fn temp_cache() -> (tempfile::TempDir, Cache) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(&dir.path().join("blocks.redb")).unwrap();
+        (dir, cache)
+    }
+
+    fn tip_block(height: u64, hash: Vec<u8>) -> CompactBlock {
+        CompactBlock {
+            height,
+            hash,
+            ..Default::default()
+        }
+    }
+
+    fn fixture_raw() -> Vec<u8> {
+        let json = std::fs::read_to_string("testdata/compact_blocks.json").unwrap();
+        let fixtures: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        hex::decode(fixtures[0]["full"].as_str().unwrap()).unwrap()
+    }
+
+    fn fake_serving(raw: Vec<u8>, tip: u64) -> FakeNode {
+        FakeNode {
+            block_count: Some(tip),
+            block_verbose: Some(
+                serde_json::from_value(json!({
+                    "hash": "00",
+                    "trees": { "sapling": { "size": 0 }, "orchard": { "size": 0 } },
+                }))
+                .unwrap(),
+            ),
+            block_raw: Some(raw),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn step_appends_block_that_chains_onto_the_cached_tip() {
+        let raw = fixture_raw();
+        let parsed = crate::compact::to_compact_block(&raw).unwrap();
+        let (_dir, cache) = temp_cache();
+        cache
+            .add(100, &tip_block(100, parsed.prev_hash.clone()))
+            .unwrap();
+
+        let advanced = step(&fake_serving(raw, 101), &cache, 100).await.unwrap();
+
+        assert!(advanced);
+        assert_eq!(cache.latest_height().unwrap(), Some(101));
+    }
+
+    #[tokio::test]
+    async fn step_is_idle_when_cache_is_at_the_tip() {
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &tip_block(100, vec![0u8; 32])).unwrap();
+
+        let fake = FakeNode {
+            block_count: Some(100),
+            ..Default::default()
+        };
+        let advanced = step(&fake, &cache, 100).await.unwrap();
+
+        assert!(!advanced);
+    }
+
+    #[tokio::test]
+    async fn step_rolls_back_one_block_when_prev_hash_does_not_chain() {
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &tip_block(100, vec![0xff; 32])).unwrap();
+
+        let advanced = step(&fake_serving(fixture_raw(), 101), &cache, 100)
+            .await
+            .unwrap();
+
+        assert!(advanced);
+        assert_eq!(cache.latest_height().unwrap(), None);
+    }
+}
