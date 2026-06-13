@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+### F2 — Cache, ingestor & GetBlockRange
+- `redb`-backed on-disk cache of compact blocks, keyed by height, with reorg rollback.
+- Background ingestor that polls the node, chains blocks by `prevHash`, and fills the cache.
+- `GetBlock` and `GetBlockRange` serve from the cache (falling back to the node); `GetBlockRange` streams
+  ascending or descending ranges and prunes each block to the requested `poolTypes`.
+- New flags: `--data-dir`, `--start-height`.
+
 ### F1 — Parser & GetBlock
 - Parse raw blocks into `CompactBlock`s via `librustzcash`, validated byte-for-byte against the golden
   fixtures in `testdata/compact_blocks.json`.

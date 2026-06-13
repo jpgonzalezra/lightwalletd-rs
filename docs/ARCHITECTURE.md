@@ -41,6 +41,7 @@ The backend is **`zebrad`**. The connection is plain HTTP `POST` JSON-RPC (no TL
 | `src/node/` | JSON-RPC client to `zebrad`: a generic `raw_request` plus typed wrappers. | F0 |
 | `src/service.rs` | Implementation of the `CompactTxStreamer` gRPC service. | F0+ |
 | `src/compact.rs` | Raw block bytes → `CompactBlock`, via `librustzcash`. | F1 |
+| `src/fetch.rs` | Fetch a block from the node and assemble its `CompactBlock` (shared by `GetBlock` and the ingestor). | F2 |
 | `src/cache.rs` | On-disk compact-block store (`redb`). | F2 |
 | `src/ingestor.rs` | Background task that polls the node and fills the cache; reorg handling. | F2 |
 
@@ -71,13 +72,23 @@ cargo run -- --rpc-url http://127.0.0.1:18232 --rpc-user USER --rpc-password PAS
 cargo run -- --zcash-conf ~/.zcash/zcash.conf
 ```
 
-The server listens on `--grpc-bind` (default `127.0.0.1:9067`). Probe it with `grpcurl`:
+On startup the server resolves the chain (which names the cache file under `--data-dir`) and the height to
+start ingesting from (`--start-height`, defaulting to Sapling activation), then spawns the ingestor and serves
+gRPC on `--grpc-bind` (default `127.0.0.1:9067`). For a quick run near the tip:
+
+```sh
+cargo run -- --rpc-url http://127.0.0.1:8232 --start-height 3375600 --data-dir /tmp/lwd-data
+```
+
+Probe it with `grpcurl`:
 
 ```sh
 grpcurl -plaintext 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
 grpcurl -plaintext 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLatestBlock
 grpcurl -plaintext -d '{"height": 419200}' 127.0.0.1:9067 \
   cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlock
+grpcurl -plaintext -d '{"start":{"height":3375690},"end":{"height":3375695}}' 127.0.0.1:9067 \
+  cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlockRange
 ```
 
 ## Block parsing
@@ -95,6 +106,21 @@ The parser is validated byte-for-byte against the golden fixtures in `testdata/c
 reference fixtures carry zeroed txids, so the test normalizes ours before comparing the rest of the
 structure, and asserts that a real txid is computed for every transaction).
 
+## Cache and ingestor
+
+The cache (`src/cache.rs`) is a `redb` table keyed by height; each value is a protobuf-encoded `CompactBlock`.
+Because the keys are ordered, the tip is cheap to read and a reorg is just "drop every height above N".
+
+The ingestor (`src/ingestor.rs`) runs as a background task. Each step asks the node for the tip height; if the
+cache is behind, it fetches the next block, checks that its `prevHash` chains onto the cached tip, and either
+appends it or — on a mismatch — rolls back one block and retries. When the cache reaches the tip it polls every
+couple of seconds. The cache persists across restarts, so the ingestor resumes from where it left off.
+
+`GetBlock` and `GetBlockRange` read from the cache and fall back to the node on a miss. `GetBlockRange` streams
+the range (ascending if `start <= end`, otherwise descending) and prunes each block to the requested
+`poolTypes` — an empty list means the legacy default of shielded-only data (transparent inputs/outputs
+stripped).
+
 ## Phase status
 
 - **F0 — Skeleton**: done. The gRPC server serves `GetLightdInfo` (from `getinfo` + `getblockchaininfo`)
@@ -103,3 +129,6 @@ structure, and asserts that a real txid is computed for every transaction).
 - **F1 — Parser & GetBlock**: done. `src/compact.rs` parses raw blocks into `CompactBlock`s, and `GetBlock`
   serves a block by height (verbose `getblock` for hash + tree sizes, raw `getblock` for the bytes). Lookup
   by hash is not yet supported.
+- **F2 — Cache, ingestor & GetBlockRange**: done. A `redb`-backed cache (`src/cache.rs`) is filled by a
+  background ingestor (`src/ingestor.rs`); `GetBlock` and `GetBlockRange` serve from it (falling back to the
+  node), and `GetBlockRange` streams with `poolTypes` filtering.
