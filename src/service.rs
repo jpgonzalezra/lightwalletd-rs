@@ -15,7 +15,7 @@ use tonic::{Request, Response, Status};
 
 use crate::cache::{Cache, CacheError};
 use crate::fetch::{self, FetchError};
-use crate::node::{self, NodeClient, NodeError};
+use crate::node::{self, NodeError, NodeRpc};
 use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
 use crate::proto::{
     Address, AddressList, Balance, BlockId, BlockRange, ChainSpec, CompactBlock, CompactTx,
@@ -30,7 +30,7 @@ type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 /// The gRPC service. Holds a client to the backend node, the block cache, and the network name.
 #[derive(Clone)]
 pub struct Streamer {
-    node: NodeClient,
+    node: Arc<dyn NodeRpc>,
     cache: Arc<Cache>,
     network: String,
     /// Number of `Ping` calls currently in flight, shared across cloned services (testing only).
@@ -39,7 +39,7 @@ pub struct Streamer {
 
 impl Streamer {
     /// Build the service from a node client, a shared block cache, and the network name.
-    pub fn new(node: NodeClient, cache: Arc<Cache>, network: String) -> Self {
+    pub fn new(node: Arc<dyn NodeRpc>, cache: Arc<Cache>, network: String) -> Self {
         Self {
             node,
             cache,
@@ -194,7 +194,7 @@ impl CompactTxStreamer for Streamer {
         if let Some(block) = self.cache.get(block_id.height)? {
             return Ok(Response::new(block));
         }
-        let block = fetch::compact_block(&self.node, block_id.height).await?;
+        let block = fetch::compact_block(self.node.as_ref(), block_id.height).await?;
         Ok(Response::new(block))
     }
 
@@ -229,7 +229,7 @@ impl CompactTxStreamer for Streamer {
             for height in heights {
                 let block = match cache.get(height)? {
                     Some(block) => block,
-                    None => fetch::compact_block(&node, height).await?,
+                    None => fetch::compact_block(node.as_ref(), height).await?,
                 };
                 yield filter_to_pools(block, &pool_types);
             }

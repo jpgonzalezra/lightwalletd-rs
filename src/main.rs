@@ -15,6 +15,7 @@ mod service;
 
 use cache::Cache;
 use config::Cli;
+use node::NodeRpc;
 use proto::compact_tx_streamer_server::CompactTxStreamerServer;
 
 #[tokio::main]
@@ -26,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Cli::parse().resolve()?;
-    let node = node::NodeClient::new(&config.node);
+    let node: Arc<dyn NodeRpc> = Arc::new(node::NodeClient::new(&config.node));
 
     // Query the chain once: its name keys the cache file, and its Sapling activation height is the
     // default place to start ingesting from.

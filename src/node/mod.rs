@@ -48,6 +48,37 @@ pub struct NodeClient {
     password: String,
 }
 
+/// The typed surface of the backend node's JSON-RPC API.
+///
+/// Abstracts [`NodeClient`] so the service, ingestor, and fetch logic can be tested against a fake.
+/// The generic `raw_request` stays inherent to `NodeClient`; only the typed wrappers belong to the trait.
+#[async_trait::async_trait]
+pub trait NodeRpc: Send + Sync {
+    /// Call `getinfo`.
+    async fn get_info(&self) -> Result<GetInfo, NodeError>;
+    /// Call `getblockchaininfo`.
+    async fn get_blockchain_info(&self) -> Result<GetBlockchainInfo, NodeError>;
+    /// Call `getblock <height> 1` (verbose) to obtain the block hash and tree sizes.
+    async fn get_block_verbose(&self, height: u64) -> Result<GetBlockVerbose, NodeError>;
+    /// Call `getblockcount` to get the height of the best chain tip.
+    async fn get_block_count(&self) -> Result<u64, NodeError>;
+    /// Call `getblock <hash> 0` (raw) and return the decoded block bytes.
+    async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError>;
+    /// Call `getrawtransaction <txid> 1` (verbose) for a transaction's bytes and mined height.
+    async fn get_raw_transaction(&self, txid: &str) -> Result<GetRawTransaction, NodeError>;
+    /// Call `sendrawtransaction <hex>` and return the resulting txid on success.
+    async fn send_raw_transaction(&self, hex: &str) -> Result<String, NodeError>;
+    /// Call `z_gettreestate <id>` for the note-commitment tree state, where `id` is a height or hash.
+    async fn get_treestate(&self, id: &str) -> Result<GetTreeState, NodeError>;
+    /// Call `getaddressbalance` for the combined balance of the given transparent addresses.
+    async fn get_address_balance(
+        &self,
+        addresses: &[String],
+    ) -> Result<GetAddressBalance, NodeError>;
+    /// Call `getaddressutxos` for the unspent outputs of the given transparent addresses.
+    async fn get_address_utxos(&self, addresses: &[String]) -> Result<Vec<AddressUtxo>, NodeError>;
+}
+
 impl NodeClient {
     /// Build a client from the resolved node configuration.
     pub fn new(config: &NodeConfig) -> Self {
@@ -89,39 +120,37 @@ impl NodeClient {
         }
         response.result.ok_or(NodeError::EmptyResult)
     }
+}
 
-    /// Call `getinfo`.
-    pub async fn get_info(&self) -> Result<GetInfo, NodeError> {
+#[async_trait::async_trait]
+impl NodeRpc for NodeClient {
+    async fn get_info(&self) -> Result<GetInfo, NodeError> {
         let value = self.raw_request("getinfo", serde_json::json!([])).await?;
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Call `getblockchaininfo`.
-    pub async fn get_blockchain_info(&self) -> Result<GetBlockchainInfo, NodeError> {
+    async fn get_blockchain_info(&self) -> Result<GetBlockchainInfo, NodeError> {
         let value = self
             .raw_request("getblockchaininfo", serde_json::json!([]))
             .await?;
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Call `getblock <height> 1` (verbose) to obtain the block hash and tree sizes.
-    pub async fn get_block_verbose(&self, height: u64) -> Result<GetBlockVerbose, NodeError> {
+    async fn get_block_verbose(&self, height: u64) -> Result<GetBlockVerbose, NodeError> {
         let value = self
             .raw_request("getblock", serde_json::json!([height.to_string(), 1]))
             .await?;
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Call `getblockcount` to get the height of the best chain tip.
-    pub async fn get_block_count(&self) -> Result<u64, NodeError> {
+    async fn get_block_count(&self) -> Result<u64, NodeError> {
         let value = self
             .raw_request("getblockcount", serde_json::json!([]))
             .await?;
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Call `getblock <hash> 0` (raw) and return the decoded block bytes.
-    pub async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {
+    async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {
         let value = self
             .raw_request("getblock", serde_json::json!([hash, 0]))
             .await?;
@@ -129,32 +158,28 @@ impl NodeClient {
         Ok(hex::decode(hex_str)?)
     }
 
-    /// Call `getrawtransaction <txid> 1` (verbose) for a transaction's bytes and mined height.
-    pub async fn get_raw_transaction(&self, txid: &str) -> Result<GetRawTransaction, NodeError> {
+    async fn get_raw_transaction(&self, txid: &str) -> Result<GetRawTransaction, NodeError> {
         let value = self
             .raw_request("getrawtransaction", serde_json::json!([txid, 1]))
             .await?;
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Call `sendrawtransaction <hex>` and return the resulting txid on success.
-    pub async fn send_raw_transaction(&self, hex: &str) -> Result<String, NodeError> {
+    async fn send_raw_transaction(&self, hex: &str) -> Result<String, NodeError> {
         let value = self
             .raw_request("sendrawtransaction", serde_json::json!([hex]))
             .await?;
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Call `z_gettreestate <id>` for the note-commitment tree state, where `id` is a height or hash.
-    pub async fn get_treestate(&self, id: &str) -> Result<GetTreeState, NodeError> {
+    async fn get_treestate(&self, id: &str) -> Result<GetTreeState, NodeError> {
         let value = self
             .raw_request("z_gettreestate", serde_json::json!([id]))
             .await?;
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Call `getaddressbalance` for the combined balance of the given transparent addresses.
-    pub async fn get_address_balance(
+    async fn get_address_balance(
         &self,
         addresses: &[String],
     ) -> Result<GetAddressBalance, NodeError> {
@@ -167,11 +192,7 @@ impl NodeClient {
         Ok(serde_json::from_value(value)?)
     }
 
-    /// Call `getaddressutxos` for the unspent outputs of the given transparent addresses.
-    pub async fn get_address_utxos(
-        &self,
-        addresses: &[String],
-    ) -> Result<Vec<AddressUtxo>, NodeError> {
+    async fn get_address_utxos(&self, addresses: &[String]) -> Result<Vec<AddressUtxo>, NodeError> {
         let value = self
             .raw_request(
                 "getaddressutxos",

@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use crate::cache::{Cache, CacheError};
 use crate::fetch::{self, FetchError};
-use crate::node::{NodeClient, NodeError};
+use crate::node::{NodeError, NodeRpc};
 
 /// Poll the node forever, appending new blocks to the cache and rolling back reorgs.
-pub async fn run(node: NodeClient, cache: Arc<Cache>, start_height: u64) {
+pub async fn run(node: Arc<dyn NodeRpc>, cache: Arc<Cache>, start_height: u64) {
     tracing::info!(start_height, "ingestor started");
     loop {
-        match step(&node, &cache, start_height).await {
+        match step(node.as_ref(), &cache, start_height).await {
             // Advanced one block (or handled a reorg): try the next one immediately.
             Ok(true) => {}
             // Cache is at the node's tip: wait before polling again.
@@ -29,7 +29,7 @@ pub async fn run(node: NodeClient, cache: Arc<Cache>, start_height: u64) {
 
 /// Try to ingest one block. Returns `Ok(true)` if a block was added or a reorg was rolled back,
 /// `Ok(false)` if the cache is already at the node's tip.
-async fn step(node: &NodeClient, cache: &Cache, start_height: u64) -> Result<bool, StepError> {
+async fn step(node: &dyn NodeRpc, cache: &Cache, start_height: u64) -> Result<bool, StepError> {
     let tip = node.get_block_count().await?;
     let next = match cache.latest_height()? {
         Some(height) => height + 1,

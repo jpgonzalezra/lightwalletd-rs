@@ -3,7 +3,7 @@
 //! Shared by `GetBlock` (on a cache miss) and the ingestor.
 
 use crate::compact::{self, ParseError};
-use crate::node::{NodeClient, NodeError};
+use crate::node::{NodeError, NodeRpc};
 use crate::proto::CompactBlock;
 
 /// Errors from fetching and parsing a block.
@@ -21,7 +21,7 @@ pub enum FetchError {
 ///
 /// The hash and tree sizes come from a verbose `getblock`; the bytes come from a raw `getblock` keyed by
 /// that hash, so both refer to the same block even across a reorg.
-pub async fn compact_block(node: &NodeClient, height: u64) -> Result<CompactBlock, FetchError> {
+pub async fn compact_block(node: &dyn NodeRpc, height: u64) -> Result<CompactBlock, FetchError> {
     let verbose = node.get_block_verbose(height).await?;
     let raw = node.get_block_raw(&verbose.hash).await?;
     let mut block = compact::to_compact_block(&raw)?;
