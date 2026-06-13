@@ -4,11 +4,13 @@
 //! `unimplemented` and is filled in by later phases.
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
-use crate::compact;
+use crate::cache::{Cache, CacheError};
+use crate::fetch::{self, FetchError};
 use crate::node::{NodeClient, NodeError};
 use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
 use crate::proto::{
@@ -21,22 +23,38 @@ use crate::proto::{
 /// Boxed server-streaming response, shared by every streaming method's associated type.
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
-/// The gRPC service. Holds a client to the backend node and (later) the block cache.
-#[derive(Debug, Clone)]
+/// The gRPC service. Holds a client to the backend node and the block cache.
+#[derive(Clone)]
 pub struct Streamer {
     node: NodeClient,
+    cache: Arc<Cache>,
 }
 
 impl Streamer {
-    /// Build the service from a node client.
-    pub fn new(node: NodeClient) -> Self {
-        Self { node }
+    /// Build the service from a node client and a shared block cache.
+    pub fn new(node: NodeClient, cache: Arc<Cache>) -> Self {
+        Self { node, cache }
     }
 }
 
 impl From<NodeError> for Status {
     fn from(err: NodeError) -> Self {
         Status::unavailable(err.to_string())
+    }
+}
+
+impl From<FetchError> for Status {
+    fn from(err: FetchError) -> Self {
+        match err {
+            FetchError::Node(e) => Status::unavailable(e.to_string()),
+            FetchError::Parse(e) => Status::internal(e.to_string()),
+        }
+    }
+}
+
+impl From<CacheError> for Status {
+    fn from(err: CacheError) -> Self {
+        Status::internal(err.to_string())
     }
 }
 
@@ -94,16 +112,10 @@ impl CompactTxStreamer for Streamer {
                 "get_block by hash is not yet supported",
             ));
         }
-        // Fetch the hash and tree sizes (verbose), then the raw bytes by hash so both calls refer to
-        // the same block even if a reorg happens between them.
-        let verbose = self.node.get_block_verbose(block_id.height).await?;
-        let raw = self.node.get_block_raw(&verbose.hash).await?;
-        let mut block = compact::to_compact_block(&raw)
-            .map_err(|e| Status::internal(format!("parsing block: {e}")))?;
-        if let Some(meta) = block.chain_metadata.as_mut() {
-            meta.sapling_commitment_tree_size = verbose.trees.sapling.size;
-            meta.orchard_commitment_tree_size = verbose.trees.orchard.size;
+        if let Some(block) = self.cache.get(block_id.height)? {
+            return Ok(Response::new(block));
         }
+        let block = fetch::compact_block(&self.node, block_id.height).await?;
         Ok(Response::new(block))
     }
 

@@ -39,6 +39,14 @@ pub struct Cli {
     /// Path to a `zcash.conf` to read `rpcuser`/`rpcpassword`/`rpcbind`/`rpcport` from.
     #[arg(long)]
     pub zcash_conf: Option<PathBuf>,
+
+    /// Directory for the on-disk block cache.
+    #[arg(long, default_value = "./lightwalletd-rs-data")]
+    pub data_dir: PathBuf,
+
+    /// Height to start ingesting from when the cache is empty (defaults to Sapling activation).
+    #[arg(long)]
+    pub start_height: Option<u64>,
 }
 
 /// Resolved runtime configuration.
@@ -48,6 +56,10 @@ pub struct Config {
     pub grpc_bind: SocketAddr,
     /// How to reach the backend node.
     pub node: NodeConfig,
+    /// Directory for the on-disk block cache.
+    pub data_dir: PathBuf,
+    /// Height to start ingesting from when the cache is empty.
+    pub start_height: Option<u64>,
 }
 
 /// How to reach the zebrad JSON-RPC endpoint.
@@ -88,6 +100,8 @@ impl Cli {
                 user,
                 password,
             },
+            data_dir: self.data_dir,
+            start_height: self.start_height,
         })
     }
 }

@@ -74,13 +74,6 @@ impl Cache {
         }
     }
 
-    /// The lowest cached height, or `None` if the cache is empty.
-    pub fn first_height(&self) -> Result<Option<u64>, CacheError> {
-        let txn = self.db.begin_read()?;
-        let table = txn.open_table(BLOCKS)?;
-        Ok(table.first()?.map(|(height, _)| height.value()))
-    }
-
     /// The highest cached height, or `None` if the cache is empty.
     pub fn latest_height(&self) -> Result<Option<u64>, CacheError> {
         let txn = self.db.begin_read()?;

@@ -109,6 +109,14 @@ impl NodeClient {
         Ok(serde_json::from_value(value)?)
     }
 
+    /// Call `getblockcount` to get the height of the best chain tip.
+    pub async fn get_block_count(&self) -> Result<u64, NodeError> {
+        let value = self
+            .raw_request("getblockcount", serde_json::json!([]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
     /// Call `getblock <hash> 0` (raw) and return the decoded block bytes.
     pub async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {
         let value = self
