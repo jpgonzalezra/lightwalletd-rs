@@ -14,6 +14,7 @@ use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
 use crate::cache::{Cache, CacheError};
+use crate::encoding;
 use crate::fetch::{self, FetchError};
 use crate::node::{self, NodeError, NodeRpc};
 use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
@@ -63,10 +64,8 @@ impl Streamer {
             if arg.max_entries > 0 && replies.len() as u32 >= arg.max_entries {
                 break;
             }
-            // The node gives the txid in display order; the wire format is protocol (little-endian).
-            let mut txid = hex::decode(&utxo.txid)
+            let txid = encoding::display_hex_to_wire(&utxo.txid)
                 .map_err(|e| Status::internal(format!("decoding utxo txid: {e}")))?;
-            txid.reverse();
             let script = hex::decode(&utxo.script)
                 .map_err(|e| Status::internal(format!("decoding utxo script: {e}")))?;
             replies.push(GetAddressUtxosReply {
@@ -144,10 +143,8 @@ impl CompactTxStreamer for Streamer {
         _request: Request<ChainSpec>,
     ) -> Result<Response<BlockId>, Status> {
         let info = self.node.get_blockchain_info().await?;
-        // zebrad reports the hash in big-endian (display) hex; the wire format is little-endian.
-        let mut hash = hex::decode(&info.bestblockhash)
+        let hash = encoding::display_hex_to_wire(&info.bestblockhash)
             .map_err(|e| Status::internal(format!("decoding best block hash: {e}")))?;
-        hash.reverse();
         Ok(Response::new(BlockId {
             height: info.blocks,
             hash,
@@ -257,10 +254,8 @@ impl CompactTxStreamer for Streamer {
                 "get_transaction requires a txid hash",
             ));
         }
-        // The filter hash is in protocol (little-endian) order; getrawtransaction wants display hex.
-        let mut txid = filter.hash;
-        txid.reverse();
-        let raw = self.node.get_raw_transaction(&hex::encode(txid)).await?;
+        let txid = encoding::wire_to_display_hex(&filter.hash);
+        let raw = self.node.get_raw_transaction(&txid).await?;
         let data = hex::decode(&raw.hex)
             .map_err(|e| Status::internal(format!("decoding transaction hex: {e}")))?;
         // A negative height means the tx is not on the main chain.

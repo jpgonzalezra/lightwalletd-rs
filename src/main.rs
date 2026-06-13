@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 mod cache;
 mod compact;
 mod config;
+mod encoding;
 mod fetch;
 mod ingestor;
 mod node;
