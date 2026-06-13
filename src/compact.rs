@@ -46,7 +46,7 @@ pub fn to_compact_block(raw: &[u8]) -> Result<CompactBlock, ParseError> {
     }
 
     let prev_hash = raw[4..36].to_vec();
-    let time = u32::from_le_bytes(raw[100..104].try_into().expect("4 bytes"));
+    let time = u32::from_le_bytes([raw[100], raw[101], raw[102], raw[103]]);
 
     // The solution length prefix sits right after the fixed header prefix; the header ends after it.
     let mut header_cursor = Cursor::new(&raw[HEADER_PREFIX_LEN..]);
