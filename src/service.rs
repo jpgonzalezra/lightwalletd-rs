@@ -176,11 +176,19 @@ impl CompactTxStreamer for Streamer {
 
     async fn get_block_nullifiers(
         &self,
-        _request: Request<BlockId>,
+        request: Request<BlockId>,
     ) -> Result<Response<CompactBlock>, Status> {
-        Err(Status::unimplemented(
-            "get_block_nullifiers: implemented in P4",
-        ))
+        let block_id = request.into_inner();
+        if !block_id.hash.is_empty() {
+            return Err(Status::unimplemented(
+                "get_block_nullifiers by hash is not yet supported",
+            ));
+        }
+        let block = match self.cache.get(block_id.height)? {
+            Some(block) => block,
+            None => fetch::compact_block(self.node.as_ref(), block_id.height).await?,
+        };
+        Ok(Response::new(filter::nullifiers_only(block)))
     }
 
     type GetBlockRangeStream = BoxStream<CompactBlock>;
@@ -216,11 +224,29 @@ impl CompactTxStreamer for Streamer {
     type GetBlockRangeNullifiersStream = BoxStream<CompactBlock>;
     async fn get_block_range_nullifiers(
         &self,
-        _request: Request<BlockRange>,
+        request: Request<BlockRange>,
     ) -> Result<Response<Self::GetBlockRangeNullifiersStream>, Status> {
-        Err(Status::unimplemented(
-            "get_block_range_nullifiers: implemented in P4",
-        ))
+        let range = request.into_inner();
+        let start = range.start.map(|b| b.height).unwrap_or(0);
+        let end = range.end.map(|b| b.height).unwrap_or(0);
+        let node = self.node.clone();
+        let cache = self.cache.clone();
+
+        let stream = try_stream! {
+            let heights: Vec<u64> = if start <= end {
+                (start..=end).collect()
+            } else {
+                (end..=start).rev().collect()
+            };
+            for height in heights {
+                let block = match cache.get(height)? {
+                    Some(block) => block,
+                    None => fetch::compact_block(node.as_ref(), height).await?,
+                };
+                yield filter::nullifiers_only(block);
+            }
+        };
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn get_transaction(

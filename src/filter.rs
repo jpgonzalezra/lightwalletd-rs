@@ -48,11 +48,33 @@ pub fn filter_tx_to_pools(tx: &mut CompactTx, pools: Pools) {
     }
 }
 
+/// Reduce a compact block to shielded nullifiers only: Sapling spend nullifiers and the nullifier of
+/// each Orchard action. Drops transparent data, Sapling outputs, the rest of every Orchard action,
+/// and the commitment tree sizes (`GetBlockNullifiers`/`GetBlockRangeNullifiers`).
+pub fn nullifiers_only(mut block: CompactBlock) -> CompactBlock {
+    if let Some(metadata) = block.chain_metadata.as_mut() {
+        metadata.sapling_commitment_tree_size = 0;
+        metadata.orchard_commitment_tree_size = 0;
+    }
+    for tx in &mut block.vtx {
+        tx.outputs.clear();
+        tx.vin.clear();
+        tx.vout.clear();
+        for action in &mut tx.actions {
+            action.cmx.clear();
+            action.ephemeral_key.clear();
+            action.ciphertext.clear();
+        }
+    }
+    block
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::proto::{
-        CompactOrchardAction, CompactSaplingOutput, CompactSaplingSpend, CompactTxIn, TxOut,
+        ChainMetadata, CompactOrchardAction, CompactSaplingOutput, CompactSaplingSpend,
+        CompactTxIn, TxOut,
     };
 
     fn block_with_every_pool() -> CompactBlock {
@@ -84,5 +106,33 @@ mod tests {
         let tx = &block.vtx[0];
         assert!(!tx.vin.is_empty() && !tx.vout.is_empty());
         assert!(tx.spends.is_empty() && tx.outputs.is_empty() && tx.actions.is_empty());
+    }
+
+    #[test]
+    fn nullifiers_only_keeps_nullifiers_and_drops_everything_else() {
+        let mut block = block_with_every_pool();
+        block.vtx[0].actions[0] = CompactOrchardAction {
+            nullifier: vec![1; 32],
+            cmx: vec![2; 32],
+            ephemeral_key: vec![3; 32],
+            ciphertext: vec![4; 52],
+        };
+        block.chain_metadata = Some(ChainMetadata {
+            sapling_commitment_tree_size: 99,
+            orchard_commitment_tree_size: 99,
+        });
+
+        let block = nullifiers_only(block);
+        let tx = &block.vtx[0];
+
+        // Kept: Sapling spend nullifiers and the Orchard action nullifier.
+        assert!(!tx.spends.is_empty());
+        assert_eq!(tx.actions[0].nullifier, vec![1; 32]);
+        // Dropped: outputs, transparent data, the rest of the action, and the tree sizes.
+        assert!(tx.outputs.is_empty() && tx.vin.is_empty() && tx.vout.is_empty());
+        assert!(tx.actions[0].cmx.is_empty() && tx.actions[0].ciphertext.is_empty());
+        let metadata = block.chain_metadata.unwrap();
+        assert_eq!(metadata.sapling_commitment_tree_size, 0);
+        assert_eq!(metadata.orchard_commitment_tree_size, 0);
     }
 }
