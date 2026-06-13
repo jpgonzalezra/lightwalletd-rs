@@ -41,6 +41,39 @@ impl Streamer {
             network,
         }
     }
+
+    /// Fetch the UTXOs for the requested addresses, apply the `startHeight`/`maxEntries` filters, and
+    /// convert them into the gRPC reply shape.
+    async fn collect_utxos(
+        &self,
+        arg: &GetAddressUtxosArg,
+    ) -> Result<Vec<GetAddressUtxosReply>, Status> {
+        let utxos = self.node.get_address_utxos(&arg.addresses).await?;
+        let mut replies = Vec::new();
+        for utxo in utxos {
+            if utxo.height < arg.start_height {
+                continue;
+            }
+            if arg.max_entries > 0 && replies.len() as u32 >= arg.max_entries {
+                break;
+            }
+            // The node gives the txid in display order; the wire format is protocol (little-endian).
+            let mut txid = hex::decode(&utxo.txid)
+                .map_err(|e| Status::internal(format!("decoding utxo txid: {e}")))?;
+            txid.reverse();
+            let script = hex::decode(&utxo.script)
+                .map_err(|e| Status::internal(format!("decoding utxo script: {e}")))?;
+            replies.push(GetAddressUtxosReply {
+                address: utxo.address,
+                txid,
+                index: utxo.output_index as i32,
+                script,
+                value_zat: utxo.satoshis as i64,
+                height: utxo.height,
+            });
+        }
+        Ok(replies)
+    }
 }
 
 /// Build the gRPC `TreeState` from a node `z_gettreestate` response and the network name.
@@ -278,20 +311,31 @@ impl CompactTxStreamer for Streamer {
 
     async fn get_taddress_balance(
         &self,
-        _request: Request<AddressList>,
+        request: Request<AddressList>,
     ) -> Result<Response<Balance>, Status> {
-        Err(Status::unimplemented(
-            "get_taddress_balance: implemented in P3",
-        ))
+        let address_list = request.into_inner();
+        let balance = self
+            .node
+            .get_address_balance(&address_list.addresses)
+            .await?;
+        Ok(Response::new(Balance {
+            value_zat: balance.balance,
+        }))
     }
 
     async fn get_taddress_balance_stream(
         &self,
-        _request: Request<tonic::Streaming<Address>>,
+        request: Request<tonic::Streaming<Address>>,
     ) -> Result<Response<Balance>, Status> {
-        Err(Status::unimplemented(
-            "get_taddress_balance_stream: implemented in P3",
-        ))
+        let mut incoming = request.into_inner();
+        let mut addresses = Vec::new();
+        while let Some(address) = incoming.message().await? {
+            addresses.push(address.address);
+        }
+        let balance = self.node.get_address_balance(&addresses).await?;
+        Ok(Response::new(Balance {
+            value_zat: balance.balance,
+        }))
     }
 
     type GetMempoolTxStream = BoxStream<CompactTx>;
@@ -353,21 +397,20 @@ impl CompactTxStreamer for Streamer {
 
     async fn get_address_utxos(
         &self,
-        _request: Request<GetAddressUtxosArg>,
+        request: Request<GetAddressUtxosArg>,
     ) -> Result<Response<GetAddressUtxosReplyList>, Status> {
-        Err(Status::unimplemented(
-            "get_address_utxos: implemented in P3",
-        ))
+        let address_utxos = self.collect_utxos(&request.into_inner()).await?;
+        Ok(Response::new(GetAddressUtxosReplyList { address_utxos }))
     }
 
     type GetAddressUtxosStreamStream = BoxStream<GetAddressUtxosReply>;
     async fn get_address_utxos_stream(
         &self,
-        _request: Request<GetAddressUtxosArg>,
+        request: Request<GetAddressUtxosArg>,
     ) -> Result<Response<Self::GetAddressUtxosStreamStream>, Status> {
-        Err(Status::unimplemented(
-            "get_address_utxos_stream: implemented in P3",
-        ))
+        let replies = self.collect_utxos(&request.into_inner()).await?;
+        let stream = tokio_stream::iter(replies.into_iter().map(Ok));
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn ping(&self, _request: Request<Duration>) -> Result<Response<PingResponse>, Status> {

@@ -122,3 +122,28 @@ pub struct TreeCommitments {
     #[serde(default, rename = "finalState")]
     pub final_state: String,
 }
+
+/// Response of the `getaddressbalance` RPC (only the fields we use).
+#[derive(Debug, Deserialize)]
+pub struct GetAddressBalance {
+    /// Confirmed balance, in zatoshis.
+    pub balance: i64,
+}
+
+/// One entry of the `getaddressutxos` RPC response.
+#[derive(Debug, Deserialize)]
+pub struct AddressUtxo {
+    /// The transparent address holding this UTXO.
+    pub address: String,
+    /// Transaction ID, big-endian hex (display order).
+    pub txid: String,
+    /// Index of the output within its transaction.
+    #[serde(rename = "outputIndex")]
+    pub output_index: i64,
+    /// Output script, hex-encoded.
+    pub script: String,
+    /// Output value, in zatoshis.
+    pub satoshis: u64,
+    /// Block height the output was mined at.
+    pub height: u64,
+}

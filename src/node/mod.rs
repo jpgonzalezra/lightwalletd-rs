@@ -5,7 +5,10 @@
 
 mod types;
 
-pub use types::{GetBlockVerbose, GetBlockchainInfo, GetInfo, GetRawTransaction, GetTreeState};
+pub use types::{
+    AddressUtxo, GetAddressBalance, GetBlockVerbose, GetBlockchainInfo, GetInfo, GetRawTransaction,
+    GetTreeState,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -146,6 +149,34 @@ impl NodeClient {
     pub async fn get_treestate(&self, id: &str) -> Result<GetTreeState, NodeError> {
         let value = self
             .raw_request("z_gettreestate", serde_json::json!([id]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Call `getaddressbalance` for the combined balance of the given transparent addresses.
+    pub async fn get_address_balance(
+        &self,
+        addresses: &[String],
+    ) -> Result<GetAddressBalance, NodeError> {
+        let value = self
+            .raw_request(
+                "getaddressbalance",
+                serde_json::json!([{ "addresses": addresses }]),
+            )
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Call `getaddressutxos` for the unspent outputs of the given transparent addresses.
+    pub async fn get_address_utxos(
+        &self,
+        addresses: &[String],
+    ) -> Result<Vec<AddressUtxo>, NodeError> {
+        let value = self
+            .raw_request(
+                "getaddressutxos",
+                serde_json::json!([{ "addresses": addresses }]),
+            )
             .await?;
         Ok(serde_json::from_value(value)?)
     }
