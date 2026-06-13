@@ -5,7 +5,7 @@
 
 mod types;
 
-pub use types::{GetBlockVerbose, GetBlockchainInfo, GetInfo};
+pub use types::{GetBlockVerbose, GetBlockchainInfo, GetInfo, GetRawTransaction};
 
 use serde::{Deserialize, Serialize};
 
@@ -124,6 +124,22 @@ impl NodeClient {
             .await?;
         let hex_str: String = serde_json::from_value(value)?;
         Ok(hex::decode(hex_str)?)
+    }
+
+    /// Call `getrawtransaction <txid> 1` (verbose) for a transaction's bytes and mined height.
+    pub async fn get_raw_transaction(&self, txid: &str) -> Result<GetRawTransaction, NodeError> {
+        let value = self
+            .raw_request("getrawtransaction", serde_json::json!([txid, 1]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Call `sendrawtransaction <hex>` and return the resulting txid on success.
+    pub async fn send_raw_transaction(&self, hex: &str) -> Result<String, NodeError> {
+        let value = self
+            .raw_request("sendrawtransaction", serde_json::json!([hex]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
     }
 }
 

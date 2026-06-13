@@ -193,16 +193,50 @@ impl CompactTxStreamer for Streamer {
 
     async fn get_transaction(
         &self,
-        _request: Request<TxFilter>,
+        request: Request<TxFilter>,
     ) -> Result<Response<RawTransaction>, Status> {
-        Err(Status::unimplemented("get_transaction: implemented in P3"))
+        let filter = request.into_inner();
+        if filter.hash.is_empty() {
+            return Err(Status::unimplemented(
+                "get_transaction requires a txid hash",
+            ));
+        }
+        // The filter hash is in protocol (little-endian) order; getrawtransaction wants display hex.
+        let mut txid = filter.hash;
+        txid.reverse();
+        let raw = self.node.get_raw_transaction(&hex::encode(txid)).await?;
+        let data = hex::decode(&raw.hex)
+            .map_err(|e| Status::internal(format!("decoding transaction hex: {e}")))?;
+        // A negative height means the tx is not on the main chain.
+        let height = if raw.height < 0 {
+            u64::MAX
+        } else {
+            raw.height as u64
+        };
+        Ok(Response::new(RawTransaction { data, height }))
     }
 
     async fn send_transaction(
         &self,
-        _request: Request<RawTransaction>,
+        request: Request<RawTransaction>,
     ) -> Result<Response<SendResponse>, Status> {
-        Err(Status::unimplemented("send_transaction: implemented in P3"))
+        let raw = request.into_inner();
+        match self
+            .node
+            .send_raw_transaction(&hex::encode(&raw.data))
+            .await
+        {
+            Ok(txid) => Ok(Response::new(SendResponse {
+                error_code: 0,
+                error_message: txid,
+            })),
+            // A node-side rejection is reported in-band in the SendResponse, not as a gRPC error.
+            Err(NodeError::Rpc { code, message }) => Ok(Response::new(SendResponse {
+                error_code: code as i32,
+                error_message: message,
+            })),
+            Err(other) => Err(other.into()),
+        }
     }
 
     type GetTaddressTxidsStream = BoxStream<RawTransaction>;

@@ -78,3 +78,14 @@ pub struct TreeSize {
     #[serde(default)]
     pub size: u32,
 }
+
+/// Response of the verbose (`verbosity = 1`) `getrawtransaction` RPC (only the fields we use).
+#[derive(Debug, Deserialize)]
+pub struct GetRawTransaction {
+    /// The raw transaction, hex-encoded.
+    pub hex: String,
+    /// Block height the tx was mined at; `-1` if it is in the index but not on the main chain, and
+    /// absent (defaulting to `0`) for a mempool transaction.
+    #[serde(default)]
+    pub height: i64,
+}
