@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(ingestor::run(node.clone(), cache.clone(), start_height));
 
-    let streamer = service::Streamer::new(node, cache);
+    let streamer = service::Streamer::new(node, cache, chain_info.chain);
     Server::builder()
         .add_service(CompactTxStreamerServer::new(streamer))
         .serve(config.grpc_bind)

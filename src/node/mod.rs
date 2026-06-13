@@ -5,7 +5,7 @@
 
 mod types;
 
-pub use types::{GetBlockVerbose, GetBlockchainInfo, GetInfo, GetRawTransaction};
+pub use types::{GetBlockVerbose, GetBlockchainInfo, GetInfo, GetRawTransaction, GetTreeState};
 
 use serde::{Deserialize, Serialize};
 
@@ -138,6 +138,14 @@ impl NodeClient {
     pub async fn send_raw_transaction(&self, hex: &str) -> Result<String, NodeError> {
         let value = self
             .raw_request("sendrawtransaction", serde_json::json!([hex]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Call `z_gettreestate <id>` for the note-commitment tree state, where `id` is a height or hash.
+    pub async fn get_treestate(&self, id: &str) -> Result<GetTreeState, NodeError> {
+        let value = self
+            .raw_request("z_gettreestate", serde_json::json!([id]))
             .await?;
         Ok(serde_json::from_value(value)?)
     }

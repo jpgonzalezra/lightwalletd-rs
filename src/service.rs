@@ -12,7 +12,7 @@ use tonic::{Request, Response, Status};
 
 use crate::cache::{Cache, CacheError};
 use crate::fetch::{self, FetchError};
-use crate::node::{NodeClient, NodeError};
+use crate::node::{self, NodeClient, NodeError};
 use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
 use crate::proto::{
     Address, AddressList, Balance, BlockId, BlockRange, ChainSpec, CompactBlock, CompactTx,
@@ -24,17 +24,34 @@ use crate::proto::{
 /// Boxed server-streaming response, shared by every streaming method's associated type.
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
-/// The gRPC service. Holds a client to the backend node and the block cache.
+/// The gRPC service. Holds a client to the backend node, the block cache, and the network name.
 #[derive(Clone)]
 pub struct Streamer {
     node: NodeClient,
     cache: Arc<Cache>,
+    network: String,
 }
 
 impl Streamer {
-    /// Build the service from a node client and a shared block cache.
-    pub fn new(node: NodeClient, cache: Arc<Cache>) -> Self {
-        Self { node, cache }
+    /// Build the service from a node client, a shared block cache, and the network name.
+    pub fn new(node: NodeClient, cache: Arc<Cache>, network: String) -> Self {
+        Self {
+            node,
+            cache,
+            network,
+        }
+    }
+}
+
+/// Build the gRPC `TreeState` from a node `z_gettreestate` response and the network name.
+fn to_tree_state(network: &str, tree_state: node::GetTreeState) -> TreeState {
+    TreeState {
+        network: network.to_string(),
+        height: tree_state.height,
+        hash: tree_state.hash,
+        time: tree_state.time,
+        sapling_tree: tree_state.sapling.commitments.final_state,
+        orchard_tree: tree_state.orchard.commitments.final_state,
     }
 }
 
@@ -297,18 +314,31 @@ impl CompactTxStreamer for Streamer {
 
     async fn get_tree_state(
         &self,
-        _request: Request<BlockId>,
+        request: Request<BlockId>,
     ) -> Result<Response<TreeState>, Status> {
-        Err(Status::unimplemented("get_tree_state: implemented in P3"))
+        let block_id = request.into_inner();
+        if !block_id.hash.is_empty() {
+            return Err(Status::unimplemented(
+                "get_tree_state by hash is not yet supported",
+            ));
+        }
+        let tree_state = self
+            .node
+            .get_treestate(&block_id.height.to_string())
+            .await?;
+        Ok(Response::new(to_tree_state(&self.network, tree_state)))
     }
 
     async fn get_latest_tree_state(
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<TreeState>, Status> {
-        Err(Status::unimplemented(
-            "get_latest_tree_state: implemented in P3",
-        ))
+        let chain_info = self.node.get_blockchain_info().await?;
+        let tree_state = self
+            .node
+            .get_treestate(&chain_info.blocks.to_string())
+            .await?;
+        Ok(Response::new(to_tree_state(&self.network, tree_state)))
     }
 
     type GetSubtreeRootsStream = BoxStream<SubtreeRoot>;

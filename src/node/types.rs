@@ -89,3 +89,36 @@ pub struct GetRawTransaction {
     #[serde(default)]
     pub height: i64,
 }
+
+/// Response of the `z_gettreestate` RPC (only the fields we use).
+#[derive(Debug, Deserialize)]
+pub struct GetTreeState {
+    /// Block hash, big-endian hex (display order).
+    pub hash: String,
+    /// Block height.
+    pub height: u64,
+    /// Unix epoch time the block was mined.
+    pub time: u32,
+    /// Sapling note-commitment tree.
+    #[serde(default)]
+    pub sapling: TreePool,
+    /// Orchard note-commitment tree.
+    #[serde(default)]
+    pub orchard: TreePool,
+}
+
+/// A shielded pool's tree state inside `z_gettreestate`.
+#[derive(Debug, Default, Deserialize)]
+pub struct TreePool {
+    /// Commitment tree data.
+    #[serde(default)]
+    pub commitments: TreeCommitments,
+}
+
+/// The commitment tree data of a shielded pool.
+#[derive(Debug, Default, Deserialize)]
+pub struct TreeCommitments {
+    /// Hex-encoded serialized commitment tree as of this block.
+    #[serde(default, rename = "finalState")]
+    pub final_state: String,
+}
