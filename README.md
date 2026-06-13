@@ -17,7 +17,7 @@ Under active development, built in vertical slices.
 - [x] P0 — Skeleton: gRPC server + JSON-RPC client, `GetLightdInfo` + `GetLatestBlock`
 - [x] P1 — Parser → `CompactBlock` → `GetBlock`
 - [x] P2 — Cache + ingestor + `GetBlockRange`
-- [ ] P3 — Proxies (send, tx, balance, utxos, treestate)
+- [x] P3 — Proxies (send, tx, balance, utxos, treestate)
 - [ ] P4 — Mempool, subtrees, t-addr txns, nullifiers
 - [ ] P5 — Hardening (TLS, metrics, darkside, Docker)
 

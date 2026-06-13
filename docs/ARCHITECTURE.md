@@ -132,3 +132,5 @@ stripped).
 - **P2 — Cache, ingestor & GetBlockRange**: done. A `redb`-backed cache (`src/cache.rs`) is filled by a
   background ingestor (`src/ingestor.rs`); `GetBlock` and `GetBlockRange` serve from it (falling back to the
   node), and `GetBlockRange` streams with `poolTypes` filtering.
+- **P3 — Proxies**: done. `GetTransaction`, `SendTransaction`, `GetTreeState`/`GetLatestTreeState`,
+  `GetTaddressBalance(+Stream)`, `GetAddressUtxos(+Stream)`, and `Ping` translate a single node RPC each.

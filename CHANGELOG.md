@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+### P3 — Proxies
+- `GetTransaction` and `SendTransaction` (with node rejections reported in-band in the `SendResponse`).
+- `GetTreeState` and `GetLatestTreeState`.
+- `GetTaddressBalance(+Stream)` and `GetAddressUtxos(+Stream)`, with `startHeight`/`maxEntries` filtering.
+- `Ping` (testing only).
+
 ### P2 — Cache, ingestor & GetBlockRange
 - `redb`-backed on-disk cache of compact blocks, keyed by height, with reorg rollback.
 - Background ingestor that polls the node, chains blocks by `prevHash`, and fills the cache.
