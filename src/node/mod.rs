@@ -120,86 +120,77 @@ impl NodeClient {
         }
         response.result.ok_or(NodeError::EmptyResult)
     }
+
+    /// Issue a JSON-RPC call and deserialize its `result` into `T`.
+    async fn request<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, NodeError> {
+        let value = self.raw_request(method, params).await?;
+        Ok(serde_json::from_value(value)?)
+    }
 }
 
 #[async_trait::async_trait]
 impl NodeRpc for NodeClient {
     async fn get_info(&self) -> Result<GetInfo, NodeError> {
-        let value = self.raw_request("getinfo", serde_json::json!([])).await?;
-        Ok(serde_json::from_value(value)?)
+        self.request("getinfo", serde_json::json!([])).await
     }
 
     async fn get_blockchain_info(&self) -> Result<GetBlockchainInfo, NodeError> {
-        let value = self
-            .raw_request("getblockchaininfo", serde_json::json!([]))
-            .await?;
-        Ok(serde_json::from_value(value)?)
+        self.request("getblockchaininfo", serde_json::json!([]))
+            .await
     }
 
     async fn get_block_verbose(&self, height: u64) -> Result<GetBlockVerbose, NodeError> {
-        let value = self
-            .raw_request("getblock", serde_json::json!([height.to_string(), 1]))
-            .await?;
-        Ok(serde_json::from_value(value)?)
+        self.request("getblock", serde_json::json!([height.to_string(), 1]))
+            .await
     }
 
     async fn get_block_count(&self) -> Result<u64, NodeError> {
-        let value = self
-            .raw_request("getblockcount", serde_json::json!([]))
-            .await?;
-        Ok(serde_json::from_value(value)?)
+        self.request("getblockcount", serde_json::json!([])).await
     }
 
     async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {
-        let value = self
-            .raw_request("getblock", serde_json::json!([hash, 0]))
+        let hex_str: String = self
+            .request("getblock", serde_json::json!([hash, 0]))
             .await?;
-        let hex_str: String = serde_json::from_value(value)?;
         Ok(hex::decode(hex_str)?)
     }
 
     async fn get_raw_transaction(&self, txid: &str) -> Result<GetRawTransaction, NodeError> {
-        let value = self
-            .raw_request("getrawtransaction", serde_json::json!([txid, 1]))
-            .await?;
-        Ok(serde_json::from_value(value)?)
+        self.request("getrawtransaction", serde_json::json!([txid, 1]))
+            .await
     }
 
     async fn send_raw_transaction(&self, hex: &str) -> Result<String, NodeError> {
-        let value = self
-            .raw_request("sendrawtransaction", serde_json::json!([hex]))
-            .await?;
-        Ok(serde_json::from_value(value)?)
+        self.request("sendrawtransaction", serde_json::json!([hex]))
+            .await
     }
 
     async fn get_treestate(&self, id: &str) -> Result<GetTreeState, NodeError> {
-        let value = self
-            .raw_request("z_gettreestate", serde_json::json!([id]))
-            .await?;
-        Ok(serde_json::from_value(value)?)
+        self.request("z_gettreestate", serde_json::json!([id]))
+            .await
     }
 
     async fn get_address_balance(
         &self,
         addresses: &[String],
     ) -> Result<GetAddressBalance, NodeError> {
-        let value = self
-            .raw_request(
-                "getaddressbalance",
-                serde_json::json!([{ "addresses": addresses }]),
-            )
-            .await?;
-        Ok(serde_json::from_value(value)?)
+        self.request(
+            "getaddressbalance",
+            serde_json::json!([{ "addresses": addresses }]),
+        )
+        .await
     }
 
     async fn get_address_utxos(&self, addresses: &[String]) -> Result<Vec<AddressUtxo>, NodeError> {
-        let value = self
-            .raw_request(
-                "getaddressutxos",
-                serde_json::json!([{ "addresses": addresses }]),
-            )
-            .await?;
-        Ok(serde_json::from_value(value)?)
+        self.request(
+            "getaddressutxos",
+            serde_json::json!([{ "addresses": addresses }]),
+        )
+        .await
     }
 }
 
@@ -224,4 +215,104 @@ struct RpcResponse {
 struct RpcErrorObject {
     code: i64,
     message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{header, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn client_for(server: &MockServer) -> NodeClient {
+        NodeClient::new(&NodeConfig {
+            url: server.uri(),
+            user: "rpcuser".to_string(),
+            password: "rpcpass".to_string(),
+        })
+    }
+
+    async fn mock_response(body: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn raw_request_returns_the_result_value() {
+        let server = mock_response(serde_json::json!({ "result": { "foo": 1 } })).await;
+        let value = client_for(&server)
+            .raw_request("anything", serde_json::json!([]))
+            .await
+            .unwrap();
+        assert_eq!(value, serde_json::json!({ "foo": 1 }));
+    }
+
+    #[tokio::test]
+    async fn raw_request_maps_jsonrpc_error_to_rpc_variant() {
+        let server = mock_response(
+            serde_json::json!({ "error": { "code": -8, "message": "out of range" } }),
+        )
+        .await;
+        let error = client_for(&server)
+            .raw_request("getblock", serde_json::json!([]))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, NodeError::Rpc { code: -8, message } if message == "out of range"));
+    }
+
+    #[tokio::test]
+    async fn raw_request_without_result_or_error_is_empty_result() {
+        let server = mock_response(serde_json::json!({ "id": "lwd" })).await;
+        let error = client_for(&server)
+            .raw_request("getinfo", serde_json::json!([]))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, NodeError::EmptyResult));
+    }
+
+    #[tokio::test]
+    async fn raw_request_sends_the_basic_auth_header() {
+        let server = MockServer::start().await;
+        // Mounted with the expected `Authorization` header; a mismatch yields a 404 and fails below.
+        Mock::given(method("POST"))
+            .and(header("authorization", "Basic cnBjdXNlcjpycGNwYXNz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": "ok",
+            })))
+            .mount(&server)
+            .await;
+        let value = client_for(&server)
+            .raw_request("getinfo", serde_json::json!([]))
+            .await
+            .unwrap();
+        assert_eq!(value, serde_json::json!("ok"));
+    }
+
+    #[tokio::test]
+    async fn get_blockchain_info_deserializes_the_typed_response() {
+        let server = mock_response(serde_json::json!({
+            "result": {
+                "chain": "main",
+                "blocks": 12345,
+                "bestblockhash": "abcd",
+                "consensus": { "chaintip": "5437f330" },
+            },
+        }))
+        .await;
+        let info = client_for(&server).get_blockchain_info().await.unwrap();
+        assert_eq!(info.chain, "main");
+        assert_eq!(info.blocks, 12345);
+        assert_eq!(info.bestblockhash, "abcd");
+        assert_eq!(info.consensus.chaintip, "5437f330");
+    }
+
+    #[tokio::test]
+    async fn get_block_raw_hex_decodes_the_result() {
+        let server = mock_response(serde_json::json!({ "result": "deadbeef" })).await;
+        let bytes = client_for(&server).get_block_raw("somehash").await.unwrap();
+        assert_eq!(bytes, vec![0xde, 0xad, 0xbe, 0xef]);
+    }
 }

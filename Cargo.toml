@@ -31,3 +31,4 @@ tonic-prost-build = "0.14.6"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+wiremock = "0.6"
