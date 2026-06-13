@@ -1,7 +1,8 @@
 //! JSON-RPC client for the backend zebrad node.
 //!
-//! Exposes a generic [`NodeClient::raw_request`] plus typed wrappers for the specific RPCs the
-//! service needs. The transport is plain HTTP `POST` with HTTP Basic auth.
+//! The [`NodeRpc`] trait is the typed RPC surface the service, ingestor, and fetch depend on;
+//! [`NodeClient`] implements it over a generic [`NodeClient::raw_request`]. The transport is plain HTTP
+//! `POST` with HTTP Basic auth.
 
 mod types;
 

@@ -38,9 +38,11 @@ The backend is **`zebrad`**. The connection is plain HTTP `POST` JSON-RPC (no TL
 |---|---|---|
 | `proto/` + `build.rs` + `src/proto.rs` | The `.proto` contract and the `tonic`/`prost` generated code. | P0 |
 | `src/config.rs` | Configuration: CLI flags + `zcash.conf` parsing. | P0 |
-| `src/node/` | JSON-RPC client to `zebrad`: a generic `raw_request` plus typed wrappers. | P0 |
+| `src/node/` | JSON-RPC client to `zebrad`: the `NodeRpc` trait (typed RPC surface, with a generic `request` helper) and its `NodeClient` implementation. | P0 |
 | `src/service.rs` | Implementation of the `CompactTxStreamer` gRPC service. | P0+ |
 | `src/compact.rs` | Raw block bytes → `CompactBlock`, via `librustzcash`. | P1 |
+| `src/encoding.rs` | Display-order ↔ wire-order (endianness) conversions for hashes and txids. | P3 |
+| `src/filter.rs` | Prune a compact block or transaction to the requested value pools (`poolTypes`). | P3 |
 | `src/fetch.rs` | Fetch a block from the node and assemble its `CompactBlock` (shared by `GetBlock` and the ingestor). | P2 |
 | `src/cache.rs` | On-disk compact-block store (`redb`). | P2 |
 | `src/ingestor.rs` | Background task that polls the node and fills the cache; reorg handling. | P2 |
@@ -120,6 +122,14 @@ couple of seconds. The cache persists across restarts, so the ingestor resumes f
 the range (ascending if `start <= end`, otherwise descending) and prunes each block to the requested
 `poolTypes` — an empty list means the legacy default of shielded-only data (transparent inputs/outputs
 stripped).
+
+## Testing
+
+Unit tests run against a fake node rather than a live `zebrad`. The `NodeRpc` trait (`src/node/`) is the
+seam: `service`, `ingestor`, and `fetch` depend on `Arc<dyn NodeRpc>`, so a test injects a `FakeNode`
+(`src/testutil.rs`) with canned responses to characterize the RPC↔gRPC translation, reorg handling, and
+block assembly. The `NodeClient` HTTP/JSON layer itself is covered separately with a `wiremock` mock
+server, and the parser is pinned byte-for-byte by the golden fixtures in `testdata/`.
 
 ## Phase status
 
