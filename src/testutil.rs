@@ -24,6 +24,7 @@ pub struct FakeNode {
     pub treestate: Option<GetTreeState>,
     pub address_balance: Option<GetAddressBalance>,
     pub address_utxos: Option<Vec<AddressUtxo>>,
+    pub address_txids: Option<Vec<String>>,
     /// Captures the txid string the service passed to `get_raw_transaction`.
     pub requested_txid: Mutex<Option<String>>,
 }
@@ -107,5 +108,17 @@ impl NodeRpc for FakeNode {
             .address_utxos
             .clone()
             .expect("FakeNode: get_address_utxos not configured"))
+    }
+
+    async fn get_address_txids(
+        &self,
+        _addresses: &[String],
+        _start: u64,
+        _end: u64,
+    ) -> Result<Vec<String>, NodeError> {
+        Ok(self
+            .address_txids
+            .clone()
+            .expect("FakeNode: get_address_txids not configured"))
     }
 }

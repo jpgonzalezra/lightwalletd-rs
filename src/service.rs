@@ -1,9 +1,9 @@
 //! Implementation of the `CompactTxStreamer` gRPC service.
 //!
-//! Implemented: chain info, block serving (`GetBlock`/`GetBlockRange`), `GetTransaction`,
-//! `SendTransaction`, tree state, transparent-address balance and UTXOs, and `Ping`. The mempool
-//! streams, subtree roots, transparent-address transaction listings, and the nullifier-only block
-//! variants still return `unimplemented`.
+//! Implemented: chain info, block serving (`GetBlock`/`GetBlockRange` and their nullifier-only
+//! variants), `GetTransaction`, `SendTransaction`, tree state, transparent-address balance, UTXOs,
+//! and transaction listings, and `Ping`. The mempool streams and subtree roots still return
+//! `unimplemented`.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -79,6 +79,29 @@ impl Streamer {
             });
         }
         Ok(replies)
+    }
+
+    /// Stream one full `RawTransaction` per txid that touches the filter's address within its block
+    /// range. Shared by `GetTaddressTxids` (a deprecated alias) and `GetTaddressTransactions`.
+    fn taddress_transactions(
+        &self,
+        filter: TransparentAddressBlockFilter,
+    ) -> BoxStream<RawTransaction> {
+        let node = self.node.clone();
+        Box::pin(try_stream! {
+            let range = filter.range.unwrap_or_default();
+            let start = range.start.map(|block| block.height).unwrap_or(0);
+            let end = range.end.map(|block| block.height).unwrap_or(0);
+            let addresses = [filter.address];
+            let txids = node.get_address_txids(&addresses, start, end).await?;
+            for txid in txids {
+                let raw = node.get_raw_transaction(&txid).await?;
+                let data = hex::decode(&raw.hex)
+                    .map_err(|e| Status::internal(format!("decoding transaction hex: {e}")))?;
+                let height = if raw.height < 0 { u64::MAX } else { raw.height as u64 };
+                yield RawTransaction { data, height };
+            }
+        })
     }
 }
 
@@ -298,20 +321,20 @@ impl CompactTxStreamer for Streamer {
     type GetTaddressTxidsStream = BoxStream<RawTransaction>;
     async fn get_taddress_txids(
         &self,
-        _request: Request<TransparentAddressBlockFilter>,
+        request: Request<TransparentAddressBlockFilter>,
     ) -> Result<Response<Self::GetTaddressTxidsStream>, Status> {
-        Err(Status::unimplemented(
-            "get_taddress_txids: implemented in P4",
+        Ok(Response::new(
+            self.taddress_transactions(request.into_inner()),
         ))
     }
 
     type GetTaddressTransactionsStream = BoxStream<RawTransaction>;
     async fn get_taddress_transactions(
         &self,
-        _request: Request<TransparentAddressBlockFilter>,
+        request: Request<TransparentAddressBlockFilter>,
     ) -> Result<Response<Self::GetTaddressTransactionsStream>, Status> {
-        Err(Status::unimplemented(
-            "get_taddress_transactions: implemented in P4",
+        Ok(Response::new(
+            self.taddress_transactions(request.into_inner()),
         ))
     }
 
@@ -653,5 +676,48 @@ mod tests {
             .into_inner();
 
         assert_eq!(response, Balance { value_zat: 4242 });
+    }
+
+    #[tokio::test]
+    async fn get_taddress_transactions_streams_one_raw_tx_per_txid() {
+        use tokio_stream::StreamExt;
+        let fake = Arc::new(FakeNode {
+            address_txids: Some(vec!["aa".to_string()]),
+            raw_transaction: Some(
+                serde_json::from_value(json!({ "hex": "deadbeef", "height": 100 })).unwrap(),
+            ),
+            ..Default::default()
+        });
+        let (_dir, streamer) = streamer_with(fake);
+
+        let filter = TransparentAddressBlockFilter {
+            address: "t1".to_string(),
+            range: Some(BlockRange {
+                start: Some(BlockId {
+                    height: 1,
+                    hash: vec![],
+                }),
+                end: Some(BlockId {
+                    height: 2,
+                    hash: vec![],
+                }),
+                ..Default::default()
+            }),
+        };
+        let response = streamer
+            .get_taddress_transactions(Request::new(filter))
+            .await
+            .unwrap()
+            .into_inner();
+        let transactions: Vec<_> = response.collect().await;
+
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(
+            *transactions[0].as_ref().unwrap(),
+            RawTransaction {
+                data: vec![0xde, 0xad, 0xbe, 0xef],
+                height: 100,
+            }
+        );
     }
 }

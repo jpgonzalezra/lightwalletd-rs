@@ -78,6 +78,13 @@ pub trait NodeRpc: Send + Sync {
     ) -> Result<GetAddressBalance, NodeError>;
     /// Call `getaddressutxos` for the unspent outputs of the given transparent addresses.
     async fn get_address_utxos(&self, addresses: &[String]) -> Result<Vec<AddressUtxo>, NodeError>;
+    /// Call `getaddresstxids` for the txids touching the given addresses within `[start, end]`.
+    async fn get_address_txids(
+        &self,
+        addresses: &[String],
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<String>, NodeError>;
 }
 
 impl NodeClient {
@@ -190,6 +197,19 @@ impl NodeRpc for NodeClient {
         self.request(
             "getaddressutxos",
             serde_json::json!([{ "addresses": addresses }]),
+        )
+        .await
+    }
+
+    async fn get_address_txids(
+        &self,
+        addresses: &[String],
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<String>, NodeError> {
+        self.request(
+            "getaddresstxids",
+            serde_json::json!([{ "addresses": addresses, "start": start, "end": end }]),
         )
         .await
     }
