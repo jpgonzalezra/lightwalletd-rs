@@ -8,7 +8,7 @@ mod types;
 
 pub use types::{
     AddressUtxo, GetAddressBalance, GetBlockVerbose, GetBlockchainInfo, GetInfo, GetRawTransaction,
-    GetTreeState,
+    GetSubtrees, GetTreeState,
 };
 
 use serde::{Deserialize, Serialize};
@@ -85,6 +85,14 @@ pub trait NodeRpc: Send + Sync {
         start: u64,
         end: u64,
     ) -> Result<Vec<String>, NodeError>;
+    /// Call `z_getsubtreesbyindex` for note-commitment subtrees of a shielded `protocol`
+    /// (`"sapling"` or `"orchard"`), starting at `start_index` (`max_entries == 0` means no limit).
+    async fn get_subtrees(
+        &self,
+        protocol: &str,
+        start_index: u32,
+        max_entries: u32,
+    ) -> Result<GetSubtrees, NodeError>;
 }
 
 impl NodeClient {
@@ -212,6 +220,20 @@ impl NodeRpc for NodeClient {
             serde_json::json!([{ "addresses": addresses, "start": start, "end": end }]),
         )
         .await
+    }
+
+    async fn get_subtrees(
+        &self,
+        protocol: &str,
+        start_index: u32,
+        max_entries: u32,
+    ) -> Result<GetSubtrees, NodeError> {
+        let params = if max_entries > 0 {
+            serde_json::json!([protocol, start_index, max_entries])
+        } else {
+            serde_json::json!([protocol, start_index])
+        };
+        self.request("z_getsubtreesbyindex", params).await
     }
 }
 

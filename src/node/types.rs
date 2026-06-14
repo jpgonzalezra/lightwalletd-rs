@@ -147,3 +147,20 @@ pub struct AddressUtxo {
     /// Block height the output was mined at.
     pub height: u64,
 }
+
+/// Response of the `z_getsubtreesbyindex` RPC (only the fields we use).
+#[derive(Debug, Clone, Deserialize)]
+pub struct GetSubtrees {
+    /// The note-commitment subtrees, in index order.
+    #[serde(default)]
+    pub subtrees: Vec<Subtree>,
+}
+
+/// One note-commitment subtree from `z_getsubtreesbyindex`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Subtree {
+    /// The 32-byte Merkle root of the subtree, hex-encoded.
+    pub root: String,
+    /// Height of the block that completed the subtree.
+    pub end_height: u64,
+}

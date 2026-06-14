@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use crate::node::{
     AddressUtxo, GetAddressBalance, GetBlockVerbose, GetBlockchainInfo, GetInfo, GetRawTransaction,
-    GetTreeState, NodeError, NodeRpc,
+    GetSubtrees, GetTreeState, NodeError, NodeRpc,
 };
 
 /// A configurable [`NodeRpc`] fake. Each field holds the canned response for one RPC; a method whose
@@ -25,6 +25,7 @@ pub struct FakeNode {
     pub address_balance: Option<GetAddressBalance>,
     pub address_utxos: Option<Vec<AddressUtxo>>,
     pub address_txids: Option<Vec<String>>,
+    pub subtrees: Option<GetSubtrees>,
     /// Captures the txid string the service passed to `get_raw_transaction`.
     pub requested_txid: Mutex<Option<String>>,
 }
@@ -120,5 +121,17 @@ impl NodeRpc for FakeNode {
             .address_txids
             .clone()
             .expect("FakeNode: get_address_txids not configured"))
+    }
+
+    async fn get_subtrees(
+        &self,
+        _protocol: &str,
+        _start_index: u32,
+        _max_entries: u32,
+    ) -> Result<GetSubtrees, NodeError> {
+        Ok(self
+            .subtrees
+            .clone()
+            .expect("FakeNode: get_subtrees not configured"))
     }
 }

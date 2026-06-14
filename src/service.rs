@@ -2,8 +2,8 @@
 //!
 //! Implemented: chain info, block serving (`GetBlock`/`GetBlockRange` and their nullifier-only
 //! variants), `GetTransaction`, `SendTransaction`, tree state, transparent-address balance, UTXOs,
-//! and transaction listings, and `Ping`. The mempool streams and subtree roots still return
-//! `unimplemented`.
+//! and transaction listings, subtree roots, and `Ping`. The mempool streams (`GetMempoolTx`,
+//! `GetMempoolStream`) still return `unimplemented`.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -23,7 +23,8 @@ use crate::proto::{
     Address, AddressList, Balance, BlockId, BlockRange, ChainSpec, CompactBlock, CompactTx,
     Duration, Empty, GetAddressUtxosArg, GetAddressUtxosReply, GetAddressUtxosReplyList,
     GetMempoolTxRequest, GetSubtreeRootsArg, LightdInfo, PingResponse, RawTransaction,
-    SendResponse, SubtreeRoot, TransparentAddressBlockFilter, TreeState, TxFilter,
+    SendResponse, ShieldedProtocol, SubtreeRoot, TransparentAddressBlockFilter, TreeState,
+    TxFilter,
 };
 
 /// Boxed server-streaming response, shared by every streaming method's associated type.
@@ -417,11 +418,40 @@ impl CompactTxStreamer for Streamer {
     type GetSubtreeRootsStream = BoxStream<SubtreeRoot>;
     async fn get_subtree_roots(
         &self,
-        _request: Request<GetSubtreeRootsArg>,
+        request: Request<GetSubtreeRootsArg>,
     ) -> Result<Response<Self::GetSubtreeRootsStream>, Status> {
-        Err(Status::unimplemented(
-            "get_subtree_roots: implemented in P4",
-        ))
+        let arg = request.into_inner();
+        let protocol = match ShieldedProtocol::try_from(arg.shielded_protocol) {
+            Ok(ShieldedProtocol::Sapling) => "sapling",
+            Ok(ShieldedProtocol::Orchard) => "orchard",
+            Err(_) => return Err(Status::invalid_argument("unrecognized shielded protocol")),
+        };
+        let subtrees = self
+            .node
+            .get_subtrees(protocol, arg.start_index, arg.max_entries)
+            .await?;
+        let node = self.node.clone();
+        let cache = self.cache.clone();
+
+        let stream = try_stream! {
+            for subtree in subtrees.subtrees {
+                let block = match cache.get(subtree.end_height)? {
+                    Some(block) => block,
+                    None => fetch::compact_block(node.as_ref(), subtree.end_height).await?,
+                };
+                let root_hash = hex::decode(&subtree.root)
+                    .map_err(|e| Status::internal(format!("decoding subtree root: {e}")))?;
+                // The block hash is in protocol order; upstream sends it display-order here.
+                let mut completing_block_hash = block.hash;
+                completing_block_hash.reverse();
+                yield SubtreeRoot {
+                    root_hash,
+                    completing_block_hash,
+                    completing_block_height: block.height,
+                };
+            }
+        };
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn get_address_utxos(
