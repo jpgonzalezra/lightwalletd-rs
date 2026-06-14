@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format is loosely b
 ### P5 — Hardening (in progress)
 - gRPC server runs over TLS by default (`--tls-cert`/`--tls-key`), with `--no-tls-very-insecure` to run
   plaintext for local development.
+- Prometheus metrics: per-method request counts and latency histograms via a gRPC `tower` layer, served at
+  `/metrics` when `--metrics-bind` is set.
 
 ### P4 — Mempool, subtrees, t-addr txns & nullifiers
 - `GetBlockNullifiers` and `GetBlockRangeNullifiers` (blocks pruned to shielded nullifiers only).

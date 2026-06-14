@@ -46,6 +46,7 @@ The backend is **`zebrad`**. The connection is plain HTTP `POST` JSON-RPC (no TL
 | `src/fetch.rs` | Fetch a block from the node and assemble its `CompactBlock` (shared by `GetBlock` and the ingestor). | P2 |
 | `src/cache.rs` | On-disk compact-block store (`redb`). | P2 |
 | `src/ingestor.rs` | Background task that polls the node and fills the cache; reorg handling. | P2 |
+| `src/metrics.rs` | Serves Prometheus metrics over an HTTP `/metrics` endpoint. | P5 |
 
 ## Method classification
 
@@ -116,6 +117,22 @@ allows impersonation. The `-very-insecure` suffix follows the upstream conventio
 
 This TLS protects the **wallet ↔ server** hop. The **server ↔ node** (`zebrad`) connection is plain HTTP on
 purpose — it is local and never crosses the open network.
+
+## Metrics
+
+A `tower` layer on the gRPC server records per-method request counts, a latency histogram, and an in-flight
+gauge automatically (no per-handler instrumentation). With `--metrics-bind <addr>` set, the metrics are served
+in the Prometheus text format at `/metrics` on that address (a separate HTTP port from gRPC); without the flag,
+metrics are off.
+
+```sh
+cargo run -- --rpc-url http://127.0.0.1:8232 --no-tls-very-insecure --metrics-bind 127.0.0.1:9100
+curl http://127.0.0.1:9100/metrics
+```
+
+Notable series: `grpc_server_handled_total{grpc_service,grpc_method,grpc_code}` (request count by method and
+gRPC status) and `grpc_server_handling_seconds` (latency histogram). The registry is empty until the first gRPC
+request, so `/metrics` returns nothing until there has been some traffic.
 
 ## Block parsing
 
