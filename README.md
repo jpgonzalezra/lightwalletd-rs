@@ -41,6 +41,16 @@ The gRPC server runs over TLS by default (`--tls-cert` / `--tls-key`). For local
 `--no-tls-very-insecure` runs it in plaintext — never use that flag in production. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#tls).
 
+## Docker
+
+```sh
+docker build -t lightwalletd-rs .
+docker compose up   # a zebra node + lightwalletd-rs
+```
+
+`docker-compose.yml` serves over TLS from a certificate mounted at `./certs` (see the comments in that file
+for how to provide one). The zebra node syncs the chain on first run, which takes hours and a large volume.
+
 ## License
 
 MIT (same as upstream).

@@ -5,11 +5,8 @@
 # check the image tag and config mechanism against the current zebra docker docs for your version.
 #
 # TLS: lightwalletd-rs serves over TLS using the certificate mounted from ./certs. Before `docker compose
-# up`, put a PEM certificate and key there — your real certificate in production, or a self-signed pair for
-# local testing:
-#   mkdir -p certs && openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-#     -keyout certs/key.pem -out certs/cert.pem -subj "/CN=localhost" \
-#     -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+# up`, put a PEM certificate and key (cert.pem / key.pem) there — your real certificate in production, or a
+# self-signed pair for local testing.
 services:
   zebra:
     image: zfnd/zebra:latest
