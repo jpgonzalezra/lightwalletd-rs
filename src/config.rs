@@ -47,6 +47,18 @@ pub struct Cli {
     /// Height to start ingesting from when the cache is empty (defaults to Sapling activation).
     #[arg(long)]
     pub start_height: Option<u64>,
+
+    /// Path to a PEM TLS certificate (required unless `--no-tls-very-insecure`).
+    #[arg(long)]
+    pub tls_cert: Option<PathBuf>,
+
+    /// Path to the PEM TLS private key (required unless `--no-tls-very-insecure`).
+    #[arg(long)]
+    pub tls_key: Option<PathBuf>,
+
+    /// Run the gRPC server without TLS (plaintext). Insecure — development only.
+    #[arg(long = "no-tls-very-insecure")]
+    pub no_tls: bool,
 }
 
 /// Resolved runtime configuration.
@@ -60,6 +72,22 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Height to start ingesting from when the cache is empty.
     pub start_height: Option<u64>,
+    /// Whether the gRPC server runs over TLS, and with which certificate.
+    pub tls: TlsConfig,
+}
+
+/// How the gRPC server presents itself on the wire.
+#[derive(Debug, Clone)]
+pub enum TlsConfig {
+    /// Serve over TLS with the given PEM certificate and private-key file paths.
+    Enabled {
+        /// Path to the PEM certificate.
+        cert: PathBuf,
+        /// Path to the PEM private key.
+        key: PathBuf,
+    },
+    /// Serve plaintext (no TLS) — insecure, development only.
+    Disabled,
 }
 
 /// How to reach the zebrad JSON-RPC endpoint.
@@ -93,6 +121,16 @@ impl Cli {
             }
         };
 
+        let tls = if self.no_tls {
+            TlsConfig::Disabled
+        } else {
+            let message = "TLS is required: pass --tls-cert and --tls-key, or --no-tls-very-insecure for plaintext";
+            TlsConfig::Enabled {
+                cert: self.tls_cert.context(message)?,
+                key: self.tls_key.context(message)?,
+            }
+        };
+
         Ok(Config {
             grpc_bind: self.grpc_bind,
             node: NodeConfig {
@@ -102,6 +140,7 @@ impl Cli {
             },
             data_dir: self.data_dir,
             start_height: self.start_height,
+            tls,
         })
     }
 }
@@ -185,6 +224,9 @@ mod tests {
             zcash_conf,
             data_dir: PathBuf::from("./data"),
             start_height: None,
+            tls_cert: None,
+            tls_key: None,
+            no_tls: true,
         }
     }
 
@@ -219,5 +261,20 @@ mod tests {
         assert_eq!(config.node.url, "http://192.168.0.5:8232");
         assert_eq!(config.node.user, "");
         assert_eq!(config.node.password, "");
+    }
+
+    #[test]
+    fn resolve_with_no_tls_yields_disabled() {
+        let config = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None)
+            .resolve()
+            .unwrap();
+        assert!(matches!(config.tls, TlsConfig::Disabled));
+    }
+
+    #[test]
+    fn resolve_requires_a_cert_when_tls_is_enabled() {
+        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        cli.no_tls = false;
+        assert!(cli.resolve().is_err());
     }
 }

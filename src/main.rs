@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use tonic::transport::Server;
+use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing_subscriber::EnvFilter;
 
 mod cache;
@@ -63,7 +63,17 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(ingestor::run(node.clone(), cache.clone(), start_height));
 
     let streamer = service::Streamer::new(node, cache, chain_info.chain);
-    Server::builder()
+    let mut server = Server::builder();
+    match &config.tls {
+        config::TlsConfig::Enabled { cert, key } => {
+            let identity = Identity::from_pem(std::fs::read(cert)?, std::fs::read(key)?);
+            server = server.tls_config(ServerTlsConfig::new().identity(identity))?;
+        }
+        config::TlsConfig::Disabled => {
+            tracing::warn!("running without TLS (plaintext) — do not use in production");
+        }
+    }
+    server
         .add_service(CompactTxStreamerServer::new(streamer))
         .serve(config.grpc_bind)
         .await?;
