@@ -11,6 +11,7 @@ mod encoding;
 mod fetch;
 mod filter;
 mod ingestor;
+mod metrics;
 mod node;
 mod proto;
 mod service;
@@ -62,8 +63,17 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(ingestor::run(node.clone(), cache.clone(), start_height));
 
+    if let Some(metrics_addr) = config.metrics_bind {
+        tracing::info!(metrics_bind = %metrics_addr, "serving Prometheus metrics on /metrics");
+        tokio::spawn(async move {
+            if let Err(error) = metrics::serve(metrics_addr).await {
+                tracing::error!(%error, "metrics server failed");
+            }
+        });
+    }
+
     let streamer = service::Streamer::new(node, cache, chain_info.chain);
-    let mut server = Server::builder();
+    let mut server = Server::builder().layer(tonic_prometheus_layer::MetricsLayer::new());
     match &config.tls {
         config::TlsConfig::Enabled { cert, key } => {
             let identity = Identity::from_pem(std::fs::read(cert)?, std::fs::read(key)?);

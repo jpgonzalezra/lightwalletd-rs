@@ -59,6 +59,10 @@ pub struct Cli {
     /// Run the gRPC server without TLS (plaintext). Insecure — development only.
     #[arg(long = "no-tls-very-insecure")]
     pub no_tls: bool,
+
+    /// Address to serve Prometheus metrics on (`/metrics`); metrics are disabled if unset.
+    #[arg(long)]
+    pub metrics_bind: Option<SocketAddr>,
 }
 
 /// Resolved runtime configuration.
@@ -74,6 +78,8 @@ pub struct Config {
     pub start_height: Option<u64>,
     /// Whether the gRPC server runs over TLS, and with which certificate.
     pub tls: TlsConfig,
+    /// Address to serve Prometheus metrics on, if enabled.
+    pub metrics_bind: Option<SocketAddr>,
 }
 
 /// How the gRPC server presents itself on the wire.
@@ -141,6 +147,7 @@ impl Cli {
             data_dir: self.data_dir,
             start_height: self.start_height,
             tls,
+            metrics_bind: self.metrics_bind,
         })
     }
 }
@@ -227,6 +234,7 @@ mod tests {
             tls_cert: None,
             tls_key: None,
             no_tls: true,
+            metrics_bind: None,
         }
     }
 
