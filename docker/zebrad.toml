@@ -1,0 +1,11 @@
+# Minimal zebrad config for the docker-compose stack: mainnet with the JSON-RPC
+# endpoint enabled and unauthenticated (only reachable on the compose network).
+[network]
+network = "Mainnet"
+
+[rpc]
+listen_addr = "0.0.0.0:8232"
+enable_cookie_auth = false
+
+[state]
+cache_dir = "/var/cache/zebrad"

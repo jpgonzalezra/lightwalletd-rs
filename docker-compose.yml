@@ -1,0 +1,44 @@
+# Two-service stack: a zebrad full node and lightwalletd-rs in front of it.
+#
+# Note: zebra must sync the chain on first run (hours, and tens to hundreds of GB in the `zebra-state`
+# volume) before lightwalletd-rs can serve anything. The zebra service here is a starting template —
+# check the image tag and config mechanism against the current zebra docker docs for your version.
+#
+# TLS: lightwalletd-rs serves over TLS using the certificate mounted from ./certs. Before `docker compose
+# up`, put a PEM certificate and key there — your real certificate in production, or a self-signed pair for
+# local testing:
+#   mkdir -p certs && openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+#     -keyout certs/key.pem -out certs/cert.pem -subj "/CN=localhost" \
+#     -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+services:
+  zebra:
+    image: zfnd/zebra:latest
+    volumes:
+      - ./docker/zebrad.toml:/etc/zebrad/zebrad.toml:ro
+      - zebra-state:/var/cache/zebrad
+    environment:
+      ZEBRA_CONF_PATH: /etc/zebrad/zebrad.toml
+    restart: unless-stopped
+
+  lightwalletd-rs:
+    build: .
+    depends_on:
+      - zebra
+    command:
+      - --rpc-url=http://zebra:8232
+      - --grpc-bind=0.0.0.0:9067
+      - --tls-cert=/certs/cert.pem
+      - --tls-key=/certs/key.pem
+      - --metrics-bind=0.0.0.0:9100
+      - --data-dir=/var/lib/lightwalletd-rs
+    volumes:
+      - ./certs:/certs:ro
+      - lwd-data:/var/lib/lightwalletd-rs
+    ports:
+      - "9067:9067" # gRPC
+      - "9100:9100" # Prometheus /metrics
+    restart: unless-stopped
+
+volumes:
+  zebra-state:
+  lwd-data:

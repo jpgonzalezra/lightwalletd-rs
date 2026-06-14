@@ -1,4 +1,6 @@
 /target
+/.git
 /certs
 /dev-certs
 /lightwalletd-rs-data
+*.redb
