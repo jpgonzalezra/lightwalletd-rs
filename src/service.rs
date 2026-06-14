@@ -2,8 +2,8 @@
 //!
 //! Implemented: chain info, block serving (`GetBlock`/`GetBlockRange` and their nullifier-only
 //! variants), `GetTransaction`, `SendTransaction`, tree state, transparent-address balance, UTXOs,
-//! and transaction listings, subtree roots, and `Ping`. The mempool streams (`GetMempoolTx`,
-//! `GetMempoolStream`) still return `unimplemented`.
+//! and transaction listings, subtree roots, `GetMempoolTx`, and `Ping`. Only `GetMempoolStream`
+//! still returns `unimplemented`.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
 use crate::cache::{Cache, CacheError};
+use crate::compact;
 use crate::encoding;
 use crate::fetch::{self, FetchError};
 use crate::filter;
@@ -371,9 +372,33 @@ impl CompactTxStreamer for Streamer {
     type GetMempoolTxStream = BoxStream<CompactTx>;
     async fn get_mempool_tx(
         &self,
-        _request: Request<GetMempoolTxRequest>,
+        request: Request<GetMempoolTxRequest>,
     ) -> Result<Response<Self::GetMempoolTxStream>, Status> {
-        Err(Status::unimplemented("get_mempool_tx: implemented in P4"))
+        let req = request.into_inner();
+        let exclude = req.exclude_txid_suffixes;
+        let pool_types = req.pool_types;
+        let txids = self.node.get_raw_mempool().await?;
+        let node = self.node.clone();
+
+        let stream = try_stream! {
+            let pools = filter::Pools::from_pool_types(&pool_types);
+            for (index, txid) in txids.into_iter().enumerate() {
+                // The txid is display-order hex; exclusion suffixes are compared in protocol order.
+                let wire_txid = encoding::display_hex_to_wire(&txid)
+                    .map_err(|e| Status::internal(format!("decoding mempool txid: {e}")))?;
+                if exclude.iter().any(|suffix| wire_txid.ends_with(suffix)) {
+                    continue;
+                }
+                let raw = node.get_raw_transaction(&txid).await?;
+                let bytes = hex::decode(&raw.hex)
+                    .map_err(|e| Status::internal(format!("decoding mempool tx: {e}")))?;
+                let mut compact = compact::compact_tx_from_raw(index as u64, &bytes)
+                    .map_err(|e| Status::internal(format!("parsing mempool tx: {e}")))?;
+                filter::filter_tx_to_pools(&mut compact, pools);
+                yield compact;
+            }
+        };
+        Ok(Response::new(Box::pin(stream)))
     }
 
     type GetMempoolStreamStream = BoxStream<RawTransaction>;

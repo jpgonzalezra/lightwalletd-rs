@@ -93,6 +93,8 @@ pub trait NodeRpc: Send + Sync {
         start_index: u32,
         max_entries: u32,
     ) -> Result<GetSubtrees, NodeError>;
+    /// Call `getrawmempool` for the txids currently in the mempool.
+    async fn get_raw_mempool(&self) -> Result<Vec<String>, NodeError>;
 }
 
 impl NodeClient {
@@ -234,6 +236,10 @@ impl NodeRpc for NodeClient {
             serde_json::json!([protocol, start_index])
         };
         self.request("z_getsubtreesbyindex", params).await
+    }
+
+    async fn get_raw_mempool(&self) -> Result<Vec<String>, NodeError> {
+        self.request("getrawmempool", serde_json::json!([])).await
     }
 }
 

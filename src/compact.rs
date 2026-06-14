@@ -66,7 +66,7 @@ pub fn to_compact_block(raw: &[u8]) -> Result<CompactBlock, ParseError> {
         if index == 0 {
             height = Some(coinbase_height(&tx)?);
         }
-        vtx.push(to_compact_tx(index as u64, &tx));
+        vtx.push(to_compact_tx(index as u64, &tx, index == 0));
     }
 
     Ok(CompactBlock {
@@ -105,8 +105,8 @@ fn coinbase_height(tx: &Transaction) -> Result<u64, ParseError> {
     Ok(u64::from_le_bytes(bytes))
 }
 
-/// Build the compact form of a single transaction. The coinbase (`index == 0`) omits its inputs.
-fn to_compact_tx(index: u64, tx: &Transaction) -> CompactTx {
+/// Build the compact form of a single transaction. A coinbase omits its (null) inputs.
+fn to_compact_tx(index: u64, tx: &Transaction, is_coinbase: bool) -> CompactTx {
     let mut spends = Vec::new();
     let mut outputs = Vec::new();
     if let Some(sapling) = tx.sapling_bundle() {
@@ -140,7 +140,7 @@ fn to_compact_tx(index: u64, tx: &Transaction) -> CompactTx {
     let mut vin = Vec::new();
     let mut vout = Vec::new();
     if let Some(transparent) = tx.transparent_bundle() {
-        if index != 0 {
+        if !is_coinbase {
             for input in &transparent.vin {
                 vin.push(CompactTxIn {
                     prevout_txid: input.prevout().hash().to_vec(),
@@ -166,6 +166,13 @@ fn to_compact_tx(index: u64, tx: &Transaction) -> CompactTx {
         vin,
         vout,
     }
+}
+
+/// Parse a single raw transaction (as from `getrawtransaction <txid> 0`) into its compact form.
+/// Used for mempool transactions, which are never coinbases.
+pub fn compact_tx_from_raw(index: u64, raw: &[u8]) -> Result<CompactTx, ParseError> {
+    let transaction = Transaction::read(&mut Cursor::new(raw), BranchId::Nu5)?;
+    Ok(to_compact_tx(index, &transaction, false))
 }
 
 #[cfg(test)]

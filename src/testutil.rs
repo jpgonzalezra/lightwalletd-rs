@@ -26,6 +26,7 @@ pub struct FakeNode {
     pub address_utxos: Option<Vec<AddressUtxo>>,
     pub address_txids: Option<Vec<String>>,
     pub subtrees: Option<GetSubtrees>,
+    pub raw_mempool: Option<Vec<String>>,
     /// Captures the txid string the service passed to `get_raw_transaction`.
     pub requested_txid: Mutex<Option<String>>,
 }
@@ -133,5 +134,12 @@ impl NodeRpc for FakeNode {
             .subtrees
             .clone()
             .expect("FakeNode: get_subtrees not configured"))
+    }
+
+    async fn get_raw_mempool(&self) -> Result<Vec<String>, NodeError> {
+        Ok(self
+            .raw_mempool
+            .clone()
+            .expect("FakeNode: get_raw_mempool not configured"))
     }
 }
