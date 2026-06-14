@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+### P4 — Mempool, subtrees, t-addr txns & nullifiers
+- `GetBlockNullifiers` and `GetBlockRangeNullifiers` (blocks pruned to shielded nullifiers only).
+- `GetTaddressTxids` and `GetTaddressTransactions` (`getaddresstxids` + per-txid `getrawtransaction`).
+- `GetSubtreeRoots` (`z_getsubtreesbyindex`, with the completing block looked up from the cache).
+- `GetMempoolTx` (with `exclude_txid_suffixes` and `poolTypes` filtering) and `GetMempoolStream`.
+- All 18 `CompactTxStreamer` methods are now implemented.
+
 ### P3 — Proxies
 - `GetTransaction` and `SendTransaction` (with node rejections reported in-band in the `SendResponse`).
 - `GetTreeState` and `GetLatestTreeState`.

@@ -18,7 +18,7 @@ Under active development, built in vertical slices.
 - [x] P1 — Parser → `CompactBlock` → `GetBlock`
 - [x] P2 — Cache + ingestor + `GetBlockRange`
 - [x] P3 — Proxies (send, tx, balance, utxos, treestate)
-- [ ] P4 — Mempool, subtrees, t-addr txns, nullifiers
+- [x] P4 — Mempool, subtrees, t-addr txns, nullifiers
 - [ ] P5 — Hardening (TLS, metrics, darkside, Docker)
 
 ## Requirements

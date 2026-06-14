@@ -144,3 +144,7 @@ server, and the parser is pinned byte-for-byte by the golden fixtures in `testda
   node), and `GetBlockRange` streams with `poolTypes` filtering.
 - **P3 — Proxies**: done. `GetTransaction`, `SendTransaction`, `GetTreeState`/`GetLatestTreeState`,
   `GetTaddressBalance(+Stream)`, `GetAddressUtxos(+Stream)`, and `Ping` translate a single node RPC each.
+- **P4 — Mempool, subtrees, t-addr txns & nullifiers**: done. `GetBlockNullifiers`/`GetBlockRangeNullifiers`
+  (pruned to shielded nullifiers), `GetTaddressTxids`/`GetTaddressTransactions`, `GetSubtreeRoots`
+  (`z_getsubtreesbyindex` + the completing block from the cache), `GetMempoolTx`, and `GetMempoolStream` (a
+  poll loop that ends when a new block is mined). All `CompactTxStreamer` methods are now implemented.
