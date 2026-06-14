@@ -37,6 +37,10 @@ make fmt        # check formatting
 make run -- --help
 ```
 
+The gRPC server runs over TLS by default (`--tls-cert` / `--tls-key`). For local development,
+`--no-tls-very-insecure` runs it in plaintext — never use that flag in production. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#tls).
+
 ## License
 
 MIT (same as upstream).

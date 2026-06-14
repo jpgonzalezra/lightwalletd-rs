@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+### P5 — Hardening (in progress)
+- gRPC server runs over TLS by default (`--tls-cert`/`--tls-key`), with `--no-tls-very-insecure` to run
+  plaintext for local development.
+
 ### P4 — Mempool, subtrees, t-addr txns & nullifiers
 - `GetBlockNullifiers` and `GetBlockRangeNullifiers` (blocks pruned to shielded nullifiers only).
 - `GetTaddressTxids` and `GetTaddressTransactions` (`getaddresstxids` + per-txid `getrawtransaction`).

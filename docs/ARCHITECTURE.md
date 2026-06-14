@@ -69,20 +69,22 @@ Short ADRs live under [`docs/decisions/`](decisions/). Notable ones:
 ## Running
 
 ```sh
-cargo run -- --rpc-url http://127.0.0.1:18232 --rpc-user USER --rpc-password PASS
+cargo run -- --rpc-url http://127.0.0.1:18232 --rpc-user USER --rpc-password PASS \
+  --no-tls-very-insecure
 # or point at a zcash.conf:
-cargo run -- --zcash-conf ~/.zcash/zcash.conf
+cargo run -- --zcash-conf ~/.zcash/zcash.conf --no-tls-very-insecure
 ```
 
 On startup the server resolves the chain (which names the cache file under `--data-dir`) and the height to
 start ingesting from (`--start-height`, defaulting to Sapling activation), then spawns the ingestor and serves
-gRPC on `--grpc-bind` (default `127.0.0.1:9067`). For a quick run near the tip:
+gRPC on `--grpc-bind` (default `127.0.0.1:9067`). For a quick plaintext run near the tip:
 
 ```sh
-cargo run -- --rpc-url http://127.0.0.1:8232 --start-height 3375600 --data-dir /tmp/lwd-data
+cargo run -- --rpc-url http://127.0.0.1:8232 --start-height 3375600 --data-dir /tmp/lwd-data \
+  --no-tls-very-insecure
 ```
 
-Probe it with `grpcurl`:
+Probe it with `grpcurl` (plaintext, since the server above runs with `--no-tls-very-insecure`):
 
 ```sh
 grpcurl -plaintext 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
@@ -92,6 +94,28 @@ grpcurl -plaintext -d '{"height": 419200}' 127.0.0.1:9067 \
 grpcurl -plaintext -d '{"start":{"height":3375690},"end":{"height":3375695}}' 127.0.0.1:9067 \
   cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlockRange
 ```
+
+## TLS
+
+The gRPC server runs over **TLS by default** and requires a PEM certificate and key:
+
+```sh
+cargo run -- --rpc-url http://127.0.0.1:8232 --tls-cert cert.pem --tls-key key.pem
+```
+
+Probe it over TLS with `grpcurl` (`-cacert` to trust the certificate):
+
+```sh
+grpcurl -cacert cert.pem 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
+```
+
+For local development only, `--no-tls-very-insecure` runs the server in plaintext (so `grpcurl -plaintext`
+works) and logs a warning on startup. **This flag must never be used in production**: without TLS the
+wallet↔server traffic is unencrypted and the server is not authenticated, which leaks query metadata and
+allows impersonation. The `-very-insecure` suffix follows the upstream convention for dangerous flags.
+
+This TLS protects the **wallet ↔ server** hop. The **server ↔ node** (`zebrad`) connection is plain HTTP on
+purpose — it is local and never crosses the open network.
 
 ## Block parsing
 
