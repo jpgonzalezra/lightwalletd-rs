@@ -1,9 +1,10 @@
 //! Implementation of the `CompactTxStreamer` gRPC service.
 //!
-//! Implemented: chain info, block serving (`GetBlock`/`GetBlockRange` and their nullifier-only
-//! variants), `GetTransaction`, `SendTransaction`, tree state, transparent-address balance, UTXOs,
-//! and transaction listings, subtree roots, `GetMempoolTx`, and `Ping`. Only `GetMempoolStream`
-//! still returns `unimplemented`.
+//! All `CompactTxStreamer` methods are implemented: chain info, block serving (`GetBlock`/
+//! `GetBlockRange` and their nullifier-only variants), `GetTransaction`, `SendTransaction`, tree
+//! state, transparent-address balance/UTXOs/transaction listings, subtree roots, the mempool streams,
+//! and `Ping`. Block/tree-state lookup by hash (rather than height) is the one sub-case still
+//! returning `unimplemented`.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -406,9 +407,33 @@ impl CompactTxStreamer for Streamer {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<Self::GetMempoolStreamStream>, Status> {
-        Err(Status::unimplemented(
-            "get_mempool_stream: implemented in P4",
-        ))
+        let node = self.node.clone();
+        let stream = try_stream! {
+            // Snapshot the tip; when it changes a new block was mined and we end the stream.
+            let start = node.get_blockchain_info().await?;
+            let height = start.blocks;
+            let mut seen = std::collections::HashSet::new();
+            loop {
+                if node.get_blockchain_info().await?.bestblockhash != start.bestblockhash {
+                    break;
+                }
+                for txid in node.get_raw_mempool().await? {
+                    if !seen.insert(txid.clone()) {
+                        continue;
+                    }
+                    let raw = node.get_raw_transaction(&txid).await?;
+                    // A non-zero height means the tx is already mined, not in the mempool.
+                    if raw.height != 0 {
+                        continue;
+                    }
+                    let data = hex::decode(&raw.hex)
+                        .map_err(|e| Status::internal(format!("decoding mempool tx: {e}")))?;
+                    yield RawTransaction { data, height };
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        };
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn get_tree_state(
