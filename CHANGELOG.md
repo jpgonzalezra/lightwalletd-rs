@@ -11,6 +11,7 @@ All notable changes to this project are documented here. The format is loosely b
 - Prometheus metrics: per-method request counts and latency histograms via a gRPC `tower` layer, served at
   `/metrics` when `--metrics-bind` is set.
 - Dockerfile (multi-stage, non-root runtime) and a `docker-compose.yml` stack (zebra + lightwalletd-rs).
+- Graceful shutdown on `SIGINT`/`SIGTERM`: drains in-flight requests before exiting.
 
 ### P4 — Mempool, subtrees, t-addr txns & nullifiers
 - `GetBlockNullifiers` and `GetBlockRangeNullifiers` (blocks pruned to shielded nullifiers only).
