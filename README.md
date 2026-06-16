@@ -41,6 +41,13 @@ The gRPC server runs over TLS by default (`--tls-cert` / `--tls-key`). For local
 `--no-tls-very-insecure` runs it in plaintext — never use that flag in production. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#tls).
 
+### Darkside mode
+
+`--darkside-very-insecure` serves a controllable, in-memory mock chain instead of proxying a real node, for
+deterministic wallet tests (reorgs, confirmations, edge cases). It exposes a `DarksideStreamer` control plane
+alongside the normal `CompactTxStreamer`. This flag is for testing only — never use it in production. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#darkside-mode).
+
 ## Docker
 
 ```sh

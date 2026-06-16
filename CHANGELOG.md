@@ -12,6 +12,9 @@ All notable changes to this project are documented here. The format is loosely b
   `/metrics` when `--metrics-bind` is set.
 - Dockerfile (multi-stage, non-root runtime) and a `docker-compose.yml` stack (zebra + lightwalletd-rs).
 - Graceful shutdown on `SIGINT`/`SIGTERM`: drains in-flight requests before exiting.
+- Darkside mode (`--darkside-very-insecure`): an in-memory mock chain served through the `NodeRpc` seam plus
+  a `DarksideStreamer` control plane (stage/apply blocks and transactions, reorgs, captured sent
+  transactions, staged subtree roots) for deterministic wallet tests. Never use in production.
 
 ### P4 — Mempool, subtrees, t-addr txns & nullifiers
 - `GetBlockNullifiers` and `GetBlockRangeNullifiers` (blocks pruned to shielded nullifiers only).

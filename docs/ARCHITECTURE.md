@@ -47,6 +47,7 @@ The backend is **`zebrad`**. The connection is plain HTTP `POST` JSON-RPC (no TL
 | `src/cache.rs` | On-disk compact-block store (`redb`). | P2 |
 | `src/ingestor.rs` | Background task that polls the node and fills the cache; reorg handling. | P2 |
 | `src/metrics.rs` | Serves Prometheus metrics over an HTTP `/metrics` endpoint. | P5 |
+| `src/darkside.rs` | Darkside test harness: the in-memory mock chain (`DarksideState`), its `NodeRpc` implementation (`DarksideNode`), and the `DarksideStreamer` control service. | P5 |
 
 ## Method classification
 
@@ -134,6 +135,53 @@ Notable series: `grpc_server_handled_total{grpc_service,grpc_method,grpc_code}` 
 gRPC status) and `grpc_server_handling_seconds` (latency histogram). The registry is empty until the first gRPC
 request, so `/metrics` returns nothing until there has been some traffic.
 
+## Darkside mode
+
+Darkside mode replaces the real node with a controllable, in-memory mock chain, so wallet behaviour can be
+exercised deterministically — reorgs, confirmations, and edge cases are scripted by the test rather than
+waited for on a live chain. It is enabled with `--darkside-very-insecure` and must never be used in
+production. Two gRPC services are served on the same port:
+
+- `CompactTxStreamer` — the normal wallet-facing service, unchanged. The wallet does not know its data is mock.
+- `DarksideStreamer` — a control plane the test drives to fabricate the chain.
+
+### How it works
+
+The injection point is the `NodeRpc` seam. In darkside mode the service is built over a `DarksideNode`, a
+`NodeRpc` implementation backed by a `Mutex<DarksideState>` (the in-memory chain) in place of the JSON-RPC
+`NodeClient`. The cache, the block-serving methods, and the `CompactTxStreamer` implementation are reused
+unchanged: the ingestor is not spawned and the cache stays empty, so every block read falls back to the mock
+node. The `DarksideStreamer` service shares the same `DarksideState` and mutates it.
+
+State is built with a stage-then-apply model:
+
+- `StageBlocks*` / `StageTransactions*` fill a staging area; nothing is presented yet. `StageBlocksCreate`
+  manufactures synthetic empty blocks at consecutive heights.
+- `ApplyStaged(height)` merges staged blocks into the active chain (rewriting from the staged block's height,
+  which is how a reorg is produced), mines staged transactions into their block by height, re-chains each
+  block's previous-hash field, sets the presented tip, and clears the staging area.
+
+Each active block tracks its accumulated Sapling and Orchard commitment-tree sizes, carried forward from the
+sizes set by `Reset`; mining a transaction grows the sizes of its block and every later block. Blocks are
+held split as `(header, [tx_bytes])` and re-serialized on demand, so a mined transaction is appended without
+rewriting length prefixes by hand. Transactions submitted through the production `SendTransaction` are
+captured into a separate pool that the test reads back with `GetIncomingTransactions`.
+
+### The GetSubtreeRoots exception
+
+Every wallet-facing read is served from `DarksideState` through the `NodeRpc` seam, with one exception:
+`GetSubtreeRoots` derives its response from the completing block, which the mock has no good way to fake. So
+in darkside mode the subtree roots are staged complete — with their completing block hash and height already
+set — via `SetSubtreeRoots`, and served verbatim. This is the only point in `CompactTxStreamer` that is
+darkside-aware, reached through an optional handle to the shared state that is `None` on the live path.
+
+### Known limitations
+
+- The chain name and a tree state's `network` field come from `Reset`/config rather than being honoured
+  per staged tree state; this is sufficient for the standard "main" test vectors.
+- The URL-based staging RPCs (`StageBlocks`/`StageTransactions`) fetch over plain HTTP; HTTPS sources would
+  require a TLS-enabled HTTP client.
+
 ## Block parsing
 
 `src/compact.rs` turns a raw block into a `CompactBlock`. The header is parsed by hand (fixed layout) to
@@ -170,7 +218,10 @@ Unit tests run against a fake node rather than a live `zebrad`. The `NodeRpc` tr
 seam: `service`, `ingestor`, and `fetch` depend on `Arc<dyn NodeRpc>`, so a test injects a `FakeNode`
 (`src/testutil.rs`) with canned responses to characterize the RPC↔gRPC translation, reorg handling, and
 block assembly. The `NodeClient` HTTP/JSON layer itself is covered separately with a `wiremock` mock
-server, and the parser is pinned byte-for-byte by the golden fixtures in `testdata/`.
+server, and the parser is pinned byte-for-byte by the golden fixtures in `testdata/`. Darkside reuses the
+same seam — its stage/apply engine and `DarksideNode` reads are unit-tested directly, and the end-to-end
+path is checked by driving the real `Streamer` (`GetBlockRange`, `GetSubtreeRoots`) against a `DarksideNode`
+with an empty cache.
 
 ## Phase status
 
@@ -189,3 +240,6 @@ server, and the parser is pinned byte-for-byte by the golden fixtures in `testda
   (pruned to shielded nullifiers), `GetTaddressTxids`/`GetTaddressTransactions`, `GetSubtreeRoots`
   (`z_getsubtreesbyindex` + the completing block from the cache), `GetMempoolTx`, and `GetMempoolStream` (a
   poll loop that ends when a new block is mined). All `CompactTxStreamer` methods are now implemented.
+- **P5 — Hardening**: in progress. TLS, Prometheus metrics, Docker, and graceful shutdown are in place, plus
+  darkside mode (`--darkside-very-insecure`): a `DarksideStreamer` control plane over an in-memory mock chain
+  served through the `NodeRpc` seam, for deterministic wallet tests.
