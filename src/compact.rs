@@ -175,6 +175,83 @@ pub fn compact_tx_from_raw(index: u64, raw: &[u8]) -> Result<CompactTx, ParseErr
     Ok(to_compact_tx(index, &transaction, false))
 }
 
+/// Split a raw block into its header bytes and the raw bytes of each transaction.
+///
+/// The inverse of `header + CompactSize(txs.len()) + txs.concat()`: the header runs up to (and
+/// including) the equihash solution, and each transaction's slice is recovered from the cursor
+/// positions before and after `Transaction::read`. Used by darkside to hold blocks as
+/// `(header, Vec<tx_bytes>)` and rebuild them on demand.
+pub fn split_block(raw: &[u8]) -> Result<(Vec<u8>, Vec<Vec<u8>>), ParseError> {
+    if raw.len() < HEADER_PREFIX_LEN {
+        return Err(ParseError::Truncated);
+    }
+    let mut header_cursor = Cursor::new(&raw[HEADER_PREFIX_LEN..]);
+    let solution_len = CompactSize::read(&mut header_cursor)? as usize;
+    let header_end = HEADER_PREFIX_LEN + header_cursor.position() as usize + solution_len;
+    if raw.len() < header_end {
+        return Err(ParseError::Truncated);
+    }
+    let header = raw[..header_end].to_vec();
+
+    let mut tx_cursor = Cursor::new(&raw[header_end..]);
+    let tx_count = CompactSize::read(&mut tx_cursor)? as usize;
+    let mut txs = Vec::with_capacity(tx_count);
+    for _ in 0..tx_count {
+        let start = tx_cursor.position() as usize;
+        Transaction::read(&mut tx_cursor, BranchId::Nu5)?;
+        let end = tx_cursor.position() as usize;
+        txs.push(raw[header_end + start..header_end + end].to_vec());
+    }
+    Ok((header, txs))
+}
+
+/// Append the canonical Bitcoin `CompactSize` encoding of `value` to `buf`. Infallible (writes to a
+/// growable buffer), unlike `zcash_encoding::CompactSize::write`, which returns an `io::Result`.
+pub fn write_compact_size(buf: &mut Vec<u8>, value: u64) {
+    if value < 253 {
+        buf.push(value as u8);
+    } else if value <= u16::MAX as u64 {
+        buf.push(253);
+        buf.extend_from_slice(&(value as u16).to_le_bytes());
+    } else if value <= u32::MAX as u64 {
+        buf.push(254);
+        buf.extend_from_slice(&(value as u32).to_le_bytes());
+    } else {
+        buf.push(255);
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Read the block height from a raw coinbase transaction's BIP34 scriptSig.
+pub fn coinbase_height_from_raw(raw_tx: &[u8]) -> Result<u64, ParseError> {
+    let transaction = Transaction::read(&mut Cursor::new(raw_tx), BranchId::Nu5)?;
+    coinbase_height(&transaction)
+}
+
+/// Count the Sapling outputs and Orchard actions in a raw transaction, used to grow the
+/// note-commitment tree sizes as darkside mines transactions into blocks.
+pub fn shielded_counts(raw_tx: &[u8]) -> Result<(u32, u32), ParseError> {
+    let transaction = Transaction::read(&mut Cursor::new(raw_tx), BranchId::Nu5)?;
+    let sapling_outputs = transaction
+        .sapling_bundle()
+        .map(|bundle| bundle.shielded_outputs().len() as u32)
+        .unwrap_or(0);
+    let orchard_actions = transaction
+        .orchard_bundle()
+        .map(|bundle| bundle.actions().len() as u32)
+        .unwrap_or(0);
+    Ok((sapling_outputs, orchard_actions))
+}
+
+/// Compute the display-order (big-endian) hex txid of a raw transaction, matching what a wallet
+/// derives from `CompactTx.txid`.
+pub fn txid_display(raw_tx: &[u8]) -> Result<String, ParseError> {
+    let transaction = Transaction::read(&mut Cursor::new(raw_tx), BranchId::Nu5)?;
+    let mut bytes = transaction.txid().as_ref().to_vec();
+    bytes.reverse();
+    Ok(hex::encode(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +292,45 @@ mod tests {
                 "compact block structure mismatch at height {}",
                 fixture.block
             );
+        }
+    }
+
+    #[test]
+    fn shielded_counts_matches_v5_vectors() {
+        // testdata/tx_v5.json rows: [tx_hex, txid, ...]; index 10 is nOutputsSapling, 14 nActionsOrchard.
+        let json = std::fs::read_to_string("testdata/tx_v5.json").unwrap();
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&json).unwrap();
+        let mut checked = 0;
+        for row in rows.iter().skip(2) {
+            let mut raw = hex::decode(row[0].as_str().unwrap()).unwrap();
+            // The vectors carry synthetic consensus branch ids (offset 8..12); rewrite to NU5 so the
+            // parser accepts them. Real darkside data already uses real branch ids.
+            raw[8..12].copy_from_slice(&0xc2d6_d0b4u32.to_le_bytes());
+            let expected = (
+                row[10].as_u64().unwrap() as u32,
+                row[14].as_u64().unwrap() as u32,
+            );
+            assert_eq!(shielded_counts(&raw).unwrap(), expected);
+            checked += 1;
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn split_block_round_trips_header_and_transactions() {
+        let blocks = std::fs::read_to_string("testdata/blocks").unwrap();
+        let lines: Vec<&str> = blocks.lines().filter(|l| !l.is_empty()).collect();
+        assert!(!lines.is_empty());
+        for line in lines {
+            let raw = hex::decode(line).unwrap();
+            let (header, txs) = split_block(&raw).unwrap();
+
+            let mut rebuilt = header;
+            write_compact_size(&mut rebuilt, txs.len() as u64);
+            for tx in &txs {
+                rebuilt.extend_from_slice(tx);
+            }
+            assert_eq!(rebuilt, raw, "split_block round-trip mismatch");
         }
     }
 }

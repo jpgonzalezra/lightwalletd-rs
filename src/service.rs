@@ -38,17 +38,26 @@ pub struct Streamer {
     node: Arc<dyn NodeRpc>,
     cache: Arc<Cache>,
     network: String,
+    /// In darkside mode, the shared mock state used to serve `GetSubtreeRoots` directly; `None` live.
+    darkside: Option<crate::darkside::DarksideHandle>,
     /// Number of `Ping` calls currently in flight, shared across cloned services (testing only).
     ping_count: Arc<AtomicI64>,
 }
 
 impl Streamer {
-    /// Build the service from a node client, a shared block cache, and the network name.
-    pub fn new(node: Arc<dyn NodeRpc>, cache: Arc<Cache>, network: String) -> Self {
+    /// Build the service from a node client, a shared block cache, and the network name. `darkside`
+    /// is `Some` only in darkside mode, where it overrides `GetSubtreeRoots`.
+    pub fn new(
+        node: Arc<dyn NodeRpc>,
+        cache: Arc<Cache>,
+        network: String,
+        darkside: Option<crate::darkside::DarksideHandle>,
+    ) -> Self {
         Self {
             node,
             cache,
             network,
+            darkside,
             ping_count: Arc::new(AtomicI64::new(0)),
         }
     }
@@ -476,6 +485,17 @@ impl CompactTxStreamer for Streamer {
             Ok(ShieldedProtocol::Orchard) => "orchard",
             Err(_) => return Err(Status::invalid_argument("unrecognized shielded protocol")),
         };
+        // In darkside mode the roots are staged complete (with their completing block already set),
+        // so they are served verbatim rather than computed from the cached blocks.
+        if let Some(state) = &self.darkside {
+            let roots = state.lock().await.subtree_roots_for(
+                arg.shielded_protocol,
+                arg.start_index,
+                arg.max_entries,
+            );
+            let stream = tokio_stream::iter(roots.into_iter().map(Ok::<_, Status>));
+            return Ok(Response::new(Box::pin(stream)));
+        }
         let subtrees = self
             .node
             .get_subtrees(protocol, arg.start_index, arg.max_entries)
@@ -543,7 +563,7 @@ mod tests {
     fn streamer_with(node: Arc<dyn NodeRpc>) -> (tempfile::TempDir, Streamer) {
         let dir = tempfile::tempdir().unwrap();
         let cache = Arc::new(Cache::open(&dir.path().join("blocks.redb")).unwrap());
-        (dir, Streamer::new(node, cache, "main".to_string()))
+        (dir, Streamer::new(node, cache, "main".to_string(), None))
     }
 
     fn address_utxo(txid: &str, height: u64) -> node::AddressUtxo {

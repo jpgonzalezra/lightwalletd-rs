@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 mod cache;
 mod compact;
 mod config;
+mod darkside;
 mod encoding;
 mod fetch;
 mod filter;
@@ -22,6 +23,7 @@ use cache::Cache;
 use config::Cli;
 use node::NodeRpc;
 use proto::compact_tx_streamer_server::CompactTxStreamerServer;
+use proto::darkside_streamer_server::DarksideStreamerServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,36 +34,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Cli::parse().resolve()?;
-    let node: Arc<dyn NodeRpc> = Arc::new(node::NodeClient::new(&config.node));
-
-    // Query the chain once: its name keys the cache file, and its Sapling activation height is the
-    // default place to start ingesting from.
-    let chain_info = node.get_blockchain_info().await?;
-    let start_height = config.start_height.unwrap_or_else(|| {
-        chain_info
-            .upgrades
-            .values()
-            .find(|u| u.name.eq_ignore_ascii_case("sapling"))
-            .map(|u| u.activationheight)
-            .unwrap_or(0)
-    });
 
     std::fs::create_dir_all(&config.data_dir)?;
-    let cache_path = config
-        .data_dir
-        .join(format!("{}-blocks.redb", chain_info.chain));
-    let cache = Arc::new(Cache::open(&cache_path)?);
-
-    tracing::info!(
-        grpc_bind = %config.grpc_bind,
-        node_url = %config.node.url,
-        chain = %chain_info.chain,
-        start_height,
-        cache = %cache_path.display(),
-        "lightwalletd-rs starting"
-    );
-
-    tokio::spawn(ingestor::run(node.clone(), cache.clone(), start_height));
 
     if let Some(metrics_addr) = config.metrics_bind {
         tracing::info!(metrics_bind = %metrics_addr, "serving Prometheus metrics on /metrics");
@@ -72,7 +46,6 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let streamer = service::Streamer::new(node, cache, chain_info.chain);
     let mut server = Server::builder().layer(tonic_prometheus_layer::MetricsLayer::new());
     match &config.tls {
         config::TlsConfig::Enabled { cert, key } => {
@@ -83,13 +56,78 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("running without TLS (plaintext) — do not use in production");
         }
     }
-    server
-        .add_service(CompactTxStreamerServer::new(streamer))
-        .serve_with_shutdown(config.grpc_bind, shutdown_signal())
-        .await?;
+
+    if config.darkside {
+        // Mock chain: serve both `CompactTxStreamer` (from the in-memory state) and the
+        // `DarksideStreamer` control plane. No real node, no ingestor; the cache stays empty so
+        // every block read falls back to the mock node.
+        tracing::warn!("running in darkside mode — mock chain, never use in production");
+
+        let state: darkside::DarksideHandle =
+            Arc::new(tokio::sync::Mutex::new(darkside::DarksideState::new()));
+        let node: Arc<dyn NodeRpc> = Arc::new(darkside::DarksideNode::new(state.clone()));
+        let cache = Arc::new(Cache::open(&config.data_dir.join("darkside-blocks.redb"))?);
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        tracing::info!(grpc_bind = %config.grpc_bind, "lightwalletd-rs darkside starting");
+
+        let darkside_service = darkside::DarksideService::new(state.clone(), shutdown.clone());
+        let streamer = service::Streamer::new(node, cache, "main".to_string(), Some(state));
+
+        server
+            .add_service(CompactTxStreamerServer::new(streamer))
+            .add_service(DarksideStreamerServer::new(darkside_service))
+            .serve_with_shutdown(config.grpc_bind, darkside_shutdown(shutdown))
+            .await?;
+    } else {
+        // Real node: query the chain, open the cache, spawn the ingestor, serve `CompactTxStreamer`.
+        let node: Arc<dyn NodeRpc> = Arc::new(node::NodeClient::new(&config.node));
+
+        // Query the chain once: its name keys the cache file, and its Sapling activation height is
+        // the default place to start ingesting from.
+        let chain_info = node.get_blockchain_info().await?;
+        let start_height = config.start_height.unwrap_or_else(|| {
+            chain_info
+                .upgrades
+                .values()
+                .find(|u| u.name.eq_ignore_ascii_case("sapling"))
+                .map(|u| u.activationheight)
+                .unwrap_or(0)
+        });
+
+        let cache_path = config
+            .data_dir
+            .join(format!("{}-blocks.redb", chain_info.chain));
+        let cache = Arc::new(Cache::open(&cache_path)?);
+
+        tracing::info!(
+            grpc_bind = %config.grpc_bind,
+            node_url = %config.node.url,
+            chain = %chain_info.chain,
+            start_height,
+            cache = %cache_path.display(),
+            "lightwalletd-rs starting"
+        );
+
+        tokio::spawn(ingestor::run(node.clone(), cache.clone(), start_height));
+
+        let streamer = service::Streamer::new(node, cache, chain_info.chain, None);
+        server
+            .add_service(CompactTxStreamerServer::new(streamer))
+            .serve_with_shutdown(config.grpc_bind, shutdown_signal())
+            .await?;
+    }
     tracing::info!("server stopped");
 
     Ok(())
+}
+
+/// Resolve when either an OS signal arrives or the `Stop` gRPC fires the shutdown notifier.
+async fn darkside_shutdown(notify: Arc<tokio::sync::Notify>) {
+    tokio::select! {
+        _ = shutdown_signal() => {},
+        _ = notify.notified() => tracing::info!("stop requested, draining connections"),
+    }
 }
 
 /// Resolve when the process receives `SIGINT` (Ctrl-C) or `SIGTERM` (e.g. `docker stop`), so the gRPC

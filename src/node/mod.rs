@@ -7,8 +7,9 @@
 mod types;
 
 pub use types::{
-    AddressUtxo, GetAddressBalance, GetBlockVerbose, GetBlockchainInfo, GetInfo, GetRawTransaction,
-    GetSubtrees, GetTreeState,
+    AddressUtxo, Consensus, GetAddressBalance, GetBlockVerbose, GetBlockchainInfo, GetInfo,
+    GetRawTransaction, GetSubtrees, GetTreeState, TreeCommitments, TreePool, TreeSize, Trees,
+    Upgrade,
 };
 
 use serde::{Deserialize, Serialize};

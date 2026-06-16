@@ -63,6 +63,11 @@ pub struct Cli {
     /// Address to serve Prometheus metrics on (`/metrics`); metrics are disabled if unset.
     #[arg(long)]
     pub metrics_bind: Option<SocketAddr>,
+
+    /// Run as a darkside mock server (no real node) for deterministic wallet tests. Insecure —
+    /// testing only; never deploy in production.
+    #[arg(long = "darkside-very-insecure")]
+    pub darkside: bool,
 }
 
 /// Resolved runtime configuration.
@@ -80,6 +85,8 @@ pub struct Config {
     pub tls: TlsConfig,
     /// Address to serve Prometheus metrics on, if enabled.
     pub metrics_bind: Option<SocketAddr>,
+    /// Whether to run as a darkside mock server instead of proxying a real node.
+    pub darkside: bool,
 }
 
 /// How the gRPC server presents itself on the wire.
@@ -148,6 +155,7 @@ impl Cli {
             start_height: self.start_height,
             tls,
             metrics_bind: self.metrics_bind,
+            darkside: self.darkside,
         })
     }
 }
@@ -235,6 +243,7 @@ mod tests {
             tls_key: None,
             no_tls: true,
             metrics_bind: None,
+            darkside: false,
         }
     }
 
