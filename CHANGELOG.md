@@ -15,6 +15,8 @@ All notable changes to this project are documented here. The format is loosely b
 - Darkside mode (`--darkside-very-insecure`): an in-memory mock chain served through the `NodeRpc` seam plus
   a `DarksideStreamer` control plane (stage/apply blocks and transactions, reorgs, captured sent
   transactions, staged subtree roots) for deterministic wallet tests. Never use in production.
+- Darkside mempool: `GetMempoolTx`/`GetMempoolStream` serve the staging area, so transactions and blocks staged
+  without `ApplyStaged` appear as mempool transactions until they are mined.
 
 ### P4 — Mempool, subtrees, t-addr txns & nullifiers
 - `GetBlockNullifiers` and `GetBlockRangeNullifiers` (blocks pruned to shielded nullifiers only).

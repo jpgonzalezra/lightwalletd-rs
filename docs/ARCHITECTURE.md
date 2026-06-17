@@ -177,8 +177,18 @@ State is built with a stage-then-apply model:
 Each active block tracks its accumulated Sapling and Orchard commitment-tree sizes, carried forward from the
 sizes set by `Reset`; mining a transaction grows the sizes of its block and every later block. Blocks are
 held split as `(header, [tx_bytes])` and re-serialized on demand, so a mined transaction is appended without
-rewriting length prefixes by hand. Transactions submitted through the production `SendTransaction` are
-captured into a separate pool that the test reads back with `GetIncomingTransactions`.
+rewriting length prefixes by hand.
+
+The state keeps three transaction pools, each surfaced by a different RPC:
+
+- The **staging area** (staged blocks plus staged transactions) is the mempool. `GetMempoolTx` lists every
+  staged transaction and every transaction of a staged block; `GetMempoolStream` emits only the loose staged
+  transactions, which are reported at height 0 (a staged block's transactions carry that block's height).
+  `ApplyStaged` drains the staging area into the active chain, so a staged transaction leaves the mempool once
+  it is mined.
+- The **active chain** is the mined history, served by `GetBlock`/`GetBlockRange`.
+- The **`SendTransaction` pool** captures transactions submitted through the production RPC and is read back
+  only by `GetIncomingTransactions`; it does not enter the mempool.
 
 ### The GetSubtreeRoots exception
 
@@ -233,8 +243,8 @@ seam: `service`, `ingestor`, and `fetch` depend on `Arc<dyn NodeRpc>`, so a test
 block assembly. The `NodeClient` HTTP/JSON layer itself is covered separately with a `wiremock` mock
 server, and the parser is pinned byte-for-byte by the golden fixtures in `testdata/`. Darkside reuses the
 same seam — its stage/apply engine and `DarksideNode` reads are unit-tested directly, and the end-to-end
-path is checked by driving the real `Streamer` (`GetBlockRange`, `GetSubtreeRoots`) against a `DarksideNode`
-with an empty cache.
+path is checked by driving the real `Streamer` (`GetBlockRange`, `GetSubtreeRoots`, `GetMempoolTx`) against a
+`DarksideNode` with an empty cache.
 
 ## Phase status
 
