@@ -32,11 +32,24 @@ The gRPC contract is the standard Zcash light-client `.proto` set, so real walle
 The backend is **`zebrad`**. The connection is plain HTTP `POST` JSON-RPC (no TLS) with HTTP Basic auth, reading
 `rpcuser`/`rpcpassword` from flags or a `zcash.conf` file. Default ports: 8232 (mainnet), 18232 (testnet/regtest).
 
+## Crate structure
+
+The crate builds as both a library and a binary. `src/lib.rs` is the library root: it declares the modules and
+exposes `run(config) -> anyhow::Result<()>`, the startup entrypoint that wires the gRPC server (TLS, the metrics
+layer, the live or darkside service stack) and serves until shutdown. `src/main.rs` is a thin binary wrapper that
+parses the CLI, initializes tracing, and calls `run`. Keeping the server in a library makes it embeddable and lets
+integration tests link against the crate's API.
+
+The `.proto` files are compiled with both server and client code generated, so the public `proto` module exposes
+the `CompactTxStreamerClient` and `DarksideStreamerClient` stubs alongside the server traits.
+
 ## Module layout
 
 | Path | Responsibility | Phase |
 |---|---|---|
-| `proto/` + `build.rs` + `src/proto.rs` | The `.proto` contract and the `tonic`/`prost` generated code. | P0 |
+| `src/lib.rs` | Library root: module declarations and the `run` startup entrypoint. | P5 |
+| `src/main.rs` | Binary wrapper: parses the CLI, initializes tracing, calls `run`. | P5 |
+| `proto/` + `build.rs` + `src/proto.rs` | The `.proto` contract and the `tonic`/`prost` generated code (server and client). | P0 |
 | `src/config.rs` | Configuration: CLI flags + `zcash.conf` parsing. | P0 |
 | `src/node/` | JSON-RPC client to `zebrad`: the `NodeRpc` trait (typed RPC surface, with a generic `request` helper) and its `NodeClient` implementation. | P0 |
 | `src/service.rs` | Implementation of the `CompactTxStreamer` gRPC service. | P0+ |
@@ -242,4 +255,6 @@ with an empty cache.
   poll loop that ends when a new block is mined). All `CompactTxStreamer` methods are now implemented.
 - **P5 — Hardening**: in progress. TLS, Prometheus metrics, Docker, and graceful shutdown are in place, plus
   darkside mode (`--darkside-very-insecure`): a `DarksideStreamer` control plane over an in-memory mock chain
-  served through the `NodeRpc` seam, for deterministic wallet tests.
+  served through the `NodeRpc` seam, for deterministic wallet tests. The crate is split into a library
+  (`src/lib.rs`, exposing `run`) and a thin binary, with the gRPC client generated alongside the server, so it can
+  be driven in-process by integration tests.
