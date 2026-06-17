@@ -476,6 +476,22 @@ impl DarksideState {
             })
     }
 
+    /// Display-order txids of every transaction in the staging area: all transactions of every
+    /// staged block, then every staged transaction. This is the mock mempool.
+    fn raw_mempool(&self) -> Result<Vec<String>, DarksideError> {
+        let mut txids = Vec::new();
+        for raw in &self.staged_blocks {
+            let (_, txs) = compact::split_block(raw)?;
+            for tx in &txs {
+                txids.push(compact::txid_display(tx)?);
+            }
+        }
+        for (_, raw) in &self.staged_txs {
+            txids.push(compact::txid_display(raw)?);
+        }
+        Ok(txids)
+    }
+
     fn raw_transaction(&self, display_txid: &str) -> Result<GetRawTransaction, DarksideError> {
         for (offset, block) in self.active.iter().enumerate() {
             for tx in &block.txs {
@@ -485,6 +501,26 @@ impl DarksideState {
                         height: (self.start_height + offset as u64) as i64,
                     });
                 }
+            }
+        }
+        for raw in &self.staged_blocks {
+            let (_, txs) = compact::split_block(raw)?;
+            let height = raw_block_height(raw)? as i64;
+            for tx in &txs {
+                if compact::txid_display(tx)? == display_txid {
+                    return Ok(GetRawTransaction {
+                        hex: hex::encode(tx),
+                        height,
+                    });
+                }
+            }
+        }
+        for (_, raw) in &self.staged_txs {
+            if compact::txid_display(raw)? == display_txid {
+                return Ok(GetRawTransaction {
+                    hex: hex::encode(raw),
+                    height: 0,
+                });
             }
         }
         for (_, raw, height) in &self.addr_txs {
@@ -738,7 +774,7 @@ impl NodeRpc for DarksideNode {
     }
 
     async fn get_raw_mempool(&self) -> Result<Vec<String>, NodeError> {
-        Ok(Vec::new())
+        Ok(self.state.lock().await.raw_mempool()?)
     }
 }
 
@@ -1160,6 +1196,85 @@ mod tests {
         assert!(matches!(error, DarksideError::Invalid(_)));
     }
 
+    // --- Mempool: staging area served as mempool -------------------------------------------
+
+    #[test]
+    fn raw_mempool_lists_staged_transactions() {
+        let (tx, _, _) = shielded_tx();
+        let mut state = DarksideState::new();
+        state.reset(&meta(START_HEIGHT));
+        state.stage_transaction(START_HEIGHT, tx.clone()).unwrap();
+
+        assert_eq!(
+            state.raw_mempool().unwrap(),
+            vec![compact::txid_display(&tx).unwrap()]
+        );
+    }
+
+    #[test]
+    fn raw_mempool_lists_staged_block_transactions() {
+        let block = blocks()[3].clone();
+        let (_, txs) = compact::split_block(&block).unwrap();
+        let expected: Vec<String> = txs
+            .iter()
+            .map(|tx| compact::txid_display(tx).unwrap())
+            .collect();
+
+        let mut state = DarksideState::new();
+        state.reset(&meta(START_HEIGHT));
+        state.stage_block(block).unwrap();
+
+        assert_eq!(state.raw_mempool().unwrap(), expected);
+    }
+
+    #[test]
+    fn raw_mempool_empty_after_apply_clears_staging() {
+        let (tx, _, _) = shielded_tx();
+        let mut state = DarksideState::new();
+        state.reset(&meta(START_HEIGHT));
+        state.stage_block(blocks()[0].clone()).unwrap();
+        state.stage_transaction(START_HEIGHT, tx).unwrap();
+        state.apply_staged(START_HEIGHT as i64).unwrap();
+
+        assert!(state.raw_mempool().unwrap().is_empty());
+    }
+
+    #[test]
+    fn raw_transaction_finds_staged_tx_at_height_zero() {
+        let (tx, _, _) = shielded_tx();
+        let mut state = DarksideState::new();
+        state.reset(&meta(START_HEIGHT));
+        state.stage_transaction(START_HEIGHT, tx.clone()).unwrap();
+
+        let found = state
+            .raw_transaction(&compact::txid_display(&tx).unwrap())
+            .unwrap();
+        assert_eq!(found.height, 0);
+        assert_eq!(found.hex, hex::encode(&tx));
+    }
+
+    #[test]
+    fn raw_transaction_prefers_active_block_height() {
+        let mut state = DarksideState::new();
+        state.reset(&meta(START_HEIGHT));
+        for raw in blocks().into_iter().take(4) {
+            state.stage_block(raw).unwrap();
+        }
+        state.apply_staged(START_HEIGHT as i64 + 3).unwrap();
+
+        // The same transaction is both mined (in block 380643) and re-staged; the active copy wins
+        // and reports its block height, not the staged-transaction sentinel 0.
+        let (_, txs) = compact::split_block(&blocks()[3]).unwrap();
+        state
+            .stage_transaction(START_HEIGHT, txs[1].clone())
+            .unwrap();
+
+        let found = state
+            .raw_transaction(&compact::txid_display(&txs[1]).unwrap())
+            .unwrap();
+        assert_eq!(found.height, START_HEIGHT as i64 + 3);
+    }
+
     // --- Phase 3: DarksideNode + Streamer --------------------------------------------------
 
     #[tokio::test]
@@ -1291,5 +1406,50 @@ mod tests {
         let root = roots[0].as_ref().unwrap();
         assert_eq!(root.completing_block_height, 380640);
         assert_eq!(root.root_hash, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn streamer_get_mempool_tx_emits_staged_transaction() {
+        use crate::proto::GetMempoolTxRequest;
+        use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
+        use tokio_stream::StreamExt;
+
+        let handle = applied_handle(3).await;
+        let (tx, _, _) = shielded_tx();
+        // Stage a transaction without applying it: it stays in the mempool (the staging area).
+        handle
+            .lock()
+            .await
+            .stage_transaction(START_HEIGHT, tx.clone())
+            .unwrap();
+        let node: Arc<dyn NodeRpc> = Arc::new(DarksideNode::new(handle.clone()));
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(crate::cache::Cache::open(&dir.path().join("blocks.redb")).unwrap());
+        let streamer = crate::service::Streamer::new(node, cache, "main".to_string(), Some(handle));
+
+        let expected_txid = compact::compact_tx_from_raw(0, &tx).unwrap().txid;
+
+        let emitted: Vec<_> = streamer
+            .get_mempool_tx(Request::new(GetMempoolTxRequest::default()))
+            .await
+            .unwrap()
+            .into_inner()
+            .collect()
+            .await;
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].as_ref().unwrap().txid, expected_txid);
+
+        // An exclusion suffix matching the txid (compared in protocol order) drops it.
+        let excluded: Vec<_> = streamer
+            .get_mempool_tx(Request::new(GetMempoolTxRequest {
+                exclude_txid_suffixes: vec![expected_txid],
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .collect()
+            .await;
+        assert!(excluded.is_empty());
     }
 }
