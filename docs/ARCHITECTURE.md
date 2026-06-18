@@ -202,8 +202,11 @@ darkside-aware, reached through an optional handle to the shared state that is `
 
 - The chain name and a tree state's `network` field come from `Reset`/config rather than being honoured
   per staged tree state; this is sufficient for the standard "main" test vectors.
-- The URL-based staging RPCs (`StageBlocks`/`StageTransactions`) fetch over plain HTTP; HTTPS sources would
-  require a TLS-enabled HTTP client.
+- The URL-based staging RPCs (`StageBlocks`/`StageTransactions`) fetch from the given URL with the server's
+  HTTP client, which is built without TLS (the backend node is plain HTTP), so they can only fetch over
+  `http://`. For remote data served over `https://` — such as the upstream `basic-reorg` test vectors on
+  `raw.githubusercontent.com` — fetch it client-side and push it in through the streaming RPCs
+  (`StageBlocksStream`/`StageTransactionsStream`), as `contrib/smoke-test.sh` does.
 
 ## Block parsing
 
