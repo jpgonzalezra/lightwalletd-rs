@@ -48,6 +48,15 @@ deterministic wallet tests (reorgs, confirmations, edge cases). It exposes a `Da
 alongside the normal `CompactTxStreamer`. This flag is for testing only — never use it in production. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#darkside-mode).
 
+## Testing
+
+`make test` runs the unit tests and a suite of deterministic end-to-end tests (`tests/`) that drive a
+real in-process darkside server over gRPC with vendored, network-free data — these run in CI.
+
+`contrib/smoke-test.sh` is a manual, optional check that drives a live darkside binary with `grpcurl`
+and `jq` against the `basic-reorg` vector. It requires `grpcurl` and `jq` and downloads data from the
+internet, so it is not run in CI.
+
 ## Docker
 
 ```sh
