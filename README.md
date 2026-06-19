@@ -8,7 +8,8 @@ Zcash blockchain data to shielded light wallets (Zashi, Ywallet, the mobile SDKs
 It is neither a node nor a wallet: it is a **caching proxy** between a full node
 ([`zebrad`](https://github.com/ZcashFoundation/zebra)) and wallets. It pulls blocks from the node, converts them
 into `CompactBlock`s (a pruned form with the zk proofs stripped out) and streams them over gRPC. See
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). For the Zcash and Bitcoin specifications it implements, see
+[`docs/protocol-references.md`](docs/protocol-references.md).
 
 ## Status
 

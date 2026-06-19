@@ -1,7 +1,8 @@
 # Architecture
 
 This is a living document. It is updated at the end of every phase. It describes what `lightwalletd-rs` is, how
-data flows through it, and the responsibility of each module.
+data flows through it, and the responsibility of each module. For the specifications each module implements, see
+[`protocol-references.md`](protocol-references.md).
 
 ## Mental model
 
@@ -76,7 +77,8 @@ The 18 `CompactTxStreamer` methods split into two groups:
 
 Short ADRs live under [`docs/decisions/`](decisions/). Notable ones:
 
-- **Local txid computation.** Transaction IDs (including v5 / Orchard ZIP-244) are computed locally from the raw
+- **Local txid computation.** Transaction IDs (including v5 / Orchard
+  [ZIP-244](protocol-references.md#transaction-format--identifiers)) are computed locally from the raw
   block bytes via `librustzcash`, so a single non-verbose `getblock` per block suffices for transaction data. A
   verbose call is still made to obtain the note-commitment tree sizes (`ChainMetadata`), which are not part of the
   raw block.
