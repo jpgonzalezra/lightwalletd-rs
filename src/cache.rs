@@ -106,6 +106,7 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::temp_cache;
 
     fn block(height: u64, hash_byte: u8) -> CompactBlock {
         CompactBlock {
@@ -113,12 +114,6 @@ mod tests {
             hash: vec![hash_byte; 32],
             ..Default::default()
         }
-    }
-
-    fn temp_cache() -> (tempfile::TempDir, Cache) {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(&dir.path().join("blocks.redb")).unwrap();
-        (dir, cache)
     }
 
     #[test]

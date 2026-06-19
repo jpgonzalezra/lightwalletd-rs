@@ -75,13 +75,7 @@ mod tests {
     use serde_json::json;
 
     use crate::proto::CompactBlock;
-    use crate::testutil::FakeNode;
-
-    fn temp_cache() -> (tempfile::TempDir, Cache) {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(&dir.path().join("blocks.redb")).unwrap();
-        (dir, cache)
-    }
+    use crate::testutil::{FakeNode, temp_cache};
 
     fn tip_block(height: u64, hash: Vec<u8>) -> CompactBlock {
         CompactBlock {

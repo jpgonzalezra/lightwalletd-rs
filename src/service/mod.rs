@@ -35,6 +35,9 @@ mod subtrees;
 mod transactions;
 mod treestate;
 
+#[cfg(test)]
+mod tests;
+
 /// The gRPC service. Holds a client to the backend node, the block cache, and the network name.
 #[derive(Clone)]
 pub struct Streamer {

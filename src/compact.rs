@@ -12,6 +12,7 @@ use zcash_encoding::CompactSize;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 
+use crate::encoding;
 use crate::proto::{
     ChainMetadata, CompactBlock, CompactOrchardAction, CompactSaplingOutput, CompactSaplingSpend,
     CompactTx, CompactTxIn, TxOut,
@@ -247,14 +248,13 @@ pub fn shielded_counts(raw_tx: &[u8]) -> Result<(u32, u32), ParseError> {
 /// derives from `CompactTx.txid`.
 pub fn txid_display(raw_tx: &[u8]) -> Result<String, ParseError> {
     let transaction = Transaction::read(&mut Cursor::new(raw_tx), BranchId::Nu5)?;
-    let mut bytes = transaction.txid().as_ref().to_vec();
-    bytes.reverse();
-    Ok(hex::encode(bytes))
+    Ok(encoding::wire_to_display_hex(transaction.txid().as_ref()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{shielded_v5_txs, testdata_blocks};
     use prost::Message;
     use serde::Deserialize;
 
@@ -297,32 +297,21 @@ mod tests {
 
     #[test]
     fn shielded_counts_matches_v5_vectors() {
-        // testdata/tx_v5.json rows: [tx_hex, txid, ...]; index 10 is nOutputsSapling, 14 nActionsOrchard.
-        let json = std::fs::read_to_string("testdata/tx_v5.json").unwrap();
-        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&json).unwrap();
-        let mut checked = 0;
-        for row in rows.iter().skip(2) {
-            let mut raw = hex::decode(row[0].as_str().unwrap()).unwrap();
-            // The vectors carry synthetic consensus branch ids (offset 8..12); rewrite to NU5 so the
-            // parser accepts them. Real darkside data already uses real branch ids.
-            raw[8..12].copy_from_slice(&0xc2d6_d0b4u32.to_le_bytes());
-            let expected = (
-                row[10].as_u64().unwrap() as u32,
-                row[14].as_u64().unwrap() as u32,
+        let vectors = shielded_v5_txs();
+        assert!(!vectors.is_empty());
+        for (raw, sapling_outputs, orchard_actions) in vectors {
+            assert_eq!(
+                shielded_counts(&raw).unwrap(),
+                (sapling_outputs, orchard_actions)
             );
-            assert_eq!(shielded_counts(&raw).unwrap(), expected);
-            checked += 1;
         }
-        assert!(checked > 0);
     }
 
     #[test]
     fn split_block_round_trips_header_and_transactions() {
-        let blocks = std::fs::read_to_string("testdata/blocks").unwrap();
-        let lines: Vec<&str> = blocks.lines().filter(|l| !l.is_empty()).collect();
-        assert!(!lines.is_empty());
-        for line in lines {
-            let raw = hex::decode(line).unwrap();
+        let blocks = testdata_blocks();
+        assert!(!blocks.is_empty());
+        for raw in blocks {
             let (header, txs) = split_block(&raw).unwrap();
 
             let mut rebuilt = header;

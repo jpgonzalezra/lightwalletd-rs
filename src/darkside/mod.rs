@@ -16,6 +16,9 @@ mod node;
 mod service;
 mod state;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::DarksideError;
 pub use node::DarksideNode;
 pub use service::DarksideService;

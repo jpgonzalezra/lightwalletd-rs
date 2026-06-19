@@ -1,13 +1,61 @@
-//! Test-only helpers shared across the module unit tests.
+//! Test-only helpers and fixtures shared across the module unit tests.
 
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 
+use crate::cache::Cache;
 use crate::node::{
     AddressUtxo, GetAddressBalance, GetBlockVerbose, GetBlockchainInfo, GetInfo, GetRawTransaction,
     GetSubtrees, GetTreeState, NodeError, NodeRpc,
 };
+
+/// A fresh, empty [`Cache`] in a throwaway temp dir. The returned `TempDir` must be kept alive for
+/// the cache file to outlive the test.
+pub fn temp_cache() -> (tempfile::TempDir, Cache) {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::open(&dir.path().join("blocks.redb")).unwrap();
+    (dir, cache)
+}
+
+/// The consecutive raw blocks in `testdata/blocks` (heights 380640..=380643).
+pub fn testdata_blocks() -> Vec<Vec<u8>> {
+    std::fs::read_to_string("testdata/blocks")
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| hex::decode(line).unwrap())
+        .collect()
+}
+
+/// Every v5 transaction vector in `testdata/tx_v5.json` (skipping its two header rows), each as
+/// `(raw_tx, sapling_outputs, orchard_actions)`. The consensus branch id (bytes 8..12) is patched to
+/// NU5 so the parser accepts these synthetic vectors.
+pub fn shielded_v5_txs() -> Vec<(Vec<u8>, u32, u32)> {
+    let json = std::fs::read_to_string("testdata/tx_v5.json").unwrap();
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&json).unwrap();
+    rows.iter()
+        .skip(2)
+        .map(|row| {
+            let mut raw = hex::decode(row[0].as_str().unwrap()).unwrap();
+            raw[8..12].copy_from_slice(&0xc2d6_d0b4u32.to_le_bytes());
+            (
+                raw,
+                row[10].as_u64().unwrap() as u32,
+                row[14].as_u64().unwrap() as u32,
+            )
+        })
+        .collect()
+}
+
+/// A representative v5 transaction carrying both Sapling outputs and Orchard actions (the vector with
+/// `nOutputsSapling = 2` and `nActionsOrchard = 4`).
+pub fn shielded_v5_tx() -> (Vec<u8>, u32, u32) {
+    shielded_v5_txs()
+        .into_iter()
+        .find(|(_, sapling, orchard)| *sapling == 2 && *orchard == 4)
+        .expect("a v5 vector with 2 sapling outputs and 4 orchard actions")
+}
 
 /// A configurable [`NodeRpc`] fake. Each field holds the canned response for one RPC; a method whose
 /// field is unset panics, so a test only configures the calls it exercises.
