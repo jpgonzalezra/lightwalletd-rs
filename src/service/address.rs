@@ -1,0 +1,130 @@
+//! Transparent-address methods: `GetTaddressTxids`/`GetTaddressTransactions`, `GetTaddressBalance`
+//! (and its streaming variant), and `GetAddressUtxos` (and its streaming variant).
+
+use async_stream::try_stream;
+use tonic::{Request, Response, Status};
+
+use crate::encoding;
+use crate::proto::{
+    Address, AddressList, Balance, BoxStream, GetAddressUtxosArg, GetAddressUtxosReply,
+    GetAddressUtxosReplyList, RawTransaction, TransparentAddressBlockFilter,
+};
+
+use super::{Streamer, decode_hex, mined_height};
+
+pub(super) async fn get_taddress_txids(
+    streamer: &Streamer,
+    request: Request<TransparentAddressBlockFilter>,
+) -> Result<Response<BoxStream<RawTransaction>>, Status> {
+    Ok(Response::new(taddress_transactions(
+        streamer,
+        request.into_inner(),
+    )))
+}
+
+pub(super) async fn get_taddress_transactions(
+    streamer: &Streamer,
+    request: Request<TransparentAddressBlockFilter>,
+) -> Result<Response<BoxStream<RawTransaction>>, Status> {
+    Ok(Response::new(taddress_transactions(
+        streamer,
+        request.into_inner(),
+    )))
+}
+
+pub(super) async fn get_taddress_balance(
+    streamer: &Streamer,
+    request: Request<AddressList>,
+) -> Result<Response<Balance>, Status> {
+    let address_list = request.into_inner();
+    let balance = streamer
+        .node
+        .get_address_balance(&address_list.addresses)
+        .await?;
+    Ok(Response::new(Balance {
+        value_zat: balance.balance,
+    }))
+}
+
+pub(super) async fn get_taddress_balance_stream(
+    streamer: &Streamer,
+    request: Request<tonic::Streaming<Address>>,
+) -> Result<Response<Balance>, Status> {
+    let mut incoming = request.into_inner();
+    let mut addresses = Vec::new();
+    while let Some(address) = incoming.message().await? {
+        addresses.push(address.address);
+    }
+    let balance = streamer.node.get_address_balance(&addresses).await?;
+    Ok(Response::new(Balance {
+        value_zat: balance.balance,
+    }))
+}
+
+pub(super) async fn get_address_utxos(
+    streamer: &Streamer,
+    request: Request<GetAddressUtxosArg>,
+) -> Result<Response<GetAddressUtxosReplyList>, Status> {
+    let address_utxos = collect_utxos(streamer, &request.into_inner()).await?;
+    Ok(Response::new(GetAddressUtxosReplyList { address_utxos }))
+}
+
+pub(super) async fn get_address_utxos_stream(
+    streamer: &Streamer,
+    request: Request<GetAddressUtxosArg>,
+) -> Result<Response<BoxStream<GetAddressUtxosReply>>, Status> {
+    let replies = collect_utxos(streamer, &request.into_inner()).await?;
+    let stream = tokio_stream::iter(replies.into_iter().map(Ok));
+    Ok(Response::new(Box::pin(stream)))
+}
+
+/// Fetch the UTXOs for the requested addresses, apply the `startHeight`/`maxEntries` filters, and
+/// convert them into the gRPC reply shape.
+pub(super) async fn collect_utxos(
+    streamer: &Streamer,
+    arg: &GetAddressUtxosArg,
+) -> Result<Vec<GetAddressUtxosReply>, Status> {
+    let utxos = streamer.node.get_address_utxos(&arg.addresses).await?;
+    let mut replies = Vec::new();
+    for utxo in utxos {
+        if utxo.height < arg.start_height {
+            continue;
+        }
+        if arg.max_entries > 0 && replies.len() as u32 >= arg.max_entries {
+            break;
+        }
+        let txid = encoding::display_hex_to_wire(&utxo.txid)
+            .map_err(|e| Status::internal(format!("decoding utxo txid: {e}")))?;
+        let script = decode_hex(&utxo.script, "utxo script")?;
+        replies.push(GetAddressUtxosReply {
+            address: utxo.address,
+            txid,
+            index: utxo.output_index as i32,
+            script,
+            value_zat: utxo.satoshis as i64,
+            height: utxo.height,
+        });
+    }
+    Ok(replies)
+}
+
+/// Stream one full `RawTransaction` per txid that touches the filter's address within its block
+/// range. Shared by `GetTaddressTxids` (a deprecated alias) and `GetTaddressTransactions`.
+fn taddress_transactions(
+    streamer: &Streamer,
+    filter: TransparentAddressBlockFilter,
+) -> BoxStream<RawTransaction> {
+    let node = streamer.node.clone();
+    Box::pin(try_stream! {
+        let range = filter.range.unwrap_or_default();
+        let start = range.start.map(|block| block.height).unwrap_or(0);
+        let end = range.end.map(|block| block.height).unwrap_or(0);
+        let addresses = [filter.address];
+        let txids = node.get_address_txids(&addresses, start, end).await?;
+        for txid in txids {
+            let raw = node.get_raw_transaction(&txid).await?;
+            let data = decode_hex(&raw.hex, "transaction hex")?;
+            yield RawTransaction { data, height: mined_height(raw.height) };
+        }
+    })
+}

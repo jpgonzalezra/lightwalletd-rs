@@ -8,11 +8,16 @@ pub fn display_hex_to_wire(hex: &str) -> Result<Vec<u8>, hex::FromHexError> {
     Ok(bytes)
 }
 
-/// Encode protocol (little-endian) wire bytes into display-order (big-endian) hex.
-pub fn wire_to_display_hex(bytes: &[u8]) -> String {
+/// Reverse protocol (little-endian) wire bytes into display-order (big-endian) bytes.
+pub fn wire_to_display_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut display = bytes.to_vec();
     display.reverse();
-    hex::encode(display)
+    display
+}
+
+/// Encode protocol (little-endian) wire bytes into display-order (big-endian) hex.
+pub fn wire_to_display_hex(bytes: &[u8]) -> String {
+    hex::encode(wire_to_display_bytes(bytes))
 }
 
 #[cfg(test)]
@@ -24,6 +29,14 @@ mod tests {
         assert_eq!(
             display_hex_to_wire("00112233").unwrap(),
             vec![0x33, 0x22, 0x11, 0x00]
+        );
+    }
+
+    #[test]
+    fn wire_to_display_bytes_reverses_byte_order() {
+        assert_eq!(
+            wire_to_display_bytes(&[0x33, 0x22, 0x11, 0x00]),
+            vec![0x00, 0x11, 0x22, 0x33]
         );
     }
 
