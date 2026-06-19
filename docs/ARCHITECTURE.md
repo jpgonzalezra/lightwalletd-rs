@@ -47,12 +47,12 @@ the `CompactTxStreamerClient` and `DarksideStreamerClient` stubs alongside the s
 
 | Path | Responsibility | Phase |
 |---|---|---|
-| `src/lib.rs` | Library root: module declarations and the `run` startup entrypoint. | P5 |
+| `src/lib.rs` | Library root: module declarations, the `run` startup entrypoint, and the `darkside_components` constructor that wires the darkside stack (shared by `run` and the test harness). | P5 |
 | `src/main.rs` | Binary wrapper: parses the CLI, initializes tracing, calls `run`. | P5 |
 | `proto/` + `build.rs` + `src/proto.rs` | The `.proto` contract and the `tonic`/`prost` generated code (server and client). | P0 |
 | `src/config.rs` | Configuration: CLI flags + `zcash.conf` parsing. | P0 |
 | `src/node/` | JSON-RPC client to `zebrad`: the `NodeRpc` trait (typed RPC surface, with a generic `request` helper) and its `NodeClient` implementation. | P0 |
-| `src/service.rs` | Implementation of the `CompactTxStreamer` gRPC service. | P0+ |
+| `src/service/` | Implementation of the `CompactTxStreamer` gRPC service, split by method family (`chain`, `blocks`, `transactions`, `address`, `mempool`, `treestate`, `subtrees`, `ping`); `mod.rs` holds the `Streamer` and a thin trait impl that dispatches each method to its submodule. | P0+ |
 | `src/compact.rs` | Raw block bytes → `CompactBlock`, via `librustzcash`. | P1 |
 | `src/encoding.rs` | Display-order ↔ wire-order (endianness) conversions for hashes and txids. | P3 |
 | `src/filter.rs` | Prune a compact block or transaction to the requested value pools (`poolTypes`). | P3 |
@@ -60,7 +60,7 @@ the `CompactTxStreamerClient` and `DarksideStreamerClient` stubs alongside the s
 | `src/cache.rs` | On-disk compact-block store (`redb`). | P2 |
 | `src/ingestor.rs` | Background task that polls the node and fills the cache; reorg handling. | P2 |
 | `src/metrics.rs` | Serves Prometheus metrics over an HTTP `/metrics` endpoint. | P5 |
-| `src/darkside.rs` | Darkside test harness: the in-memory mock chain (`DarksideState`), its `NodeRpc` implementation (`DarksideNode`), and the `DarksideStreamer` control service. | P5 |
+| `src/darkside/` | Darkside test harness, split by responsibility: `error` (error type), `block` (raw-block helpers and the held `ActiveBlock`), `state` (the in-memory mock chain `DarksideState`), `node` (its `NodeRpc` implementation `DarksideNode`), and `service` (the `DarksideStreamer` control plane). | P5 |
 
 ## Method classification
 

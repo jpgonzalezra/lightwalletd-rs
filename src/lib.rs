@@ -1,5 +1,6 @@
 //! lightwalletd-rs: a Rust lightwalletd for Zcash, usable as a library.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use tonic::transport::{Identity, Server, ServerTlsConfig};
@@ -55,17 +56,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         // `DarksideStreamer` control plane. No real node, no ingestor; the cache stays empty so
         // every block read falls back to the mock node.
         tracing::warn!("running in darkside mode — mock chain, never use in production");
-
-        let state: darkside::DarksideHandle =
-            Arc::new(tokio::sync::Mutex::new(darkside::DarksideState::new()));
-        let node: Arc<dyn NodeRpc> = Arc::new(darkside::DarksideNode::new(state.clone()));
-        let cache = Arc::new(Cache::open(&config.data_dir.join("darkside-blocks.redb"))?);
-        let shutdown = Arc::new(tokio::sync::Notify::new());
-
         tracing::info!(grpc_bind = %config.grpc_bind, "lightwalletd-rs darkside starting");
 
-        let darkside_service = darkside::DarksideService::new(state.clone(), shutdown.clone());
-        let streamer = service::Streamer::new(node, cache, "main".to_string(), Some(state));
+        let (streamer, darkside_service, _state, shutdown) =
+            darkside_components(&config.data_dir.join("darkside-blocks.redb"))?;
 
         server
             .add_service(CompactTxStreamerServer::new(streamer))
@@ -113,6 +107,28 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     tracing::info!("server stopped");
 
     Ok(())
+}
+
+/// Wire the darkside mock chain: the shared state, a `DarksideNode` over it, the block cache at
+/// `cache_path`, the shutdown notifier, the `DarksideService` control plane, and a `Streamer` bound
+/// to the same state. Returned as `(streamer, control service, shared state, shutdown)` so `run`'s
+/// darkside branch and the in-process test harness wire identical components to their transport.
+pub fn darkside_components(
+    cache_path: &Path,
+) -> anyhow::Result<(
+    service::Streamer,
+    darkside::DarksideService,
+    darkside::DarksideHandle,
+    Arc<tokio::sync::Notify>,
+)> {
+    let state: darkside::DarksideHandle =
+        Arc::new(tokio::sync::Mutex::new(darkside::DarksideState::new()));
+    let node: Arc<dyn NodeRpc> = Arc::new(darkside::DarksideNode::new(state.clone()));
+    let cache = Arc::new(Cache::open(cache_path)?);
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let darkside_service = darkside::DarksideService::new(state.clone(), shutdown.clone());
+    let streamer = service::Streamer::new(node, cache, "main".to_string(), Some(state.clone()));
+    Ok((streamer, darkside_service, state, shutdown))
 }
 
 /// Resolve when either an OS signal arrives or the `Stop` gRPC fires the shutdown notifier.

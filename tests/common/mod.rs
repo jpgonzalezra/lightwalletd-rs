@@ -5,11 +5,6 @@
 //! own binary and uses only the helpers it needs.
 #![allow(dead_code)]
 
-use std::sync::Arc;
-
-use lightwalletd_rs::cache::Cache;
-use lightwalletd_rs::darkside::{DarksideHandle, DarksideNode, DarksideService, DarksideState};
-use lightwalletd_rs::node::NodeRpc;
 use lightwalletd_rs::proto::compact_tx_streamer_client::CompactTxStreamerClient;
 use lightwalletd_rs::proto::compact_tx_streamer_server::CompactTxStreamerServer;
 use lightwalletd_rs::proto::darkside_streamer_client::DarksideStreamerClient;
@@ -17,8 +12,6 @@ use lightwalletd_rs::proto::darkside_streamer_server::DarksideStreamerServer;
 use lightwalletd_rs::proto::{
     DarksideBlock, DarksideEmptyBlocks, DarksideHeight, DarksideMetaState, RawTransaction,
 };
-use lightwalletd_rs::service::Streamer;
-use tokio::sync::{Mutex, Notify};
 use tonic::transport::{Channel, Endpoint, Server};
 
 /// A running darkside server plus both clients connected to it. Dropping it aborts the server task
@@ -31,16 +24,12 @@ pub struct TestServer {
 }
 
 impl TestServer {
-    /// Wire the darkside state to a mock node, control service, and streamer (mirroring the darkside
-    /// branch of `lightwalletd_rs::run`), serve on `127.0.0.1:0`, and connect both clients.
+    /// Wire the darkside components with the shared `lightwalletd_rs::darkside_components` constructor
+    /// (the same one `run`'s darkside branch uses), serve on `127.0.0.1:0`, and connect both clients.
     pub async fn start() -> Self {
-        let state: DarksideHandle = Arc::new(Mutex::new(DarksideState::new()));
-        let node: Arc<dyn NodeRpc> = Arc::new(DarksideNode::new(state.clone()));
         let cache_dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(&cache_dir.path().join("blocks.redb")).unwrap());
-        let shutdown = Arc::new(Notify::new());
-        let darkside_service = DarksideService::new(state.clone(), shutdown);
-        let streamer = Streamer::new(node, cache, "main".to_string(), Some(state));
+        let (streamer, darkside_service, _state, _shutdown) =
+            lightwalletd_rs::darkside_components(&cache_dir.path().join("blocks.redb")).unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
