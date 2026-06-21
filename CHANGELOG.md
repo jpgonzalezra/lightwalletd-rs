@@ -17,6 +17,9 @@ All notable changes to this project are documented here. The format is loosely b
   transactions, staged subtree roots) for deterministic wallet tests. Never use in production.
 - Darkside mempool: `GetMempoolTx`/`GetMempoolStream` serve the staging area, so transactions and blocks staged
   without `ApplyStaged` appear as mempool transactions until they are mined.
+- Backend JSON-RPC errors are translated to the gRPC status code wallets expect, per method: height past the
+  tip → `OutOfRange`, unknown transaction → `NotFound`, malformed transparent address → `InvalidArgument`
+  (anything unrecognized still maps to `Unavailable`/`Internal`).
 
 ### P4 — Mempool, subtrees, t-addr txns & nullifiers
 - `GetBlockNullifiers` and `GetBlockRangeNullifiers` (blocks pruned to shielded nullifiers only).

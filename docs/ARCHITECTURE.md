@@ -73,6 +73,20 @@ The 18 `CompactTxStreamer` methods split into two groups:
 - **Cache and/or parsing**: `GetBlock(Nullifiers)`, `GetBlockRange(Nullifiers)`, `GetMempoolTx`,
   `GetMempoolStream`, `GetSubtreeRoots`, `GetTaddressTransactions`/`GetTaddressTxids`.
 
+### Node errors → gRPC status codes
+
+`src/service/errors.rs` translates a backend JSON-RPC error into the gRPC `Status` a wallet expects,
+decided per method family rather than collapsing every failure into `Unavailable`:
+
+- height past the chain tip (`-8`) → `OutOfRange` for the block-serving methods;
+- unknown transaction (`-5`) → `NotFound` for `GetTransaction` and the per-txid lookups;
+- malformed transparent address (`-5`) → `InvalidArgument` for the address methods.
+
+The match is on the numeric JSON-RPC code, not the message text, since error messages are not stable
+across node versions. The same code `-5` is method-ambiguous (missing transaction vs. invalid address),
+so each method family applies its own mapper. Anything unrecognized keeps the safe default:
+`Unavailable` for a node/transport failure, `Internal` for a parse/decode failure.
+
 ## Design decisions
 
 Short ADRs live under [`docs/decisions/`](decisions/). Notable ones:
