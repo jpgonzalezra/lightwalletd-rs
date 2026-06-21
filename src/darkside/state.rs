@@ -130,11 +130,9 @@ impl DarksideState {
         if !self.was_reset {
             return Err(DarksideError::NotReset);
         }
-        let mut height = height;
-        for _ in 0..count.max(0) {
+        for height in (height..).take(count.max(0) as usize) {
             let raw = synthetic_block(height, nonce)?;
             self.stage_block(raw)?;
-            height += 1;
         }
         Ok(())
     }
