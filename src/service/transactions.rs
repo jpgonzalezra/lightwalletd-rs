@@ -19,7 +19,11 @@ pub(super) async fn get_transaction(
         ));
     }
     let txid = encoding::wire_to_display_hex(&filter.hash);
-    let raw = streamer.node.get_raw_transaction(&txid).await?;
+    let raw = streamer
+        .node
+        .get_raw_transaction(&txid)
+        .await
+        .map_err(super::errors::transaction_lookup_to_status)?;
     let data = decode_hex(&raw.hex, "transaction hex")?;
     Ok(Response::new(RawTransaction {
         data,

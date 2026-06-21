@@ -15,9 +15,9 @@ use std::sync::atomic::AtomicI64;
 
 use tonic::{Request, Response, Status};
 
-use crate::cache::{Cache, CacheError};
-use crate::fetch::{self, FetchError};
-use crate::node::{NodeError, NodeRpc};
+use crate::cache::Cache;
+use crate::fetch;
+use crate::node::NodeRpc;
 use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
 use crate::proto::{
     Address, AddressList, Balance, BlockId, BlockRange, BoxStream, ChainSpec, CompactBlock,
@@ -29,6 +29,7 @@ use crate::proto::{
 mod address;
 mod blocks;
 mod chain;
+mod errors;
 mod mempool;
 mod ping;
 mod subtrees;
@@ -73,7 +74,9 @@ impl Streamer {
 async fn block_at(cache: &Cache, node: &dyn NodeRpc, height: u64) -> Result<CompactBlock, Status> {
     match cache.get(height)? {
         Some(block) => Ok(block),
-        None => Ok(fetch::compact_block(node, height).await?),
+        None => fetch::compact_block(node, height)
+            .await
+            .map_err(|err| errors::block_fetch_to_status(err, height)),
     }
 }
 
@@ -85,27 +88,6 @@ fn decode_hex(value: &str, context: &str) -> Result<Vec<u8>, Status> {
 /// Map a node-reported height to the gRPC convention: a negative (off-chain) height becomes `u64::MAX`.
 fn mined_height(height: i64) -> u64 {
     if height < 0 { u64::MAX } else { height as u64 }
-}
-
-impl From<NodeError> for Status {
-    fn from(err: NodeError) -> Self {
-        Status::unavailable(err.to_string())
-    }
-}
-
-impl From<FetchError> for Status {
-    fn from(err: FetchError) -> Self {
-        match err {
-            FetchError::Node(e) => Status::unavailable(e.to_string()),
-            FetchError::Parse(e) => Status::internal(e.to_string()),
-        }
-    }
-}
-
-impl From<CacheError> for Status {
-    fn from(err: CacheError) -> Self {
-        Status::internal(err.to_string())
-    }
 }
 
 #[tonic::async_trait]

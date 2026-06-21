@@ -40,7 +40,8 @@ pub(super) async fn get_taddress_balance(
     let balance = streamer
         .node
         .get_address_balance(&address_list.addresses)
-        .await?;
+        .await
+        .map_err(super::errors::address_query_to_status)?;
     Ok(Response::new(Balance {
         value_zat: balance.balance,
     }))
@@ -55,7 +56,11 @@ pub(super) async fn get_taddress_balance_stream(
     while let Some(address) = incoming.message().await? {
         addresses.push(address.address);
     }
-    let balance = streamer.node.get_address_balance(&addresses).await?;
+    let balance = streamer
+        .node
+        .get_address_balance(&addresses)
+        .await
+        .map_err(super::errors::address_query_to_status)?;
     Ok(Response::new(Balance {
         value_zat: balance.balance,
     }))
@@ -84,7 +89,11 @@ pub(super) async fn collect_utxos(
     streamer: &Streamer,
     arg: &GetAddressUtxosArg,
 ) -> Result<Vec<GetAddressUtxosReply>, Status> {
-    let utxos = streamer.node.get_address_utxos(&arg.addresses).await?;
+    let utxos = streamer
+        .node
+        .get_address_utxos(&arg.addresses)
+        .await
+        .map_err(super::errors::address_query_to_status)?;
     let mut replies = Vec::new();
     for utxo in utxos {
         if utxo.height < arg.start_height {
@@ -120,9 +129,15 @@ fn taddress_transactions(
         let start = range.start.map(|block| block.height).unwrap_or(0);
         let end = range.end.map(|block| block.height).unwrap_or(0);
         let addresses = [filter.address];
-        let txids = node.get_address_txids(&addresses, start, end).await?;
+        let txids = node
+            .get_address_txids(&addresses, start, end)
+            .await
+            .map_err(super::errors::address_query_to_status)?;
         for txid in txids {
-            let raw = node.get_raw_transaction(&txid).await?;
+            let raw = node
+                .get_raw_transaction(&txid)
+                .await
+                .map_err(super::errors::transaction_lookup_to_status)?;
             let data = decode_hex(&raw.hex, "transaction hex")?;
             yield RawTransaction { data, height: mined_height(raw.height) };
         }

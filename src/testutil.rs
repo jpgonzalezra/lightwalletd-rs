@@ -64,15 +64,20 @@ pub struct FakeNode {
     pub info: Option<GetInfo>,
     pub blockchain_info: Option<GetBlockchainInfo>,
     pub block_verbose: Option<GetBlockVerbose>,
+    pub block_verbose_err: Option<(i64, String)>,
     pub block_count: Option<u64>,
     pub block_raw: Option<Vec<u8>>,
     pub raw_transaction: Option<GetRawTransaction>,
+    pub raw_transaction_err: Option<(i64, String)>,
     pub send_ok: Option<String>,
     pub send_err: Option<(i64, String)>,
     pub treestate: Option<GetTreeState>,
     pub address_balance: Option<GetAddressBalance>,
+    pub address_balance_err: Option<(i64, String)>,
     pub address_utxos: Option<Vec<AddressUtxo>>,
+    pub address_utxos_err: Option<(i64, String)>,
     pub address_txids: Option<Vec<String>>,
+    pub address_txids_err: Option<(i64, String)>,
     pub subtrees: Option<GetSubtrees>,
     pub raw_mempool: Option<Vec<String>>,
     /// Captures the txid string the service passed to `get_raw_transaction`.
@@ -96,6 +101,9 @@ impl NodeRpc for FakeNode {
     }
 
     async fn get_block_verbose(&self, _height: u64) -> Result<GetBlockVerbose, NodeError> {
+        if let Some((code, message)) = self.block_verbose_err.clone() {
+            return Err(NodeError::Rpc { code, message });
+        }
         Ok(self
             .block_verbose
             .clone()
@@ -117,6 +125,9 @@ impl NodeRpc for FakeNode {
 
     async fn get_raw_transaction(&self, txid: &str) -> Result<GetRawTransaction, NodeError> {
         *self.requested_txid.lock().unwrap() = Some(txid.to_string());
+        if let Some((code, message)) = self.raw_transaction_err.clone() {
+            return Err(NodeError::Rpc { code, message });
+        }
         Ok(self
             .raw_transaction
             .clone()
@@ -144,6 +155,9 @@ impl NodeRpc for FakeNode {
         &self,
         _addresses: &[String],
     ) -> Result<GetAddressBalance, NodeError> {
+        if let Some((code, message)) = self.address_balance_err.clone() {
+            return Err(NodeError::Rpc { code, message });
+        }
         Ok(self
             .address_balance
             .clone()
@@ -154,6 +168,9 @@ impl NodeRpc for FakeNode {
         &self,
         _addresses: &[String],
     ) -> Result<Vec<AddressUtxo>, NodeError> {
+        if let Some((code, message)) = self.address_utxos_err.clone() {
+            return Err(NodeError::Rpc { code, message });
+        }
         Ok(self
             .address_utxos
             .clone()
@@ -166,6 +183,9 @@ impl NodeRpc for FakeNode {
         _start: u64,
         _end: u64,
     ) -> Result<Vec<String>, NodeError> {
+        if let Some((code, message)) = self.address_txids_err.clone() {
+            return Err(NodeError::Rpc { code, message });
+        }
         Ok(self
             .address_txids
             .clone()

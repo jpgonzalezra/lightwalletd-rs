@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use tonic::Request;
+use tonic::{Code, Request};
 
 use crate::node::{self, NodeRpc};
 use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
@@ -103,6 +103,82 @@ async fn get_transaction_reverses_filter_txid_and_maps_offchain_height() {
             height: u64::MAX,
         }
     );
+}
+
+#[tokio::test]
+async fn get_block_past_the_tip_maps_to_out_of_range() {
+    let fake = Arc::new(FakeNode {
+        block_verbose_err: Some((-8, "block height not in best chain".to_string())),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake);
+
+    let status = streamer
+        .get_block(Request::new(BlockId {
+            height: 99_999_999,
+            hash: vec![],
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::OutOfRange);
+}
+
+#[tokio::test]
+async fn get_block_with_unclassified_node_error_maps_to_unavailable() {
+    let fake = Arc::new(FakeNode {
+        block_verbose_err: Some((-99, "something unexpected".to_string())),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake);
+
+    let status = streamer
+        .get_block(Request::new(BlockId {
+            height: 1,
+            hash: vec![],
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::Unavailable);
+}
+
+#[tokio::test]
+async fn get_transaction_unknown_txid_maps_to_not_found() {
+    let fake = Arc::new(FakeNode {
+        raw_transaction_err: Some((-5, "No such mempool or main chain transaction".to_string())),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake);
+
+    let status = streamer
+        .get_transaction(Request::new(TxFilter {
+            hash: vec![0xaa; 32],
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::NotFound);
+}
+
+#[tokio::test]
+async fn get_transaction_with_unclassified_node_error_maps_to_unavailable() {
+    let fake = Arc::new(FakeNode {
+        raw_transaction_err: Some((-99, "something unexpected".to_string())),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake);
+
+    let status = streamer
+        .get_transaction(Request::new(TxFilter {
+            hash: vec![0xaa; 32],
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::Unavailable);
 }
 
 #[tokio::test]
@@ -235,6 +311,62 @@ async fn get_taddress_balance_returns_value_zat() {
         .into_inner();
 
     assert_eq!(response, Balance { value_zat: 4242 });
+}
+
+#[tokio::test]
+async fn get_taddress_balance_invalid_address_maps_to_invalid_argument() {
+    let fake = Arc::new(FakeNode {
+        address_balance_err: Some((-5, "parse error: invalid Bech32 encoding".to_string())),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake);
+
+    let status = streamer
+        .get_taddress_balance(Request::new(AddressList {
+            addresses: vec!["not_a_real_address".to_string()],
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn get_address_utxos_invalid_address_maps_to_invalid_argument() {
+    let fake = Arc::new(FakeNode {
+        address_utxos_err: Some((-5, "parse error: invalid Bech32 encoding".to_string())),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake);
+
+    let status = streamer
+        .get_address_utxos(Request::new(GetAddressUtxosArg {
+            addresses: vec!["not_a_real_address".to_string()],
+            start_height: 0,
+            max_entries: 0,
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn get_taddress_balance_no_information_available_maps_to_not_found() {
+    let fake = Arc::new(FakeNode {
+        address_balance_err: Some((-5, "No information available for address".to_string())),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake);
+
+    let status = streamer
+        .get_taddress_balance(Request::new(AddressList {
+            addresses: vec!["t1".to_string()],
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::NotFound);
 }
 
 #[tokio::test]
