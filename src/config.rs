@@ -68,6 +68,11 @@ pub struct Cli {
     /// testing only; never deploy in production.
     #[arg(long = "darkside-very-insecure")]
     pub darkside: bool,
+
+    /// Enable the `Ping` gRPC (testing/benchmark only). Off by default; insecure — it lets a client
+    /// hold server resources, so never enable in production.
+    #[arg(long = "ping-very-insecure")]
+    pub ping_enable: bool,
 }
 
 /// Resolved runtime configuration.
@@ -87,6 +92,8 @@ pub struct Config {
     pub metrics_bind: Option<SocketAddr>,
     /// Whether to run as a darkside mock server instead of proxying a real node.
     pub darkside: bool,
+    /// Whether the `Ping` gRPC is enabled (testing/benchmark only); off by default for hardening.
+    pub ping_enable: bool,
 }
 
 /// How the gRPC server presents itself on the wire.
@@ -156,6 +163,7 @@ impl Cli {
             tls,
             metrics_bind: self.metrics_bind,
             darkside: self.darkside,
+            ping_enable: self.ping_enable,
         })
     }
 }
@@ -244,6 +252,7 @@ mod tests {
             no_tls: true,
             metrics_bind: None,
             darkside: false,
+            ping_enable: false,
         }
     }
 
