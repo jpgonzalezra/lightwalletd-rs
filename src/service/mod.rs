@@ -31,6 +31,7 @@ mod blocks;
 mod chain;
 mod errors;
 mod mempool;
+pub mod mempool_monitor;
 mod ping;
 mod subtrees;
 mod transactions;
@@ -47,6 +48,9 @@ pub struct Streamer {
     network: String,
     /// In darkside mode, the shared mock state used to serve `GetSubtreeRoots` directly; `None` live.
     darkside: Option<crate::darkside::DarksideHandle>,
+    /// In live mode, the shared mempool monitor the two mempool methods read from; `None` in darkside,
+    /// which keeps the per-request path for determinism.
+    mempool: Option<mempool_monitor::MempoolHandle>,
     /// Number of `Ping` calls currently in flight, shared across cloned services (testing only).
     ping_count: Arc<AtomicI64>,
 }
@@ -65,8 +69,16 @@ impl Streamer {
             cache,
             network,
             darkside,
+            mempool: None,
             ping_count: Arc::new(AtomicI64::new(0)),
         }
+    }
+
+    /// Attach a shared mempool monitor, so the two mempool methods serve from its snapshot instead of
+    /// polling the node per request. Live mode only.
+    pub fn with_mempool_monitor(mut self, handle: mempool_monitor::MempoolHandle) -> Self {
+        self.mempool = Some(handle);
+        self
     }
 }
 

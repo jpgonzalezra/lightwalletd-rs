@@ -98,7 +98,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
         tokio::spawn(ingestor::run(node.clone(), cache.clone(), start_height));
 
-        let streamer = service::Streamer::new(node, cache, chain_info.chain, None);
+        // One shared mempool monitor fans the mempool out to all clients, so node load stays
+        // independent of the number of connected wallets.
+        let mempool = service::mempool_monitor::start(node.clone());
+        let streamer = service::Streamer::new(node, cache, chain_info.chain, None)
+            .with_mempool_monitor(mempool);
         server
             .add_service(CompactTxStreamerServer::new(streamer))
             .serve_with_shutdown(config.grpc_bind, shutdown_signal())
