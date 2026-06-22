@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format is loosely b
 ## [Unreleased]
 
 ### P5 — Hardening (in progress)
+- `Ping` (testing/benchmark RPC) is disabled by default and only enabled with `--ping-very-insecure`;
+  without the flag it returns `FailedPrecondition`. A client controls both the sleep duration and the
+  concurrency it observes, so leaving it open is an unnecessary denial-of-service surface.
 - gRPC server runs over TLS by default (`--tls-cert`/`--tls-key`), with `--no-tls-very-insecure` to run
   plaintext for local development.
 - Prometheus metrics: per-method request counts and latency histograms via a gRPC `tower` layer, served at

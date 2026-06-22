@@ -6,8 +6,9 @@ use tonic::{Code, Request};
 use crate::node::{self, NodeRpc};
 use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
 use crate::proto::{
-    AddressList, Balance, BlockId, BlockRange, ChainSpec, GetAddressUtxosArg, GetAddressUtxosReply,
-    RawTransaction, SendResponse, TransparentAddressBlockFilter, TreeState, TxFilter,
+    AddressList, Balance, BlockId, BlockRange, ChainSpec, Duration, GetAddressUtxosArg,
+    GetAddressUtxosReply, PingResponse, RawTransaction, SendResponse,
+    TransparentAddressBlockFilter, TreeState, TxFilter,
 };
 use crate::testutil::{FakeNode, temp_cache};
 
@@ -367,6 +368,32 @@ async fn get_taddress_balance_no_information_available_maps_to_not_found() {
         .unwrap_err();
 
     assert_eq!(status.code(), Code::NotFound);
+}
+
+#[tokio::test]
+async fn ping_disabled_by_default_returns_failed_precondition() {
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+
+    let status = streamer
+        .ping(Request::new(Duration { interval_us: 0 }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn ping_enabled_reports_entry_and_exit_for_a_single_request() {
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+    let streamer = streamer.with_ping_enabled(true);
+
+    let response = streamer
+        .ping(Request::new(Duration { interval_us: 0 }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(response, PingResponse { entry: 1, exit: 0 });
 }
 
 #[tokio::test]

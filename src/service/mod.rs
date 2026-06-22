@@ -51,6 +51,8 @@ pub struct Streamer {
     /// In live mode, the shared mempool monitor the two mempool methods read from; `None` in darkside,
     /// which keeps the per-request path for determinism.
     mempool: Option<mempool_monitor::MempoolHandle>,
+    /// Whether the `Ping` RPC is enabled (testing only); off by default for hardening.
+    ping_enable: bool,
     /// Number of `Ping` calls currently in flight, shared across cloned services (testing only).
     ping_count: Arc<AtomicI64>,
 }
@@ -70,6 +72,7 @@ impl Streamer {
             network,
             darkside,
             mempool: None,
+            ping_enable: false,
             ping_count: Arc::new(AtomicI64::new(0)),
         }
     }
@@ -78,6 +81,12 @@ impl Streamer {
     /// polling the node per request. Live mode only.
     pub fn with_mempool_monitor(mut self, handle: mempool_monitor::MempoolHandle) -> Self {
         self.mempool = Some(handle);
+        self
+    }
+
+    /// Enable the `Ping` RPC (testing/benchmark only). Off by default.
+    pub fn with_ping_enabled(mut self, enabled: bool) -> Self {
+        self.ping_enable = enabled;
         self
     }
 }
