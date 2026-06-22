@@ -20,6 +20,10 @@ All notable changes to this project are documented here. The format is loosely b
 - Backend JSON-RPC errors are translated to the gRPC status code wallets expect, per method: height past the
   tip → `OutOfRange`, unknown transaction → `NotFound`, malformed transparent address → `InvalidArgument`
   (anything unrecognized still maps to `Unavailable`/`Internal`).
+- Shared mempool monitor (live mode): one background task refreshes the mempool at most once every 2 s and fans
+  the result out to all clients through a `watch` snapshot, so `GetMempoolTx`/`GetMempoolStream` node load is
+  independent of the number of connected wallets (each transaction fetched and parsed once per block interval,
+  ≤2 s staleness). Darkside keeps the per-request path.
 
 ### P4 — Mempool, subtrees, t-addr txns & nullifiers
 - `GetBlockNullifiers` and `GetBlockRangeNullifiers` (blocks pruned to shielded nullifiers only).

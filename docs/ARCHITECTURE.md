@@ -96,6 +96,13 @@ Short ADRs live under [`docs/decisions/`](decisions/). Notable ones:
   block bytes via `librustzcash`, so a single non-verbose `getblock` per block suffices for transaction data. A
   verbose call is still made to obtain the note-commitment tree sizes (`ChainMetadata`), which are not part of the
   raw block.
+- **Shared mempool monitor (live).** A single background task (`src/service/mempool_monitor.rs`) refreshes the
+  mempool at most once every 2 s and fans the deduplicated, parsed-once result out to all clients through a
+  `tokio::sync::watch` snapshot, so node load is independent of the number of connected wallets: `GetMempoolTx`
+  borrows the current snapshot and `GetMempoolStream` subscribes to it. Within a block interval the snapshot is
+  append-only (each transaction is fetched and parsed once); a tip change resets it, and wallets see at most 2 s
+  of staleness. Darkside keeps the per-request path (`Streamer.mempool == None`), where a staged transaction must
+  appear and drain synchronously.
 
 ## Running
 
