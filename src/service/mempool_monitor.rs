@@ -122,7 +122,14 @@ async fn refresh(
         if !state.seen.insert(txid.clone()) {
             continue;
         }
-        let raw = node.get_raw_transaction(&txid).await?;
+        let raw = match node.get_raw_transaction(&txid).await {
+            Ok(raw) => raw,
+            // The tx left the mempool between the listing and this fetch; skip it, not the tick.
+            Err(error) => {
+                tracing::debug!(%error, txid, "mempool tx fetch failed; skipping");
+                continue;
+            }
+        };
         // A non-zero height means the tx was mined between getrawmempool listing it and this fetch.
         if raw.height != 0 {
             continue;
@@ -204,10 +211,13 @@ mod tests {
         /// `bestblockhash` for successive `get_blockchain_info` calls; the last entry repeats.
         tips: Vec<String>,
         blockchain_calls: AtomicUsize,
-        /// txids returned by every `get_raw_mempool` call.
-        mempool: Vec<String>,
+        /// txids returned by `get_raw_mempool`; mutable so a test can grow the mempool across ticks.
+        mempool: Mutex<Vec<String>>,
         /// raw-tx `(hex, height)` keyed by display-order txid.
         txs: HashMap<String, (String, i64)>,
+        /// txids whose `get_raw_transaction` returns an RPC error, simulating a tx that left the
+        /// mempool (or a node that cannot serve it).
+        failing_txs: Mutex<HashSet<String>>,
         /// txids passed to `get_raw_transaction`, in call order.
         tx_requests: Mutex<Vec<String>>,
     }
@@ -217,10 +227,26 @@ mod tests {
             Self {
                 tips: tips.into_iter().map(String::from).collect(),
                 blockchain_calls: AtomicUsize::new(0),
-                mempool,
+                mempool: Mutex::new(mempool),
                 txs: txs.into_iter().map(|(id, hex, h)| (id, (hex, h))).collect(),
+                failing_txs: Mutex::new(HashSet::new()),
                 tx_requests: Mutex::new(Vec::new()),
             }
+        }
+
+        /// Replace the set of txids `get_raw_mempool` returns.
+        fn set_mempool(&self, mempool: Vec<String>) {
+            *self.mempool.lock().unwrap() = mempool;
+        }
+
+        /// Mark a txid so its next `get_raw_transaction` returns a `-5` RPC error.
+        fn fail_tx(&self, txid: &str) {
+            self.failing_txs.lock().unwrap().insert(txid.to_string());
+        }
+
+        /// Stop failing a txid, so subsequent fetches succeed (simulates node recovery).
+        fn recover_tx(&self, txid: &str) {
+            self.failing_txs.lock().unwrap().remove(txid);
         }
 
         fn tx_call_count(&self) -> usize {
@@ -247,11 +273,17 @@ mod tests {
         }
 
         async fn get_raw_mempool(&self) -> Result<Vec<String>, NodeError> {
-            Ok(self.mempool.clone())
+            Ok(self.mempool.lock().unwrap().clone())
         }
 
         async fn get_raw_transaction(&self, txid: &str) -> Result<GetRawTransaction, NodeError> {
             self.tx_requests.lock().unwrap().push(txid.to_string());
+            if self.failing_txs.lock().unwrap().contains(txid) {
+                return Err(NodeError::Rpc {
+                    code: -5,
+                    message: "No such mempool transaction".to_string(),
+                });
+            }
             let (raw_hex, height) = self
                 .txs
                 .get(txid)
@@ -372,5 +404,67 @@ mod tests {
 
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].txid_display, mempool_txid);
+    }
+
+    #[tokio::test]
+    async fn single_failing_tx_does_not_drop_other_entries() {
+        let txs = crate::testutil::shielded_v5_txs();
+        let (raw_ok, _, _) = txs[0].clone();
+        let (raw_fail, _, _) = txs[1].clone();
+        let txid_ok = compact::txid_display(&raw_ok).unwrap();
+        let txid_fail = compact::txid_display(&raw_fail).unwrap();
+        let node = ScriptedNode::new(
+            vec!["aa"],
+            vec![txid_fail.clone(), txid_ok.clone()],
+            vec![
+                (txid_fail.clone(), hex::encode(&raw_fail), 0),
+                (txid_ok.clone(), hex::encode(&raw_ok), 0),
+            ],
+        );
+        node.fail_tx(&txid_fail);
+        let mut state = MonitorState::empty();
+
+        // The failing tx is skipped, not propagated; the refresh still publishes the good one.
+        let snapshot = refresh(&node, &mut state).await.unwrap();
+
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].txid_display, txid_ok);
+    }
+
+    #[tokio::test]
+    async fn node_down_tick_preserves_snapshot_and_recovers() {
+        let txs = crate::testutil::shielded_v5_txs();
+        let (raw_a, _, _) = txs[0].clone();
+        let (raw_b, _, _) = txs[1].clone();
+        let txid_a = compact::txid_display(&raw_a).unwrap();
+        let txid_b = compact::txid_display(&raw_b).unwrap();
+        let node = ScriptedNode::new(
+            vec!["aa", "aa", "bb"],
+            vec![txid_a.clone()],
+            vec![
+                (txid_a.clone(), hex::encode(&raw_a), 0),
+                (txid_b.clone(), hex::encode(&raw_b), 0),
+            ],
+        );
+        let mut state = MonitorState::empty();
+
+        // Tick 1 (healthy): tx_a fetched and accumulated.
+        let first = refresh(&node, &mut state).await.unwrap();
+        assert_eq!(first.entries.len(), 1);
+        assert_eq!(first.entries[0].txid_display, txid_a);
+
+        // Tick 2 (node down for the new tx): tx_b appears but every fetch attempted this tick fails;
+        // the accumulated tx_a is preserved, so the snapshot is not emptied.
+        node.set_mempool(vec![txid_a.clone(), txid_b.clone()]);
+        node.fail_tx(&txid_b);
+        let second = refresh(&node, &mut state).await.unwrap();
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(second.entries[0].txid_display, txid_a);
+
+        // Tick 3 (recovered, new block): the seen-set resets and both txs are fetched successfully.
+        node.recover_tx(&txid_b);
+        let third = refresh(&node, &mut state).await.unwrap();
+        assert_eq!(third.entries.len(), 2);
+        assert_eq!(third.tip_hash, "bb");
     }
 }
