@@ -101,8 +101,12 @@ Short ADRs live under [`docs/decisions/`](decisions/). Notable ones:
   `tokio::sync::watch` snapshot, so node load is independent of the number of connected wallets: `GetMempoolTx`
   borrows the current snapshot and `GetMempoolStream` subscribes to it. Within a block interval the snapshot is
   append-only (each transaction is fetched and parsed once); a tip change resets it, and wallets see at most 2 s
-  of staleness. Darkside keeps the per-request path (`Streamer.mempool == None`), where a staged transaction must
-  appear and drain synchronously.
+  of staleness. The refresh is resilient to partial node failures: a transaction that disappears between the
+  `getrawmempool` listing and its `getrawtransaction` fetch is logged and skipped, never dropping the rest of the
+  tick. A `getrawmempool` failure (e.g. the node is down) aborts only that tick and retains the last good
+  snapshot, so clients keep serving it until the node returns and refreshes resume on their own. Darkside keeps
+  the per-request path (`Streamer.mempool == None`), where a staged transaction must appear and drain
+  synchronously.
 
 ## Running
 

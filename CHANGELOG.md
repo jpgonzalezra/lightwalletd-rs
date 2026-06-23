@@ -27,6 +27,9 @@ All notable changes to this project are documented here. The format is loosely b
   the result out to all clients through a `watch` snapshot, so `GetMempoolTx`/`GetMempoolStream` node load is
   independent of the number of connected wallets (each transaction fetched and parsed once per block interval,
   ≤2 s staleness). Darkside keeps the per-request path.
+- Mempool monitor resilience: a transaction that leaves the mempool between the listing and its fetch is skipped
+  instead of aborting the whole refresh tick, and a node outage retains the last good snapshot until the node
+  recovers.
 
 ### P4 — Mempool, subtrees, t-addr txns & nullifiers
 - `GetBlockNullifiers` and `GetBlockRangeNullifiers` (blocks pruned to shielded nullifiers only).
