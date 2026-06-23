@@ -24,12 +24,21 @@ impl Pools {
     }
 }
 
-/// Prune every transaction in a compact block to the requested value pools.
+/// Prune every transaction in a compact block to the requested value pools, then drop any transaction
+/// left with no components. Empty *blocks* are kept (a wallet still needs every height); only the empty
+/// transactions within them are removed.
 pub fn filter_block_to_pools(mut block: CompactBlock, pool_types: &[i32]) -> CompactBlock {
     let pools = Pools::from_pool_types(pool_types);
     for tx in &mut block.vtx {
         filter_tx_to_pools(tx, pools);
     }
+    block.vtx.retain(|tx| {
+        !tx.spends.is_empty()
+            || !tx.outputs.is_empty()
+            || !tx.actions.is_empty()
+            || !tx.vin.is_empty()
+            || !tx.vout.is_empty()
+    });
     block
 }
 
@@ -106,6 +115,45 @@ mod tests {
         let tx = &block.vtx[0];
         assert!(!tx.vin.is_empty() && !tx.vout.is_empty());
         assert!(tx.spends.is_empty() && tx.outputs.is_empty() && tx.actions.is_empty());
+    }
+
+    #[test]
+    fn drops_transactions_left_empty_after_pool_filter() {
+        let transparent_only = CompactTx {
+            vin: vec![CompactTxIn::default()],
+            ..Default::default()
+        };
+        let sapling_only = CompactTx {
+            spends: vec![CompactSaplingSpend::default()],
+            ..Default::default()
+        };
+        let block = CompactBlock {
+            vtx: vec![transparent_only, sapling_only],
+            ..Default::default()
+        };
+
+        // Keep sapling only: the transparent-only tx is left empty and dropped.
+        let filtered = filter_block_to_pools(block, &[PoolType::Sapling as i32]);
+        assert_eq!(filtered.vtx.len(), 1);
+        assert!(!filtered.vtx[0].spends.is_empty());
+    }
+
+    #[test]
+    fn keeps_block_when_all_transactions_filtered_out() {
+        let transparent_only = CompactTx {
+            vout: vec![TxOut::default()],
+            ..Default::default()
+        };
+        let block = CompactBlock {
+            height: 42,
+            vtx: vec![transparent_only],
+            ..Default::default()
+        };
+
+        // Filtering to sapling-only empties the sole tx; the block itself is still returned.
+        let filtered = filter_block_to_pools(block, &[PoolType::Sapling as i32]);
+        assert!(filtered.vtx.is_empty());
+        assert_eq!(filtered.height, 42);
     }
 
     #[test]
