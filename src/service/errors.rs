@@ -28,6 +28,9 @@ impl From<FetchError> for Status {
         match err {
             FetchError::Node(e) => Status::unavailable(e.to_string()),
             FetchError::Parse(e) => Status::internal(e.to_string()),
+            FetchError::UnexpectedHeight { requested, got } => Status::unavailable(format!(
+                "node returned block at height {got}, expected {requested}"
+            )),
         }
     }
 }
