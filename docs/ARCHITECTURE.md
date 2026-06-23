@@ -255,10 +255,31 @@ structure, and asserts that a real txid is computed for every transaction).
 The cache (`src/cache.rs`) is a `redb` table keyed by height; each value is a protobuf-encoded `CompactBlock`.
 Because the keys are ordered, the tip is cheap to read and a reorg is just "drop every height above N".
 
-The ingestor (`src/ingestor.rs`) runs as a background task. Each step asks the node for the tip height; if the
-cache is behind, it fetches the next block, checks that its `prevHash` chains onto the cached tip, and either
-appends it or — on a mismatch — rolls back one block and retries. When the cache reaches the tip it polls every
-couple of seconds. The cache persists across restarts, so the ingestor resumes from where it left off.
+`redb` already provides page-level integrity (internal checksums) and transactional atomicity, so the cache
+adds only the *logical* invariants on top of it. `add` is a strict append: it rejects a block whose own height
+does not match its key, or a non-monotonic append, with a `CacheError::Corruption` rather than a panic or a
+silent bad write. On open, `validate_light` runs an O(log n) check — it decodes the tip and verifies the height
+range has no gaps (`len == last - first + 1`), touching only the first and last entries so the happy path stays
+scan-free.
+
+When a symptom is detected (open-time validation, or a decode error during ingestion), `lowest_corrupt_height`
+localizes the corruption and the cache is truncated from that height with `reorg`, after which re-ingestion
+refills it. Realistic corruption here is a contiguous suffix (an interrupted final write) or a schema-wide
+decode failure visible at the tip, so localization matches that shape: a decode/height symptom walks down from
+the tip (O(k), k ≈ 1), a gap is binary-searched (O(log n)). An isolated mid-cache corruption is out of scope —
+`redb`'s page checksums and transactional, strict-append writes make it practically impossible.
+
+The ingestor (`src/ingestor.rs`) runs as a background task. At startup it resolves the chain with
+`connect_with_retry`: `getblockchaininfo` is retried indefinitely with capped exponential backoff (escalating
+to `error!` logs after several attempts), so the server waits for a slow-to-start node instead of exiting. Each
+step then reads the tip height **and** hash from a single `getblockchaininfo`. If the cache is behind, it
+fetches the next block (verifying the returned block's height matches the one requested), checks that its
+`prevHash` chains onto the cached tip, and appends it or — on a mismatch — rolls back one block. If the cache is
+already at the tip height, it compares the tip *hash*: an equal hash means synced, a differing hash is an
+in-place tip reorg and rolls back one block. A cache-corruption error truncates from the corrupt point and
+retries immediately (bounded, so recovery can never spin), while node/transport errors back off. When the cache
+reaches the tip it polls every couple of seconds. The cache persists across restarts, so the ingestor resumes
+from where it left off.
 
 `GetBlock` and `GetBlockRange` read from the cache and fall back to the node on a miss. `GetBlockRange` streams
 the range (ascending if `start <= end`, otherwise descending) and prunes each block to the requested

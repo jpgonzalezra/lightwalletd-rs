@@ -30,6 +30,19 @@ All notable changes to this project are documented here. The format is loosely b
 - Mempool monitor resilience: a transaction that leaves the mempool between the listing and its fetch is skipped
   instead of aborting the whole refresh tick, and a node outage retains the last good snapshot until the node
   recovers.
+- Startup resilience: the initial `getblockchaininfo` is retried indefinitely with capped exponential backoff
+  (escalating to `error!` logs after several attempts) instead of exiting, so the server waits for a node that
+  is slow to come up.
+- Tip-reorg detection by hash: the ingestor reads the tip height and hash from a single `getblockchaininfo` and
+  rolls back a reorg that replaces the tip block without advancing the height (caught by comparing the hash, not
+  just the height).
+- Cache self-protection: `add` rejects logically inconsistent writes (a block whose height does not match its
+  key, or a non-monotonic append) with an error instead of a panic or a silent bad write, and an O(log n)
+  open-time check decodes the tip and verifies the height range has no gaps.
+- Cache auto-recovery: on a detected corruption symptom the lowest corrupt height is localized (descending from
+  the tip for a corrupt suffix, binary search for a gap) and the cache is truncated from there and re-ingested,
+  both at startup and during ingestion (bounded, so recovery never spins). A fetched block whose height does not
+  match the request is kept on the node backoff rather than treated as cache corruption.
 
 ### P4 — Mempool, subtrees, t-addr txns & nullifiers
 - `GetBlockNullifiers` and `GetBlockRangeNullifiers` (blocks pruned to shielded nullifiers only).
