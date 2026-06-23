@@ -63,6 +63,9 @@ pub fn shielded_v5_tx() -> (Vec<u8>, u32, u32) {
 pub struct FakeNode {
     pub info: Option<GetInfo>,
     pub blockchain_info: Option<GetBlockchainInfo>,
+    /// Number of leading `get_blockchain_info` calls that fail before the configured response is
+    /// returned, used to exercise startup retry/backoff.
+    pub blockchain_info_failures: Mutex<u32>,
     pub block_verbose: Option<GetBlockVerbose>,
     pub block_verbose_err: Option<(i64, String)>,
     pub block_count: Option<u64>,
@@ -94,6 +97,13 @@ impl NodeRpc for FakeNode {
     }
 
     async fn get_blockchain_info(&self) -> Result<GetBlockchainInfo, NodeError> {
+        {
+            let mut remaining = self.blockchain_info_failures.lock().unwrap();
+            if *remaining > 0 {
+                *remaining -= 1;
+                return Err(NodeError::EmptyResult);
+            }
+        }
         Ok(self
             .blockchain_info
             .clone()

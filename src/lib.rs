@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
@@ -23,7 +24,7 @@ mod testutil;
 
 use cache::Cache;
 use config::Config;
-use node::NodeRpc;
+use node::{GetBlockchainInfo, NodeRpc};
 use proto::compact_tx_streamer_server::CompactTxStreamerServer;
 use proto::darkside_streamer_server::DarksideStreamerServer;
 
@@ -71,9 +72,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         // Real node: query the chain, open the cache, spawn the ingestor, serve `CompactTxStreamer`.
         let node: Arc<dyn NodeRpc> = Arc::new(node::NodeClient::new(&config.node));
 
-        // Query the chain once: its name keys the cache file, and its Sapling activation height is
-        // the default place to start ingesting from.
-        let chain_info = node.get_blockchain_info().await?;
+        // Query the chain (retrying until the node is reachable): its name keys the cache file, and
+        // its Sapling activation height is the default place to start ingesting from.
+        let chain_info = connect_with_retry(node.as_ref()).await;
         let start_height = config.start_height.unwrap_or_else(|| {
             chain_info
                 .upgrades
@@ -87,6 +88,19 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             .data_dir
             .join(format!("{}-blocks.redb", chain_info.chain));
         let cache = Arc::new(Cache::open(&cache_path)?);
+
+        // A light open-time check: a pre-existing gap or schema-mismatch is localized and truncated
+        // here so the ingestor re-ingests from that height instead of serving corrupt blocks.
+        if let Err(error) = cache.validate_light() {
+            tracing::warn!(%error, "cache failed open-time validation; locating corruption");
+            if let Some(corrupt) = cache.lowest_corrupt_height()? {
+                tracing::warn!(
+                    corrupt,
+                    "truncating cache from corrupt height; it will re-ingest"
+                );
+                cache.reorg(corrupt.saturating_sub(1))?;
+            }
+        }
 
         tracing::info!(
             grpc_bind = %config.grpc_bind,
@@ -113,6 +127,50 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     tracing::info!("server stopped");
 
     Ok(())
+}
+
+/// After this many consecutive failures we keep retrying but log at `error!`, so a genuinely
+/// misconfigured node (bad URL, wrong credentials) is visible instead of an endless silent `warn!`.
+const ESCALATE_AFTER: u32 = 10;
+
+/// Query `getblockchaininfo`, retrying indefinitely with capped exponential backoff until the node
+/// answers. The server must not exit just because the node is slow to come up; after
+/// [`ESCALATE_AFTER`] consecutive failures the log level rises to `error!` so a node that will never
+/// answer under the current config stays visible to monitoring.
+async fn connect_with_retry(node: &dyn NodeRpc) -> GetBlockchainInfo {
+    let cap = Duration::from_secs(30);
+    let mut delay = Duration::from_secs(1);
+    let mut attempt = 0u32;
+    loop {
+        match node.get_blockchain_info().await {
+            Ok(info) => {
+                if attempt > 0 {
+                    tracing::info!(attempt, "node reachable; continuing startup");
+                }
+                return info;
+            }
+            Err(error) => {
+                attempt += 1;
+                if attempt >= ESCALATE_AFTER {
+                    tracing::error!(
+                        %error,
+                        attempt,
+                        backoff_secs = delay.as_secs(),
+                        "node still unreachable; check node URL/credentials"
+                    );
+                } else {
+                    tracing::warn!(
+                        %error,
+                        attempt,
+                        backoff_secs = delay.as_secs(),
+                        "node not reachable; retrying"
+                    );
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(cap);
+            }
+        }
+    }
 }
 
 /// Wire the darkside mock chain: the shared state, a `DarksideNode` over it, the block cache at
@@ -172,4 +230,40 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     tracing::info!("shutdown signal received, draining connections");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use crate::testutil::FakeNode;
+
+    fn fake(failures: u32) -> FakeNode {
+        FakeNode {
+            blockchain_info: Some(
+                serde_json::from_value(serde_json::json!({
+                    "chain": "main",
+                    "blocks": 4242,
+                    "bestblockhash": "00",
+                    "consensus": { "chaintip": "00000000" },
+                }))
+                .unwrap(),
+            ),
+            blockchain_info_failures: Mutex::new(failures),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_with_retry_succeeds_after_failures_below_escalation() {
+        let info = connect_with_retry(&fake(ESCALATE_AFTER - 1)).await;
+        assert_eq!(info.blocks, 4242);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_with_retry_keeps_retrying_past_the_escalation_threshold() {
+        let info = connect_with_retry(&fake(ESCALATE_AFTER + 3)).await;
+        assert_eq!(info.blocks, 4242);
+    }
 }

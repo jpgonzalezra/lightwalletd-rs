@@ -33,4 +33,5 @@ tonic-prost-build = "0.14.6"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio = { version = "1.52.3", features = ["full", "test-util"] }
 wiremock = "0.6"
