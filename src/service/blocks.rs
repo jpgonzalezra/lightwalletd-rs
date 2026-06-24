@@ -18,6 +18,11 @@ pub(super) async fn get_block(
     request: Request<BlockId>,
 ) -> Result<Response<CompactBlock>, Status> {
     let block_id = request.into_inner();
+    if block_id.height == 0 && block_id.hash.is_empty() {
+        return Err(Status::invalid_argument(
+            "get_block: request for unspecified identifier",
+        ));
+    }
     if !block_id.hash.is_empty() {
         return Err(Status::unimplemented(
             "get_block by hash is not yet supported",
@@ -32,6 +37,11 @@ pub(super) async fn get_block_nullifiers(
     request: Request<BlockId>,
 ) -> Result<Response<CompactBlock>, Status> {
     let block_id = request.into_inner();
+    if block_id.height == 0 && block_id.hash.is_empty() {
+        return Err(Status::invalid_argument(
+            "get_block_nullifiers: request for unspecified identifier",
+        ));
+    }
     if !block_id.hash.is_empty() {
         return Err(Status::unimplemented(
             "get_block_nullifiers by hash is not yet supported",
@@ -46,9 +56,13 @@ pub(super) async fn get_block_range(
     request: Request<BlockRange>,
 ) -> Result<Response<BoxStream<CompactBlock>>, Status> {
     let range = request.into_inner();
-    let start = range.start.map(|b| b.height).unwrap_or(0);
-    let end = range.end.map(|b| b.height).unwrap_or(0);
     let pool_types = range.pool_types;
+    let (Some(start), Some(end)) = (range.start, range.end) else {
+        return Err(Status::invalid_argument(
+            "get_block_range: must specify start and end heights",
+        ));
+    };
+    let (start, end) = (start.height, end.height);
     let stream = block_range_stream(
         streamer.cache.clone(),
         streamer.node.clone(),
@@ -64,8 +78,12 @@ pub(super) async fn get_block_range_nullifiers(
     request: Request<BlockRange>,
 ) -> Result<Response<BoxStream<CompactBlock>>, Status> {
     let range = request.into_inner();
-    let start = range.start.map(|b| b.height).unwrap_or(0);
-    let end = range.end.map(|b| b.height).unwrap_or(0);
+    let (Some(start), Some(end)) = (range.start, range.end) else {
+        return Err(Status::invalid_argument(
+            "get_block_range_nullifiers: must specify start and end heights",
+        ));
+    };
+    let (start, end) = (start.height, end.height);
     let stream = block_range_stream(
         streamer.cache.clone(),
         streamer.node.clone(),

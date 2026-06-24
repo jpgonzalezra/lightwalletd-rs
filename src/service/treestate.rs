@@ -12,6 +12,11 @@ pub(super) async fn get_tree_state(
     request: Request<BlockId>,
 ) -> Result<Response<TreeState>, Status> {
     let block_id = request.into_inner();
+    if block_id.height == 0 && block_id.hash.is_empty() {
+        return Err(Status::invalid_argument(
+            "get_tree_state: must specify a block height or hash",
+        ));
+    }
     if !block_id.hash.is_empty() {
         return Err(Status::unimplemented(
             "get_tree_state by hash is not yet supported",
