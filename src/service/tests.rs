@@ -80,7 +80,7 @@ async fn get_transaction_reverses_filter_txid_and_maps_offchain_height() {
     });
     let (_dir, streamer) = streamer_with(fake.clone());
 
-    let wire_txid = vec![0xaa, 0xbb, 0xcc, 0xdd];
+    let wire_txid: Vec<u8> = (1u8..=32).collect();
     let response = streamer
         .get_transaction(Request::new(TxFilter {
             hash: wire_txid.clone(),
@@ -250,6 +250,48 @@ async fn get_transaction_with_unclassified_node_error_maps_to_unavailable() {
         .unwrap_err();
 
     assert_eq!(status.code(), Code::Unavailable);
+}
+
+#[tokio::test]
+async fn get_transaction_with_wrong_length_hash_is_invalid_argument() {
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+
+    let status = streamer
+        .get_transaction(Request::new(TxFilter {
+            hash: vec![0xaa, 0xbb, 0xcc, 0xdd],
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn get_transaction_without_hash_is_invalid_argument() {
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+
+    let status = streamer
+        .get_transaction(Request::new(TxFilter::default()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn send_transaction_with_empty_data_is_invalid_argument() {
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+
+    let status = streamer
+        .send_transaction(Request::new(RawTransaction {
+            data: vec![],
+            height: 0,
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::InvalidArgument);
 }
 
 #[tokio::test]
