@@ -97,12 +97,15 @@ stream.
 - `GetBlock`, `GetBlockNullifiers`, `GetTreeState` reject an unspecified identifier (height `0` with
   an empty hash) with `InvalidArgument`. (Lookup by an explicit hash is still `Unimplemented`.)
 - `GetBlockRange`, `GetBlockRangeNullifiers` require both `start` and `end`; a missing bound is
-  `InvalidArgument` rather than silently defaulting to height `0`.
+  `InvalidArgument` rather than silently defaulting to height `0`. The span is also capped: a range
+  wider than `MAX_BLOCK_RANGE` (10,000 blocks) is rejected with `InvalidArgument` before any block is
+  read (see [Resource limits](#resource-limits)).
 - `GetTransaction` requires a txid of exactly 32 bytes; an absent or wrong-length hash is
   `InvalidArgument`.
 - `SendTransaction` rejects empty transaction data.
-- `GetMempoolTx` rejects an exclude-suffix longer than 32 bytes and an invalid pool type
-  (`PoolType::Invalid`) in the requested pools.
+- `GetMempoolTx` and `GetBlockRange` reject an invalid pool type (`PoolType::Invalid`) in the
+  requested pools, through the shared `filter::validate_pool_types`; `GetMempoolTx` additionally
+  rejects an exclude-suffix longer than 32 bytes.
 - The transparent-address methods validate the address shape locally — a `t` followed by 34
   alphanumeric characters — before reaching the node, and `GetTaddressTransactions`/`GetTaddressTxids`
   additionally require a block `range` with a `start` height.
@@ -131,6 +134,31 @@ Short ADRs live under [`docs/decisions/`](decisions/). Notable ones:
   snapshot, so clients keep serving it until the node returns and refreshes resume on their own. Darkside keeps
   the per-request path (`Streamer.mempool == None`), where a staged transaction must appear and drain
   synchronously.
+
+## Resource limits
+
+Beyond per-request input validation, the server caps the resources a client can hold or accumulate, so
+a public-facing deployment is not at the mercy of a few abusive peers. The levers are unbounded
+concurrent long-lived streams (`GetBlockRange`, `GetMempoolStream`), connections held open by dead
+peers, and unbounded per-request accumulation.
+
+The shared `Server` builder in `src/lib.rs` — used by both the live and darkside serve paths — sets:
+
+- `concurrency_limit_per_connection` and `max_concurrent_streams` both to `MAX_CONCURRENT_STREAMS`
+  (256), bounding the in-flight requests and HTTP/2 streams a single connection can open.
+- TCP and HTTP/2 keepalive: `tcp_keepalive` and `http2_keepalive_interval` at `KEEPALIVE_INTERVAL`
+  (60 s) with an `http2_keepalive_timeout` of `KEEPALIVE_TIMEOUT` (20 s). A quiet connection is pinged
+  and dropped if it stops answering, so a dead peer cannot pin a long-lived stream indefinitely.
+
+Two per-request caps bound accumulation in handlers that read client input before acting:
+
+- `GetTaddressBalanceStream` drains a client-streamed list of addresses into a `Vec`; it stops at
+  `MAX_STREAMED_ADDRESSES` (10,000) and rejects a longer stream with `ResourceExhausted`.
+- `GetBlockRange`/`GetBlockRangeNullifiers` cap the requested span at `MAX_BLOCK_RANGE` (10,000
+  blocks) — see [Input validation](#input-validation).
+
+These constants are currently module-local with generous defaults chosen so legitimate wallets are
+unaffected; exposing them as CLI flags is a future follow-up.
 
 ## Running
 
