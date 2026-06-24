@@ -308,6 +308,90 @@ mod tests {
     }
 
     #[test]
+    fn empty_input_is_truncated() {
+        assert!(matches!(to_compact_block(&[]), Err(ParseError::Truncated)));
+    }
+
+    #[test]
+    fn input_shorter_than_header_prefix_is_truncated() {
+        let raw = testdata_blocks().into_iter().next().unwrap();
+        let short = &raw[..HEADER_PREFIX_LEN - 1];
+        assert!(matches!(
+            to_compact_block(short),
+            Err(ParseError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn solution_length_overrun_is_truncated() {
+        // Keep the header prefix and the solution-length prefix but cut the buffer before the
+        // equihash solution ends, so `header_end > raw.len()`.
+        let raw = testdata_blocks().into_iter().next().unwrap();
+        let mut header_cursor = Cursor::new(&raw[HEADER_PREFIX_LEN..]);
+        let solution_len = CompactSize::read(&mut header_cursor).unwrap() as usize;
+        let header_end = HEADER_PREFIX_LEN + header_cursor.position() as usize + solution_len;
+        let truncated = &raw[..header_end - 1];
+        assert!(matches!(
+            to_compact_block(truncated),
+            Err(ParseError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn truncated_transaction_body_errors() {
+        // A valid header followed by a transaction region cut short: the per-tx `Transaction::read`
+        // fails. Drop the final 10 bytes, which fall inside the last transaction.
+        let raw = testdata_blocks().into_iter().next().unwrap();
+        let truncated = &raw[..raw.len() - 10];
+        assert!(matches!(
+            to_compact_block(truncated),
+            Err(ParseError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn out_of_range_coinbase_height_push_is_no_height() {
+        // Corrupt the coinbase BIP34 height-push length byte to an out-of-range value (0). The byte
+        // is located by its content: the push-length byte followed by the minimal little-endian
+        // height bytes forms a sequence that occurs exactly once in the coinbase transaction.
+        let raw = testdata_blocks().into_iter().next().unwrap();
+        let (header, mut txs) = split_block(&raw).unwrap();
+        let coinbase = &mut txs[0];
+        let height = coinbase_height_from_raw(coinbase).unwrap();
+
+        let mut height_le = Vec::new();
+        let mut value = height;
+        while value > 0 {
+            height_le.push((value & 0xff) as u8);
+            value >>= 8;
+        }
+        let mut needle = vec![height_le.len() as u8];
+        needle.extend_from_slice(&height_le);
+        let positions: Vec<usize> = coinbase
+            .windows(needle.len())
+            .enumerate()
+            .filter(|(_, window)| *window == needle.as_slice())
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            positions.len(),
+            1,
+            "coinbase height push must be uniquely locatable"
+        );
+        coinbase[positions[0]] = 0;
+
+        let mut corrupted = header;
+        write_compact_size(&mut corrupted, txs.len() as u64);
+        for tx in &txs {
+            corrupted.extend_from_slice(tx);
+        }
+        assert!(matches!(
+            to_compact_block(&corrupted),
+            Err(ParseError::NoHeight)
+        ));
+    }
+
+    #[test]
     fn split_block_round_trips_header_and_transactions() {
         let blocks = testdata_blocks();
         assert!(!blocks.is_empty());
