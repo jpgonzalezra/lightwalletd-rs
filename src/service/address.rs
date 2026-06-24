@@ -12,6 +12,22 @@ use crate::proto::{
 
 use super::{Streamer, decode_hex, mined_height};
 
+/// Max addresses a single `GetTaddressBalanceStream` request may submit before the
+/// server rejects it, bounding the per-request accumulation.
+const MAX_STREAMED_ADDRESSES: usize = 10_000;
+
+/// Append `address` to `addresses`, rejecting once it would exceed [`MAX_STREAMED_ADDRESSES`]
+/// so a single client stream cannot accumulate without bound.
+fn push_bounded(addresses: &mut Vec<String>, address: String) -> Result<(), Status> {
+    if addresses.len() >= MAX_STREAMED_ADDRESSES {
+        return Err(Status::resource_exhausted(
+            "get_taddress_balance_stream: too many addresses submitted",
+        ));
+    }
+    addresses.push(address);
+    Ok(())
+}
+
 /// Validate that `address` has the transparent-address shape: a `t` followed by exactly 34
 /// alphanumeric characters (equivalent to the `\At[a-zA-Z0-9]{34}\z` check upstream).
 fn check_taddress(address: &str) -> Result<(), Status> {
@@ -71,7 +87,7 @@ pub(super) async fn get_taddress_balance_stream(
     let mut incoming = request.into_inner();
     let mut addresses = Vec::new();
     while let Some(address) = incoming.message().await? {
-        addresses.push(address.address);
+        push_bounded(&mut addresses, address.address)?;
     }
     for address in &addresses {
         check_taddress(address)?;
@@ -174,4 +190,27 @@ fn taddress_transactions(
             yield RawTransaction { data, height: mined_height(raw.height) };
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use tonic::Code;
+
+    use super::{MAX_STREAMED_ADDRESSES, push_bounded};
+
+    #[test]
+    fn push_bounded_accepts_up_to_the_cap() {
+        let mut addresses = Vec::new();
+        for _ in 0..MAX_STREAMED_ADDRESSES {
+            push_bounded(&mut addresses, "t".to_string()).unwrap();
+        }
+        assert_eq!(addresses.len(), MAX_STREAMED_ADDRESSES);
+    }
+
+    #[test]
+    fn push_bounded_rejects_over_the_cap() {
+        let mut addresses = vec!["t".to_string(); MAX_STREAMED_ADDRESSES];
+        let status = push_bounded(&mut addresses, "t".to_string()).unwrap_err();
+        assert_eq!(status.code(), Code::ResourceExhausted);
+    }
 }
