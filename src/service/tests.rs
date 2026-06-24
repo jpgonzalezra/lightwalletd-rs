@@ -16,6 +16,10 @@ use super::Streamer;
 use super::address::collect_utxos;
 use super::treestate::node_tree_state_to_proto;
 
+/// A well-formed transparent address (the same one the integration tests use), accepted by
+/// `check_taddress` so a test reaches the node path.
+const TADDR: &str = "t1ScrubbedBeforePublicationPlan001aaaaa";
+
 fn streamer_with(node: Arc<dyn NodeRpc>) -> (tempfile::TempDir, Streamer) {
     let (dir, cache) = temp_cache();
     (
@@ -362,7 +366,7 @@ async fn collect_utxos_reverses_txid_and_applies_start_height_and_max_entries() 
     let replies = collect_utxos(
         &streamer,
         &GetAddressUtxosArg {
-            addresses: vec!["t1".to_string()],
+            addresses: vec![TADDR.to_string()],
             start_height: 150,
             max_entries: 1,
         },
@@ -417,7 +421,7 @@ async fn get_taddress_balance_returns_value_zat() {
 
     let response = streamer
         .get_taddress_balance(Request::new(AddressList {
-            addresses: vec!["t1".to_string()],
+            addresses: vec![TADDR.to_string()],
         }))
         .await
         .unwrap()
@@ -436,7 +440,7 @@ async fn get_taddress_balance_invalid_address_maps_to_invalid_argument() {
 
     let status = streamer
         .get_taddress_balance(Request::new(AddressList {
-            addresses: vec!["not_a_real_address".to_string()],
+            addresses: vec![TADDR.to_string()],
         }))
         .await
         .unwrap_err();
@@ -454,7 +458,7 @@ async fn get_address_utxos_invalid_address_maps_to_invalid_argument() {
 
     let status = streamer
         .get_address_utxos(Request::new(GetAddressUtxosArg {
-            addresses: vec!["not_a_real_address".to_string()],
+            addresses: vec![TADDR.to_string()],
             start_height: 0,
             max_entries: 0,
         }))
@@ -474,7 +478,7 @@ async fn get_taddress_balance_no_information_available_maps_to_not_found() {
 
     let status = streamer
         .get_taddress_balance(Request::new(AddressList {
-            addresses: vec!["t1".to_string()],
+            addresses: vec![TADDR.to_string()],
         }))
         .await
         .unwrap_err();
@@ -521,7 +525,7 @@ async fn get_taddress_transactions_streams_one_raw_tx_per_txid() {
     let (_dir, streamer) = streamer_with(fake);
 
     let filter = TransparentAddressBlockFilter {
-        address: "t1".to_string(),
+        address: TADDR.to_string(),
         range: Some(BlockRange {
             start: Some(BlockId {
                 height: 1,
@@ -549,4 +553,58 @@ async fn get_taddress_transactions_streams_one_raw_tx_per_txid() {
             height: 100,
         }
     );
+}
+
+#[tokio::test]
+async fn get_taddress_balance_malformed_address_rejected_before_node() {
+    // The FakeNode panics on any RPC, so a passing test proves the format check rejects locally.
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+
+    let status = streamer
+        .get_taddress_balance(Request::new(AddressList {
+            addresses: vec!["not_a_real_address".to_string()],
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn get_taddress_transactions_without_range_is_invalid_argument() {
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+
+    let status = streamer
+        .get_taddress_transactions(Request::new(TransparentAddressBlockFilter {
+            address: TADDR.to_string(),
+            range: None,
+        }))
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn get_taddress_transactions_without_start_is_invalid_argument() {
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+
+    let status = streamer
+        .get_taddress_transactions(Request::new(TransparentAddressBlockFilter {
+            address: TADDR.to_string(),
+            range: Some(BlockRange {
+                start: None,
+                end: Some(BlockId {
+                    height: 2,
+                    hash: vec![],
+                }),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(status.code(), Code::InvalidArgument);
 }

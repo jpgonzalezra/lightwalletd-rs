@@ -12,6 +12,20 @@ use crate::proto::{
 
 use super::{Streamer, decode_hex, mined_height};
 
+/// Validate that `address` has the transparent-address shape: a `t` followed by exactly 34
+/// alphanumeric characters (equivalent to the `\At[a-zA-Z0-9]{34}\z` check upstream).
+fn check_taddress(address: &str) -> Result<(), Status> {
+    let bytes = address.as_bytes();
+    let well_formed =
+        bytes.len() == 35 && bytes[0] == b't' && bytes[1..].iter().all(u8::is_ascii_alphanumeric);
+    if !well_formed {
+        return Err(Status::invalid_argument(format!(
+            "transparent address {address} contains invalid characters"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) async fn get_taddress_txids(
     streamer: &Streamer,
     request: Request<TransparentAddressBlockFilter>,
@@ -19,7 +33,7 @@ pub(super) async fn get_taddress_txids(
     Ok(Response::new(taddress_transactions(
         streamer,
         request.into_inner(),
-    )))
+    )?))
 }
 
 pub(super) async fn get_taddress_transactions(
@@ -29,7 +43,7 @@ pub(super) async fn get_taddress_transactions(
     Ok(Response::new(taddress_transactions(
         streamer,
         request.into_inner(),
-    )))
+    )?))
 }
 
 pub(super) async fn get_taddress_balance(
@@ -37,6 +51,9 @@ pub(super) async fn get_taddress_balance(
     request: Request<AddressList>,
 ) -> Result<Response<Balance>, Status> {
     let address_list = request.into_inner();
+    for address in &address_list.addresses {
+        check_taddress(address)?;
+    }
     let balance = streamer
         .node
         .get_address_balance(&address_list.addresses)
@@ -55,6 +72,9 @@ pub(super) async fn get_taddress_balance_stream(
     let mut addresses = Vec::new();
     while let Some(address) = incoming.message().await? {
         addresses.push(address.address);
+    }
+    for address in &addresses {
+        check_taddress(address)?;
     }
     let balance = streamer
         .node
@@ -89,6 +109,9 @@ pub(super) async fn collect_utxos(
     streamer: &Streamer,
     arg: &GetAddressUtxosArg,
 ) -> Result<Vec<GetAddressUtxosReply>, Status> {
+    for address in &arg.addresses {
+        check_taddress(address)?;
+    }
     let utxos = streamer
         .node
         .get_address_utxos(&arg.addresses)
@@ -122,13 +145,22 @@ pub(super) async fn collect_utxos(
 fn taddress_transactions(
     streamer: &Streamer,
     filter: TransparentAddressBlockFilter,
-) -> BoxStream<RawTransaction> {
+) -> Result<BoxStream<RawTransaction>, Status> {
+    check_taddress(&filter.address)?;
+    let range = filter.range.ok_or_else(|| {
+        Status::invalid_argument("get_taddress_transactions: must specify block range")
+    })?;
+    let start = range
+        .start
+        .ok_or_else(|| {
+            Status::invalid_argument("get_taddress_transactions: must specify a start block height")
+        })?
+        .height;
+    let end = range.end.map(|block| block.height).unwrap_or(0);
+    let address = filter.address;
     let node = streamer.node.clone();
-    Box::pin(try_stream! {
-        let range = filter.range.unwrap_or_default();
-        let start = range.start.map(|block| block.height).unwrap_or(0);
-        let end = range.end.map(|block| block.height).unwrap_or(0);
-        let addresses = [filter.address];
+    Ok(Box::pin(try_stream! {
+        let addresses = [address];
         let txids = node
             .get_address_txids(&addresses, start, end)
             .await
@@ -141,5 +173,5 @@ fn taddress_transactions(
             let data = decode_hex(&raw.hex, "transaction hex")?;
             yield RawTransaction { data, height: mined_height(raw.height) };
         }
-    })
+    }))
 }
