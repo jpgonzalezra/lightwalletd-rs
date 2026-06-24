@@ -87,6 +87,30 @@ across node versions. The same code `-5` is method-ambiguous (missing transactio
 so each method family applies its own mapper. Anything unrecognized keeps the safe default:
 `Unavailable` for a node/transport failure, `Internal` for a parse/decode failure.
 
+### Input validation
+
+Each method rejects malformed input with the appropriate `Status` before doing any work — a node
+round-trip or opening a stream. For the streaming methods the check runs synchronously in the handler
+before the stream is built, so the error surfaces as the RPC status rather than partway through the
+stream.
+
+- `GetBlock`, `GetBlockNullifiers`, `GetTreeState` reject an unspecified identifier (height `0` with
+  an empty hash) with `InvalidArgument`. (Lookup by an explicit hash is still `Unimplemented`.)
+- `GetBlockRange`, `GetBlockRangeNullifiers` require both `start` and `end`; a missing bound is
+  `InvalidArgument` rather than silently defaulting to height `0`.
+- `GetTransaction` requires a txid of exactly 32 bytes; an absent or wrong-length hash is
+  `InvalidArgument`.
+- `SendTransaction` rejects empty transaction data.
+- `GetMempoolTx` rejects an exclude-suffix longer than 32 bytes and an invalid pool type
+  (`PoolType::Invalid`) in the requested pools.
+- The transparent-address methods validate the address shape locally — a `t` followed by 34
+  alphanumeric characters — before reaching the node, and `GetTaddressTransactions`/`GetTaddressTxids`
+  additionally require a block `range` with a `start` height.
+
+The local address check is only a fast format gate: the node stays authoritative on the Base58Check
+checksum, so a well-formed address can still be rejected by the node and mapped to `InvalidArgument`
+(or `NotFound` for the `-5` "No information available" case) through the error translation above.
+
 ## Design decisions
 
 Short ADRs live under [`docs/decisions/`](decisions/). Notable ones:
@@ -314,8 +338,9 @@ path is checked by driving the real `Streamer` (`GetBlockRange`, `GetSubtreeRoot
   (pruned to shielded nullifiers), `GetTaddressTxids`/`GetTaddressTransactions`, `GetSubtreeRoots`
   (`z_getsubtreesbyindex` + the completing block from the cache), `GetMempoolTx`, and `GetMempoolStream` (a
   poll loop that ends when a new block is mined). All `CompactTxStreamer` methods are now implemented.
-- **P5 — Hardening**: in progress. TLS, Prometheus metrics, Docker, and graceful shutdown are in place, plus
-  darkside mode (`--darkside-very-insecure`): a `DarksideStreamer` control plane over an in-memory mock chain
+- **P5 — Hardening**: in progress. TLS, Prometheus metrics, Docker, graceful shutdown, and per-method request
+  input validation (rejecting malformed arguments up front, see [Input validation](#input-validation)) are in
+  place, plus darkside mode (`--darkside-very-insecure`): a `DarksideStreamer` control plane over an in-memory mock chain
   served through the `NodeRpc` seam, for deterministic wallet tests. The crate is split into a library
   (`src/lib.rs`, exposing `run`) and a thin binary, with the gRPC client generated alongside the server, so it can
   be driven in-process by integration tests.
