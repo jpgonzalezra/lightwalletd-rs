@@ -300,7 +300,10 @@ from the verbose `getblock` response.
 
 The parser is validated byte-for-byte against the golden fixtures in `testdata/compact_blocks.json` (the
 reference fixtures carry zeroed txids, so the test normalizes ours before comparing the rest of the
-structure, and asserts that a real txid is computed for every transaction).
+structure, and asserts that a real txid is computed for every transaction). The error paths are
+characterized by negative tests that truncate and corrupt those real fixtures, pinning the truncation
+guards (`ParseError::Truncated`), a cut-off transaction body (`ParseError::Io`), and the coinbase BIP34
+height-push boundary (`ParseError::NoHeight`).
 
 ## Cache and ingestor
 
