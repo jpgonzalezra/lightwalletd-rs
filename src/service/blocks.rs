@@ -78,6 +78,7 @@ pub(super) async fn get_block_range(
 ) -> Result<Response<BoxStream<CompactBlock>>, Status> {
     let range = request.into_inner();
     let pool_types = range.pool_types;
+    filter::validate_pool_types(&pool_types)?;
     let (Some(start), Some(end)) = (range.start, range.end) else {
         return Err(Status::invalid_argument(
             "get_block_range: must specify start and end heights",
@@ -147,7 +148,7 @@ mod tests {
     use tonic::{Code, Request};
 
     use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
-    use crate::proto::{BlockId, BlockRange};
+    use crate::proto::{BlockId, BlockRange, PoolType};
     use crate::testutil::{FakeNode, temp_cache};
 
     use super::super::Streamer;
@@ -226,5 +227,27 @@ mod tests {
     #[test]
     fn validate_block_range_accepts_span_at_cap() {
         assert!(validate_block_range(1, MAX_BLOCK_RANGE).is_ok());
+    }
+
+    #[tokio::test]
+    async fn get_block_range_rejects_invalid_pool_type() {
+        let (_dir, streamer) = streamer();
+        let request = BlockRange {
+            start: Some(BlockId {
+                height: 1,
+                hash: vec![],
+            }),
+            end: Some(BlockId {
+                height: 10,
+                hash: vec![],
+            }),
+            pool_types: vec![PoolType::Invalid as i32],
+        };
+        let status = streamer
+            .get_block_range(Request::new(request))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status.code(), Code::InvalidArgument);
     }
 }

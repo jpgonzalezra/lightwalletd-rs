@@ -2,6 +2,8 @@
 //!
 //! Reusable at block level (`GetBlockRange`) and at transaction level (mempool streaming).
 
+use tonic::Status;
+
 use crate::proto::{CompactBlock, CompactTx, PoolType};
 
 /// Which value pools to keep when pruning.
@@ -22,6 +24,15 @@ impl Pools {
             orchard: pool_types.is_empty() || pool_types.contains(&(PoolType::Orchard as i32)),
         }
     }
+}
+
+/// Reject a `pool_types` list that contains `PoolType::Invalid`. Shared by the
+/// block-range and mempool methods so they validate the same contract identically.
+pub fn validate_pool_types(pool_types: &[i32]) -> Result<(), Status> {
+    if pool_types.contains(&(PoolType::Invalid as i32)) {
+        return Err(Status::invalid_argument("invalid pool type requested"));
+    }
+    Ok(())
 }
 
 /// Prune every transaction in a compact block to the requested value pools, then drop any transaction

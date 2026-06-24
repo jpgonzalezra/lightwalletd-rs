@@ -13,7 +13,7 @@ use tonic::{Request, Response, Status};
 use crate::compact;
 use crate::encoding;
 use crate::filter;
-use crate::proto::{BoxStream, CompactTx, GetMempoolTxRequest, PoolType, RawTransaction};
+use crate::proto::{BoxStream, CompactTx, GetMempoolTxRequest, RawTransaction};
 
 use super::{Streamer, decode_hex};
 
@@ -32,9 +32,7 @@ pub(super) async fn get_mempool_tx(
             )));
         }
     }
-    if pool_types.contains(&(PoolType::Invalid as i32)) {
-        return Err(Status::invalid_argument("invalid pool type requested"));
-    }
+    filter::validate_pool_types(&pool_types)?;
 
     let Some(handle) = &streamer.mempool else {
         return get_mempool_tx_from_node(streamer, exclude, pool_types).await;
