@@ -13,6 +13,27 @@ use crate::proto::{BlockId, BlockRange, BoxStream, CompactBlock};
 
 use super::{Streamer, block_at};
 
+/// Maximum number of blocks a single `GetBlockRange(Nullifiers)` request may span.
+/// A wallet syncs in bounded windows; an unbounded span is a denial-of-service lever.
+const MAX_BLOCK_RANGE: u64 = 10_000;
+
+/// Validate an extracted block range: both bounds must be specified (non-zero), and
+/// the span must not exceed [`MAX_BLOCK_RANGE`].
+fn validate_block_range(start: u64, end: u64) -> Result<(), Status> {
+    if start == 0 || end == 0 {
+        return Err(Status::invalid_argument(
+            "get_block_range: start and end heights must be specified (non-zero)",
+        ));
+    }
+    let span = start.abs_diff(end) + 1;
+    if span > MAX_BLOCK_RANGE {
+        return Err(Status::invalid_argument(format!(
+            "get_block_range: requested {span} blocks exceeds the maximum of {MAX_BLOCK_RANGE}"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) async fn get_block(
     streamer: &Streamer,
     request: Request<BlockId>,
@@ -63,6 +84,7 @@ pub(super) async fn get_block_range(
         ));
     };
     let (start, end) = (start.height, end.height);
+    validate_block_range(start, end)?;
     let stream = block_range_stream(
         streamer.cache.clone(),
         streamer.node.clone(),
@@ -84,6 +106,7 @@ pub(super) async fn get_block_range_nullifiers(
         ));
     };
     let (start, end) = (start.height, end.height);
+    validate_block_range(start, end)?;
     let stream = block_range_stream(
         streamer.cache.clone(),
         streamer.node.clone(),
@@ -115,4 +138,93 @@ fn block_range_stream(
             yield transform(block);
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tonic::{Code, Request};
+
+    use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
+    use crate::proto::{BlockId, BlockRange};
+    use crate::testutil::{FakeNode, temp_cache};
+
+    use super::super::Streamer;
+    use super::{MAX_BLOCK_RANGE, validate_block_range};
+
+    fn streamer() -> (tempfile::TempDir, Streamer) {
+        let (dir, cache) = temp_cache();
+        let node = Arc::new(FakeNode::default());
+        let streamer = Streamer::new(node, Arc::new(cache), "main".to_string(), None);
+        (dir, streamer)
+    }
+
+    fn range(start: u64, end: u64) -> BlockRange {
+        BlockRange {
+            start: Some(BlockId {
+                height: start,
+                hash: vec![],
+            }),
+            end: Some(BlockId {
+                height: end,
+                hash: vec![],
+            }),
+            pool_types: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn get_block_range_rejects_zero_start() {
+        let (_dir, streamer) = streamer();
+        let status = streamer
+            .get_block_range(Request::new(range(0, 10)))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_block_range_rejects_zero_end() {
+        let (_dir, streamer) = streamer();
+        let status = streamer
+            .get_block_range(Request::new(range(10, 0)))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_block_range_rejects_span_over_cap() {
+        let (_dir, streamer) = streamer();
+        let status = streamer
+            .get_block_range(Request::new(range(1, MAX_BLOCK_RANGE + 1)))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_block_range_nullifiers_rejects_span_over_cap() {
+        let (_dir, streamer) = streamer();
+        let status = streamer
+            .get_block_range_nullifiers(Request::new(range(1, MAX_BLOCK_RANGE + 1)))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[test]
+    fn validate_block_range_accepts_small_window() {
+        assert!(validate_block_range(1, 3).is_ok());
+    }
+
+    #[test]
+    fn validate_block_range_accepts_span_at_cap() {
+        assert!(validate_block_range(1, MAX_BLOCK_RANGE).is_ok());
+    }
 }
