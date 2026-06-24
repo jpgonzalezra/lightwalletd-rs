@@ -13,7 +13,7 @@ use tonic::{Request, Response, Status};
 use crate::compact;
 use crate::encoding;
 use crate::filter;
-use crate::proto::{BoxStream, CompactTx, GetMempoolTxRequest, RawTransaction};
+use crate::proto::{BoxStream, CompactTx, GetMempoolTxRequest, PoolType, RawTransaction};
 
 use super::{Streamer, decode_hex};
 
@@ -24,6 +24,17 @@ pub(super) async fn get_mempool_tx(
     let mempool_request = request.into_inner();
     let exclude = mempool_request.exclude_txid_suffixes;
     let pool_types = mempool_request.pool_types;
+
+    for (index, suffix) in exclude.iter().enumerate() {
+        if suffix.len() > 32 {
+            return Err(Status::invalid_argument(format!(
+                "exclude txid {index} is larger than 32 bytes"
+            )));
+        }
+    }
+    if pool_types.contains(&(PoolType::Invalid as i32)) {
+        return Err(Status::invalid_argument("invalid pool type requested"));
+    }
 
     let Some(handle) = &streamer.mempool else {
         return get_mempool_tx_from_node(streamer, exclude, pool_types).await;
@@ -152,7 +163,7 @@ mod tests {
     use std::sync::Arc;
 
     use tokio_stream::StreamExt;
-    use tonic::Request;
+    use tonic::{Code, Request};
 
     use crate::compact;
     use crate::encoding;
@@ -238,6 +249,38 @@ mod tests {
         .await;
 
         assert!(txs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_mempool_tx_rejects_oversized_exclude_suffix() {
+        let (_dir, streamer) = streamer_with_snapshot(snapshot_of(vec![]));
+
+        let status = streamer
+            .get_mempool_tx(Request::new(GetMempoolTxRequest {
+                exclude_txid_suffixes: vec![vec![0u8; 33]],
+                ..Default::default()
+            }))
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_mempool_tx_rejects_invalid_pool_type() {
+        let (_dir, streamer) = streamer_with_snapshot(snapshot_of(vec![]));
+
+        let status = streamer
+            .get_mempool_tx(Request::new(GetMempoolTxRequest {
+                pool_types: vec![PoolType::Invalid as i32],
+                ..Default::default()
+            }))
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(status.code(), Code::InvalidArgument);
     }
 
     #[tokio::test]
