@@ -55,6 +55,8 @@ pub struct Streamer {
     ping_enable: bool,
     /// Number of `Ping` calls currently in flight, shared across cloned services (testing only).
     ping_count: Arc<AtomicI64>,
+    /// Donation address advertised in `GetLightdInfo`; `None` when unconfigured.
+    donation_address: Option<String>,
 }
 
 impl Streamer {
@@ -74,6 +76,7 @@ impl Streamer {
             mempool: None,
             ping_enable: false,
             ping_count: Arc::new(AtomicI64::new(0)),
+            donation_address: None,
         }
     }
 
@@ -87,6 +90,12 @@ impl Streamer {
     /// Enable the `Ping` RPC (testing/benchmark only). Off by default.
     pub fn with_ping_enabled(mut self, enabled: bool) -> Self {
         self.ping_enable = enabled;
+        self
+    }
+
+    /// Set the donation address advertised in `GetLightdInfo`.
+    pub fn with_donation_address(mut self, address: Option<String>) -> Self {
+        self.donation_address = address;
         self
     }
 }

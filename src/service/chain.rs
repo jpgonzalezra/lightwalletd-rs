@@ -39,6 +39,7 @@ pub(super) async fn get_lightd_info(streamer: &Streamer) -> Result<Response<Ligh
         estimated_height: chain.estimatedheight,
         zcashd_build: node_info.build,
         zcashd_subversion: node_info.subversion,
+        donation_address: streamer.donation_address.clone().unwrap_or_default(),
         ..Default::default()
     };
     Ok(Response::new(info))

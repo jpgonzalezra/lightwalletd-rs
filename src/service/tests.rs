@@ -6,7 +6,7 @@ use tonic::{Code, Request};
 use crate::node::{self, NodeRpc};
 use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
 use crate::proto::{
-    AddressList, Balance, BlockId, BlockRange, ChainSpec, Duration, GetAddressUtxosArg,
+    AddressList, Balance, BlockId, BlockRange, ChainSpec, Duration, Empty, GetAddressUtxosArg,
     GetAddressUtxosReply, PingResponse, RawTransaction, SendResponse,
     TransparentAddressBlockFilter, TreeState, TxFilter,
 };
@@ -20,12 +20,37 @@ use super::treestate::node_tree_state_to_proto;
 /// `check_taddress` so a test reaches the node path.
 const TADDR: &str = "t1ScrubbedBeforePublicationPlan001aaaaa";
 
+/// A valid mainnet unified address, used to exercise the donation-address passthrough.
+const DONATION_UA: &str = "u1scrubbedbeforepublicationplan001000000000000000000";
+
 fn streamer_with(node: Arc<dyn NodeRpc>) -> (tempfile::TempDir, Streamer) {
     let (dir, cache) = temp_cache();
     (
         dir,
         Streamer::new(node, Arc::new(cache), "main".to_string(), None),
     )
+}
+
+/// A node answering the two RPCs `get_lightd_info` issues (`getinfo` + `getblockchaininfo`).
+fn lightd_info_node() -> Arc<FakeNode> {
+    Arc::new(FakeNode {
+        info: Some(
+            serde_json::from_value(
+                json!({ "build": "v1.2.3", "subversion": "/MagicBean:5.10.0/" }),
+            )
+            .unwrap(),
+        ),
+        blockchain_info: Some(
+            serde_json::from_value(json!({
+                "chain": "main",
+                "blocks": 100,
+                "bestblockhash": "00",
+                "consensus": { "chaintip": "00000000" },
+            }))
+            .unwrap(),
+        ),
+        ..Default::default()
+    })
 }
 
 fn address_utxo(txid: &str, height: u64) -> node::AddressUtxo {
@@ -607,4 +632,31 @@ async fn get_taddress_transactions_without_start_is_invalid_argument() {
         .unwrap();
 
     assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn get_lightd_info_advertises_configured_donation_address() {
+    let (_dir, streamer) = streamer_with(lightd_info_node());
+    let streamer = streamer.with_donation_address(Some(DONATION_UA.to_string()));
+
+    let response = streamer
+        .get_lightd_info(Request::new(Empty {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(response.donation_address, DONATION_UA);
+}
+
+#[tokio::test]
+async fn get_lightd_info_donation_address_empty_when_unset() {
+    let (_dir, streamer) = streamer_with(lightd_info_node());
+
+    let response = streamer
+        .get_lightd_info(Request::new(Empty {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(response.donation_address.is_empty());
 }

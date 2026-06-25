@@ -67,7 +67,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
         let (streamer, darkside_service, _state, shutdown) =
             darkside_components(&config.data_dir.join("darkside-blocks.redb"))?;
-        let streamer = streamer.with_ping_enabled(config.ping_enable);
+        let streamer = streamer
+            .with_ping_enabled(config.ping_enable)
+            .with_donation_address(config.donation_address.clone());
 
         server
             .add_service(CompactTxStreamerServer::new(streamer))
@@ -124,7 +126,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         let mempool = service::mempool_monitor::start(node.clone());
         let streamer = service::Streamer::new(node, cache, chain_info.chain, None)
             .with_mempool_monitor(mempool)
-            .with_ping_enabled(config.ping_enable);
+            .with_ping_enabled(config.ping_enable)
+            .with_donation_address(config.donation_address.clone());
         server
             .add_service(CompactTxStreamerServer::new(streamer))
             .serve_with_shutdown(config.grpc_bind, shutdown_signal())
