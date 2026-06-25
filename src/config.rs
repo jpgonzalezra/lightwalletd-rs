@@ -4,10 +4,18 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use zcash_address::unified::Encoding;
+
+/// Default per-connection in-flight request / HTTP-2 stream cap.
+pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 256;
+/// Default keepalive ping interval, in seconds, on an idle connection.
+pub const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 60;
+/// Default time, in seconds, to wait for a keepalive ack before dropping a connection.
+pub const DEFAULT_KEEPALIVE_TIMEOUT_SECS: u64 = 20;
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
@@ -78,6 +86,18 @@ pub struct Cli {
     /// Zcash unified address to advertise for donations to this server's operator.
     #[arg(long)]
     pub donation_address: Option<String>,
+
+    /// Max concurrent in-flight requests / HTTP-2 streams a single connection may open.
+    #[arg(long, default_value_t = DEFAULT_MAX_CONCURRENT_STREAMS)]
+    pub max_concurrent_streams: u32,
+
+    /// Keepalive ping interval (seconds) on an idle connection; an unanswered peer is dropped.
+    #[arg(long, default_value_t = DEFAULT_KEEPALIVE_INTERVAL_SECS)]
+    pub keepalive_interval_secs: u64,
+
+    /// Time (seconds) to wait for a keepalive ack before dropping the connection.
+    #[arg(long, default_value_t = DEFAULT_KEEPALIVE_TIMEOUT_SECS)]
+    pub keepalive_timeout_secs: u64,
 }
 
 /// Resolved runtime configuration.
@@ -101,6 +121,19 @@ pub struct Config {
     pub ping_enable: bool,
     /// Donation unified address advertised in `GetLightdInfo`, if configured.
     pub donation_address: Option<String>,
+    /// gRPC server resource limits / hardening.
+    pub limits: ServerLimits,
+}
+
+/// gRPC server resource limits applied to the shared tonic `Server` builder.
+#[derive(Debug, Clone)]
+pub struct ServerLimits {
+    /// Per-connection in-flight request / HTTP-2 stream cap.
+    pub max_concurrent_streams: u32,
+    /// Keepalive ping interval on an idle connection.
+    pub keepalive_interval: Duration,
+    /// Time to wait for a keepalive ack before dropping a connection.
+    pub keepalive_timeout: Duration,
 }
 
 /// How the gRPC server presents itself on the wire.
@@ -166,6 +199,15 @@ impl Cli {
             })?;
         }
 
+        if self.max_concurrent_streams == 0 {
+            anyhow::bail!("--max-concurrent-streams must be greater than 0");
+        }
+        if self.keepalive_interval_secs == 0 || self.keepalive_timeout_secs == 0 {
+            anyhow::bail!(
+                "--keepalive-interval-secs and --keepalive-timeout-secs must be greater than 0"
+            );
+        }
+
         Ok(Config {
             grpc_bind: self.grpc_bind,
             node: NodeConfig {
@@ -180,6 +222,11 @@ impl Cli {
             darkside: self.darkside,
             ping_enable: self.ping_enable,
             donation_address: self.donation_address,
+            limits: ServerLimits {
+                max_concurrent_streams: self.max_concurrent_streams,
+                keepalive_interval: Duration::from_secs(self.keepalive_interval_secs),
+                keepalive_timeout: Duration::from_secs(self.keepalive_timeout_secs),
+            },
         })
     }
 }
@@ -270,6 +317,9 @@ mod tests {
             darkside: false,
             ping_enable: false,
             donation_address: None,
+            max_concurrent_streams: DEFAULT_MAX_CONCURRENT_STREAMS,
+            keepalive_interval_secs: DEFAULT_KEEPALIVE_INTERVAL_SECS,
+            keepalive_timeout_secs: DEFAULT_KEEPALIVE_TIMEOUT_SECS,
         }
     }
 
@@ -347,6 +397,45 @@ mod tests {
         // checksum no longer verifies, so decoding must reject it.
         let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
         cli.donation_address = Some(VALID_UA[..VALID_UA.len() - 1].to_string());
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn resolve_uses_default_server_limits() {
+        let config = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None)
+            .resolve()
+            .unwrap();
+        assert_eq!(
+            config.limits.max_concurrent_streams,
+            DEFAULT_MAX_CONCURRENT_STREAMS
+        );
+        assert_eq!(config.limits.keepalive_interval, Duration::from_secs(60));
+        assert_eq!(config.limits.keepalive_timeout, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn resolve_overrides_server_limits_from_flags() {
+        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        cli.max_concurrent_streams = 512;
+        cli.keepalive_interval_secs = 90;
+        cli.keepalive_timeout_secs = 30;
+        let config = cli.resolve().unwrap();
+        assert_eq!(config.limits.max_concurrent_streams, 512);
+        assert_eq!(config.limits.keepalive_interval, Duration::from_secs(90));
+        assert_eq!(config.limits.keepalive_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn resolve_rejects_zero_max_concurrent_streams() {
+        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        cli.max_concurrent_streams = 0;
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn resolve_rejects_zero_keepalive() {
+        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        cli.keepalive_interval_secs = 0;
         assert!(cli.resolve().is_err());
     }
 }

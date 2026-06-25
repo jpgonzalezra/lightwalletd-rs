@@ -42,11 +42,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     }
 
     let mut server = Server::builder()
-        .concurrency_limit_per_connection(MAX_CONCURRENT_STREAMS as usize)
-        .max_concurrent_streams(Some(MAX_CONCURRENT_STREAMS))
-        .tcp_keepalive(Some(KEEPALIVE_INTERVAL))
-        .http2_keepalive_interval(Some(KEEPALIVE_INTERVAL))
-        .http2_keepalive_timeout(Some(KEEPALIVE_TIMEOUT))
+        .concurrency_limit_per_connection(config.limits.max_concurrent_streams as usize)
+        .max_concurrent_streams(Some(config.limits.max_concurrent_streams))
+        .tcp_keepalive(Some(config.limits.keepalive_interval))
+        .http2_keepalive_interval(Some(config.limits.keepalive_interval))
+        .http2_keepalive_timeout(Some(config.limits.keepalive_timeout))
         .layer(tonic_prometheus_layer::MetricsLayer::new());
     match &config.tls {
         config::TlsConfig::Enabled { cert, key } => {
@@ -137,13 +137,6 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     Ok(())
 }
-
-/// Max concurrent in-flight requests per connection (HTTP/2 stream concurrency is also capped).
-const MAX_CONCURRENT_STREAMS: u32 = 256;
-/// Idle keepalive: ping the peer on a quiet connection and drop it if it stops answering,
-/// so dead clients cannot pin long-lived streams (e.g. GetBlockRange, GetMempoolStream).
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
-const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// After this many consecutive failures we keep retrying but log at `error!`, so a genuinely
 /// misconfigured node (bad URL, wrong credentials) is visible instead of an endless silent `warn!`.
