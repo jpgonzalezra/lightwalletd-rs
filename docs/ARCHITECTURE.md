@@ -73,6 +73,12 @@ The 18 `CompactTxStreamer` methods split into two groups:
 - **Cache and/or parsing**: `GetBlock(Nullifiers)`, `GetBlockRange(Nullifiers)`, `GetMempoolTx`,
   `GetMempoolStream`, `GetSubtreeRoots`, `GetTaddressTransactions`/`GetTaddressTxids`.
 
+`GetLightdInfo` also advertises the operator's optional donation unified address, configured with
+`--donation-address` and carried through `Config`/`Streamer`. The flag is decoded as a unified address
+at startup (Bech32m + checksum), so a malformed or truncated value aborts the server instead of being
+served; wallets read the field to offer the user a donation to whoever runs this server. It is an
+advisory string only — no payment logic.
+
 ### Node errors → gRPC status codes
 
 `src/service/errors.rs` translates a backend JSON-RPC error into the gRPC `Status` a wallet expects,

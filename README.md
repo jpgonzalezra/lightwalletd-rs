@@ -42,6 +42,13 @@ The gRPC server runs over TLS by default (`--tls-cert` / `--tls-key`). For local
 `--no-tls-very-insecure` runs it in plaintext — never use that flag in production. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#tls).
 
+### Donation address
+
+`--donation-address u1...` advertises a Zcash unified address in `GetLightdInfo`. Wallets read it to
+offer the user the option of donating to whoever operates this server; it is advisory only and carries
+no payment logic. The address is decoded at startup, so a malformed or truncated one fails fast rather
+than being served.
+
 ### Darkside mode
 
 `--darkside-very-insecure` serves a controllable, in-memory mock chain instead of proxying a real node, for
