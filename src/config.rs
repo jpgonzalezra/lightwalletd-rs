@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use zcash_address::unified::Encoding;
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
@@ -73,6 +74,10 @@ pub struct Cli {
     /// hold server resources, so never enable in production.
     #[arg(long = "ping-very-insecure")]
     pub ping_enable: bool,
+
+    /// Zcash unified address to advertise for donations to this server's operator.
+    #[arg(long)]
+    pub donation_address: Option<String>,
 }
 
 /// Resolved runtime configuration.
@@ -94,6 +99,8 @@ pub struct Config {
     pub darkside: bool,
     /// Whether the `Ping` gRPC is enabled (testing/benchmark only); off by default for hardening.
     pub ping_enable: bool,
+    /// Donation unified address advertised in `GetLightdInfo`, if configured.
+    pub donation_address: Option<String>,
 }
 
 /// How the gRPC server presents itself on the wire.
@@ -151,6 +158,14 @@ impl Cli {
             }
         };
 
+        if let Some(address) = &self.donation_address {
+            // Decode (not just prefix-check) the unified address so a truncated or mistyped one,
+            // which still starts with `u`, is rejected at startup instead of being advertised.
+            zcash_address::unified::Address::decode(address).map_err(|error| {
+                anyhow::anyhow!("donation-address is not a valid Zcash unified address: {error}")
+            })?;
+        }
+
         Ok(Config {
             grpc_bind: self.grpc_bind,
             node: NodeConfig {
@@ -164,6 +179,7 @@ impl Cli {
             metrics_bind: self.metrics_bind,
             darkside: self.darkside,
             ping_enable: self.ping_enable,
+            donation_address: self.donation_address,
         })
     }
 }
@@ -253,6 +269,7 @@ mod tests {
             metrics_bind: None,
             darkside: false,
             ping_enable: false,
+            donation_address: None,
         }
     }
 
@@ -301,6 +318,35 @@ mod tests {
     fn resolve_requires_a_cert_when_tls_is_enabled() {
         let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
         cli.no_tls = false;
+        assert!(cli.resolve().is_err());
+    }
+
+    /// A valid mainnet unified address, used to exercise donation-address validation.
+    const VALID_UA: &str = "u1scrubbedbeforepublicationplan001000000000000000000";
+
+    #[test]
+    fn resolve_accepts_and_stores_a_valid_donation_address() {
+        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        cli.donation_address = Some(VALID_UA.to_string());
+
+        let config = cli.resolve().unwrap();
+
+        assert_eq!(config.donation_address.as_deref(), Some(VALID_UA));
+    }
+
+    #[test]
+    fn resolve_rejects_a_non_unified_donation_address() {
+        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        cli.donation_address = Some("t1ScrubbedBeforePublicationPlan001aaaaa".to_string());
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn resolve_rejects_a_truncated_donation_address() {
+        // A valid unified address missing its last character still starts with `u`, but its
+        // checksum no longer verifies, so decoding must reject it.
+        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        cli.donation_address = Some(VALID_UA[..VALID_UA.len() - 1].to_string());
         assert!(cli.resolve().is_err());
     }
 }

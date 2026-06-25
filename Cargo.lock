@@ -1465,6 +1465,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+ "zcash_address",
  "zcash_encoding",
  "zcash_primitives",
  "zcash_protocol",
