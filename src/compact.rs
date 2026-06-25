@@ -25,6 +25,11 @@ const HEADER_PREFIX_LEN: usize = 140;
 /// First 52 bytes of a note's `encCiphertext`: the compact note plaintext used for trial decryption.
 const COMPACT_CIPHERTEXT_LEN: usize = 52;
 
+/// Smallest possible serialized transaction, used to bound the tx-count pre-allocation against a
+/// malformed block declaring a huge count with a short body (`CompactSize::read` only caps at the
+/// Zcash max ~33.5M, large enough to OOM on `Vec::with_capacity`).
+const MIN_TX_BYTES: usize = 4;
+
 /// Errors produced while parsing a raw block.
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -60,7 +65,8 @@ pub fn to_compact_block(raw: &[u8]) -> Result<CompactBlock, ParseError> {
 
     let mut tx_cursor = Cursor::new(&raw[header_end..]);
     let tx_count = CompactSize::read(&mut tx_cursor)? as usize;
-    let mut vtx = Vec::with_capacity(tx_count);
+    let capacity = tx_count.min(raw[header_end..].len() / MIN_TX_BYTES);
+    let mut vtx = Vec::with_capacity(capacity);
     let mut height = None;
     for index in 0..tx_count {
         let tx = Transaction::read(&mut tx_cursor, BranchId::Nu5)?;
@@ -196,7 +202,8 @@ pub fn split_block(raw: &[u8]) -> Result<(Vec<u8>, Vec<Vec<u8>>), ParseError> {
 
     let mut tx_cursor = Cursor::new(&raw[header_end..]);
     let tx_count = CompactSize::read(&mut tx_cursor)? as usize;
-    let mut txs = Vec::with_capacity(tx_count);
+    let capacity = tx_count.min(raw[header_end..].len() / MIN_TX_BYTES);
+    let mut txs = Vec::with_capacity(capacity);
     for _ in 0..tx_count {
         let start = tx_cursor.position() as usize;
         Transaction::read(&mut tx_cursor, BranchId::Nu5)?;
@@ -388,6 +395,24 @@ mod tests {
         assert!(matches!(
             to_compact_block(&corrupted),
             Err(ParseError::NoHeight)
+        ));
+    }
+
+    #[test]
+    fn oversized_tx_count_with_short_body_errors_without_panic() {
+        // A valid header followed by a huge declared `tx_count` but only one real transaction: the
+        // capacity hint must stay bounded (no multi-GB allocation) and the per-tx read loop must
+        // fail cleanly once the body is exhausted.
+        let raw = testdata_blocks().into_iter().next().unwrap();
+        let (header, txs) = split_block(&raw).unwrap();
+
+        let mut malformed = header;
+        write_compact_size(&mut malformed, 33_554_432);
+        malformed.extend_from_slice(&txs[0]);
+
+        assert!(matches!(
+            to_compact_block(&malformed),
+            Err(ParseError::Io(_))
         ));
     }
 
