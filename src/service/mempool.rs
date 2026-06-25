@@ -78,9 +78,11 @@ pub(super) async fn get_mempool_stream(
             // Within one block interval `entries` is append-only, so a running index emits each tx
             // once; `get` guards the degenerate case where the list shrank under us.
             for entry in snapshot.entries.get(sent..).unwrap_or(&[]) {
+                // A mempool tx is reported with height 0 per the RawTransaction contract
+                // (proto/service.proto); a non-zero height would mark it as mined.
                 yield RawTransaction {
                     data: entry.raw.clone(),
-                    height: snapshot.height,
+                    height: 0,
                 };
             }
             sent = snapshot.entries.len();
@@ -132,7 +134,6 @@ async fn get_mempool_stream_from_node(
     let stream = try_stream! {
         // Snapshot the tip; when it changes a new block was mined and we end the stream.
         let start = node.get_blockchain_info().await?;
-        let height = start.blocks;
         let mut seen = HashSet::new();
         loop {
             if node.get_blockchain_info().await?.bestblockhash != start.bestblockhash {
@@ -148,7 +149,7 @@ async fn get_mempool_stream_from_node(
                     continue;
                 }
                 let data = decode_hex(&raw.hex, "mempool tx")?;
-                yield RawTransaction { data, height };
+                yield RawTransaction { data, height: 0 };
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
@@ -197,7 +198,6 @@ mod tests {
     fn snapshot_of(entries: Vec<MempoolEntry>) -> MempoolSnapshot {
         MempoolSnapshot {
             tip_hash: "aa".to_string(),
-            height: 100,
             entries,
         }
     }
@@ -211,6 +211,25 @@ mod tests {
             .map(|tx| tx.unwrap())
             .collect()
             .await
+    }
+
+    #[tokio::test]
+    async fn get_mempool_stream_reports_height_zero_for_mempool_txs() {
+        let (raw, _, _) = shielded_v5_tx();
+        let entry = entry_from(&raw);
+        let expected_data = entry.raw.clone();
+        let (_dir, streamer) = streamer_with_snapshot(snapshot_of(vec![entry]));
+
+        let mut stream = streamer
+            .get_mempool_stream(Request::new(crate::proto::Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // An in-mempool tx must carry height 0, not the tip height (proto/service.proto).
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.height, 0);
+        assert_eq!(first.data, expected_data);
     }
 
     #[tokio::test]

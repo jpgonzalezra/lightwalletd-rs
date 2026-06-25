@@ -33,8 +33,6 @@ pub struct MempoolEntry {
 pub struct MempoolSnapshot {
     /// `bestblockhash` at refresh time; a change means a new block was mined.
     pub tip_hash: String,
-    /// Tip height, reported as the `RawTransaction` height for stream entries.
-    pub height: u64,
     /// The deduplicated mempool entries, in `getrawmempool` order.
     pub entries: Vec<MempoolEntry>,
 }
@@ -44,7 +42,6 @@ impl MempoolSnapshot {
     fn empty() -> Self {
         Self {
             tip_hash: String::new(),
-            height: 0,
             entries: Vec::new(),
         }
     }
@@ -146,7 +143,6 @@ async fn refresh(
     }
     Ok(MempoolSnapshot {
         tip_hash: state.tip_hash.clone(),
-        height: info.blocks,
         entries: state.entries.clone(),
     })
 }
