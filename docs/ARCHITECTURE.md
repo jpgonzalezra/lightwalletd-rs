@@ -150,11 +150,13 @@ peers, and unbounded per-request accumulation.
 
 The shared `Server` builder in `src/lib.rs` — used by both the live and darkside serve paths — sets:
 
-- `concurrency_limit_per_connection` and `max_concurrent_streams` both to `MAX_CONCURRENT_STREAMS`
-  (256), bounding the in-flight requests and HTTP/2 streams a single connection can open.
-- TCP and HTTP/2 keepalive: `tcp_keepalive` and `http2_keepalive_interval` at `KEEPALIVE_INTERVAL`
-  (60 s) with an `http2_keepalive_timeout` of `KEEPALIVE_TIMEOUT` (20 s). A quiet connection is pinged
-  and dropped if it stops answering, so a dead peer cannot pin a long-lived stream indefinitely.
+- `concurrency_limit_per_connection` and `max_concurrent_streams`, both set from
+  `--max-concurrent-streams` (default 256), bounding the in-flight requests and HTTP/2 streams a
+  single connection can open.
+- TCP and HTTP/2 keepalive: `tcp_keepalive` and `http2_keepalive_interval` at
+  `--keepalive-interval-secs` (default 60 s) with an `http2_keepalive_timeout` of
+  `--keepalive-timeout-secs` (default 20 s). A quiet connection is pinged and dropped if it stops
+  answering, so a dead peer cannot pin a long-lived stream indefinitely.
 
 Two per-request caps bound accumulation in handlers that read client input before acting:
 
@@ -163,8 +165,10 @@ Two per-request caps bound accumulation in handlers that read client input befor
 - `GetBlockRange`/`GetBlockRangeNullifiers` cap the requested span at `MAX_BLOCK_RANGE` (10,000
   blocks) — see [Input validation](#input-validation).
 
-These constants are currently module-local with generous defaults chosen so legitimate wallets are
-unaffected; exposing them as CLI flags is a future follow-up.
+The three server-builder limits are configurable at startup via `--max-concurrent-streams`,
+`--keepalive-interval-secs`, and `--keepalive-timeout-secs`, defaulting to the values above
+(256 / 60 s / 20 s). The two per-request caps (`MAX_BLOCK_RANGE`, `MAX_STREAMED_ADDRESSES`) remain
+module-local, with generous defaults chosen so legitimate wallets are unaffected.
 
 ## Running
 
