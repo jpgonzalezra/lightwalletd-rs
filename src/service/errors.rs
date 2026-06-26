@@ -31,6 +31,12 @@ impl From<FetchError> for Status {
             FetchError::UnexpectedHeight { requested, got } => Status::unavailable(format!(
                 "node returned block at height {got}, expected {requested}"
             )),
+            FetchError::HashMismatch {
+                requested,
+                computed,
+            } => Status::unavailable(format!(
+                "node returned bytes hashing to {computed}, expected {requested}"
+            )),
         }
     }
 }

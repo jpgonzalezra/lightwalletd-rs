@@ -3,6 +3,7 @@
 //! Shared by `GetBlock` (on a cache miss) and the ingestor.
 
 use crate::compact::{self, ParseError};
+use crate::encoding;
 use crate::node::{NodeError, NodeRpc};
 use crate::proto::CompactBlock;
 
@@ -23,6 +24,14 @@ pub enum FetchError {
         /// Height of the block the node actually returned.
         got: u64,
     },
+    /// The returned bytes do not hash to the hash they were fetched by.
+    #[error("block hash mismatch: fetched by {requested}, bytes hash to {computed}")]
+    HashMismatch {
+        /// Display-order hash the raw block was requested by (from verbose `getblock`).
+        requested: String,
+        /// Display-order hash computed from the returned bytes.
+        computed: String,
+    },
 }
 
 /// Fetch the block at `height` and build its `CompactBlock`, including the note-commitment tree sizes.
@@ -39,6 +48,15 @@ pub async fn compact_block(node: &dyn NodeRpc, height: u64) -> Result<CompactBlo
         return Err(FetchError::UnexpectedHeight {
             requested: height,
             got: block.height,
+        });
+    }
+    // The returned bytes must hash to the hash we fetched them by — a near-free integrity check (the
+    // parser already computed the hash) that catches the node serving wrong bytes for a hash.
+    let computed_hash = encoding::wire_to_display_hex(&block.hash);
+    if computed_hash != verbose.hash {
+        return Err(FetchError::HashMismatch {
+            requested: verbose.hash,
+            computed: computed_hash,
         });
     }
     if let Some(meta) = block.chain_metadata.as_mut() {
@@ -64,12 +82,14 @@ mod tests {
     #[tokio::test]
     async fn compact_block_fills_tree_sizes_from_verbose() {
         let raw = fixture_raw();
-        let height = compact::to_compact_block(&raw).unwrap().height;
+        let parsed = compact::to_compact_block(&raw).unwrap();
+        let height = parsed.height;
+        let hash = encoding::wire_to_display_hex(&parsed.hash);
 
         let fake = FakeNode {
             block_verbose: Some(
                 serde_json::from_value(json!({
-                    "hash": "00",
+                    "hash": hash,
                     "trees": { "sapling": { "size": 11 }, "orchard": { "size": 22 } },
                 }))
                 .unwrap(),
@@ -83,6 +103,30 @@ mod tests {
 
         assert_eq!(meta.sapling_commitment_tree_size, 11);
         assert_eq!(meta.orchard_commitment_tree_size, 22);
+    }
+
+    #[tokio::test]
+    async fn compact_block_rejects_bytes_that_do_not_match_the_requested_hash() {
+        let raw = fixture_raw();
+        let height = compact::to_compact_block(&raw).unwrap().height;
+
+        // The verbose hash names a different block than the raw bytes hash to; the height is correct
+        // so the hash mismatch — not the height check — is what rejects it.
+        let fake = FakeNode {
+            block_verbose: Some(
+                serde_json::from_value(json!({
+                    "hash": "00",
+                    "trees": { "sapling": { "size": 0 }, "orchard": { "size": 0 } },
+                }))
+                .unwrap(),
+            ),
+            block_raw: Some(raw),
+            ..Default::default()
+        };
+
+        let error = compact_block(&fake, height).await.unwrap_err();
+
+        assert!(matches!(error, FetchError::HashMismatch { .. }));
     }
 
     #[tokio::test]

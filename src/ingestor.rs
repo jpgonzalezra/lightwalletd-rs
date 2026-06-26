@@ -196,11 +196,15 @@ mod tests {
     }
 
     fn fake_serving(raw: Vec<u8>, tip: u64) -> FakeNode {
+        // The verbose hash must match the raw block's real hash, which the fetch path now verifies.
+        let hash = crate::encoding::wire_to_display_hex(
+            &crate::compact::to_compact_block(&raw).unwrap().hash,
+        );
         FakeNode {
             blockchain_info: Some(blockchain_info(tip, "00")),
             block_verbose: Some(
                 serde_json::from_value(json!({
-                    "hash": "00",
+                    "hash": hash,
                     "trees": { "sapling": { "size": 0 }, "orchard": { "size": 0 } },
                 }))
                 .unwrap(),
