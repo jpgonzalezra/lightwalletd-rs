@@ -41,9 +41,11 @@ pub(super) async fn get_mempool_tx(
     let snapshot = handle.current();
     let stream = try_stream! {
         let pools = filter::Pools::from_pool_types(&pool_types);
-        for entry in &snapshot.entries {
-            // The exclusion suffixes are compared in protocol (wire) order.
-            if exclude.iter().any(|suffix| entry.wire_txid.ends_with(suffix)) {
+        let wire_txids: Vec<&[u8]> =
+            snapshot.entries.iter().map(|entry| entry.wire_txid.as_slice()).collect();
+        let excluded = excluded_by_suffixes(&wire_txids, &exclude);
+        for (entry, &is_excluded) in snapshot.entries.iter().zip(&excluded) {
+            if is_excluded {
                 continue;
             }
             let mut compact = entry.compact.clone();
@@ -52,6 +54,31 @@ pub(super) async fn get_mempool_tx(
         }
     };
     Ok(Response::new(Box::pin(stream)))
+}
+
+/// For each mempool tx (by protocol-order txid), whether an exclude suffix removes it. Per the
+/// proto contract (`proto/service.proto`), a suffix matching two or more txs is ambiguous and
+/// excludes none of them; only a suffix matching exactly one tx excludes that tx, and a suffix
+/// matching nothing is ignored.
+fn excluded_by_suffixes(wire_txids: &[&[u8]], exclude: &[Vec<u8>]) -> Vec<bool> {
+    let match_counts: Vec<usize> = exclude
+        .iter()
+        .map(|suffix| {
+            wire_txids
+                .iter()
+                .filter(|txid| txid.ends_with(suffix.as_slice()))
+                .count()
+        })
+        .collect();
+    wire_txids
+        .iter()
+        .map(|txid| {
+            exclude
+                .iter()
+                .zip(&match_counts)
+                .any(|(suffix, &count)| count == 1 && txid.ends_with(suffix.as_slice()))
+        })
+        .collect()
 }
 
 pub(super) async fn get_mempool_stream(
@@ -107,14 +134,22 @@ async fn get_mempool_tx_from_node(
 
     let stream = try_stream! {
         let pools = filter::Pools::from_pool_types(&pool_types);
-        for (index, txid) in txids.into_iter().enumerate() {
-            // The txid is display-order hex; exclusion suffixes are compared in protocol order.
-            let wire_txid = encoding::display_hex_to_wire(&txid)
-                .map_err(|e| Status::internal(format!("decoding mempool txid: {e}")))?;
-            if exclude.iter().any(|suffix| wire_txid.ends_with(suffix)) {
+        // The txids are display-order hex; exclusion suffixes are compared in protocol order, so
+        // decode every txid up front to detect an ambiguous suffix before excluding anything.
+        let mut wire_txids = Vec::with_capacity(txids.len());
+        for txid in &txids {
+            wire_txids.push(
+                encoding::display_hex_to_wire(txid)
+                    .map_err(|e| Status::internal(format!("decoding mempool txid: {e}")))?,
+            );
+        }
+        let wire_refs: Vec<&[u8]> = wire_txids.iter().map(Vec::as_slice).collect();
+        let excluded = excluded_by_suffixes(&wire_refs, &exclude);
+        for (index, txid) in txids.iter().enumerate() {
+            if excluded[index] {
                 continue;
             }
-            let raw = node.get_raw_transaction(&txid).await?;
+            let raw = node.get_raw_transaction(txid).await?;
             let bytes = decode_hex(&raw.hex, "mempool tx")?;
             let mut compact = compact::compact_tx_from_raw(index as u64, &bytes)
                 .map_err(|e| Status::internal(format!("parsing mempool tx: {e}")))?;
@@ -318,5 +353,31 @@ mod tests {
 
         assert_eq!(txs.len(), 1);
         assert!(txs[0].spends.is_empty() && txs[0].outputs.is_empty() && txs[0].actions.is_empty());
+    }
+
+    #[test]
+    fn ambiguous_exclude_suffix_excludes_no_matching_tx() {
+        let a: &[u8] = &[0x11, 0x22, 0xff];
+        let b: &[u8] = &[0x33, 0x44, 0xff];
+        let c: &[u8] = &[0x55, 0x66, 0x77];
+        let wire_txids = [a, b, c];
+        // `[0xff]` matches a and b, so it is ambiguous and excludes neither; `[0x77]` matches only c.
+        let exclude = vec![vec![0xff], vec![0x77]];
+        assert_eq!(
+            super::excluded_by_suffixes(&wire_txids, &exclude),
+            vec![false, false, true]
+        );
+    }
+
+    #[test]
+    fn unique_exclude_suffix_excludes_only_its_match() {
+        let a: &[u8] = &[0x11, 0x22, 0x33];
+        let b: &[u8] = &[0x44, 0x55, 0x66];
+        let wire_txids = [a, b];
+        let exclude = vec![vec![0x33]];
+        assert_eq!(
+            super::excluded_by_suffixes(&wire_txids, &exclude),
+            vec![true, false]
+        );
     }
 }
