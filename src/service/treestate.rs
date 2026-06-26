@@ -29,7 +29,7 @@ pub(super) async fn get_tree_state(
     Ok(Response::new(node_tree_state_to_proto(
         &streamer.network,
         tree_state,
-    )))
+    )?))
 }
 
 pub(super) async fn get_latest_tree_state(
@@ -43,17 +43,30 @@ pub(super) async fn get_latest_tree_state(
     Ok(Response::new(node_tree_state_to_proto(
         &streamer.network,
         tree_state,
-    )))
+    )?))
 }
 
-/// Build the gRPC `TreeState` from a node `z_gettreestate` response and the network name.
-pub(super) fn node_tree_state_to_proto(network: &str, tree_state: node::GetTreeState) -> TreeState {
-    TreeState {
+/// Build the gRPC `TreeState` from a node `z_gettreestate` response and the network name. A response
+/// with an empty frontier for both pools — a height before Sapling activation — is rejected with
+/// `InvalidArgument` rather than returned as a malformed, empty `TreeState`.
+pub(super) fn node_tree_state_to_proto(
+    network: &str,
+    tree_state: node::GetTreeState,
+) -> Result<TreeState, Status> {
+    let sapling_tree = tree_state.sapling.commitments.final_state;
+    let orchard_tree = tree_state.orchard.commitments.final_state;
+    if sapling_tree.is_empty() && orchard_tree.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "get_tree_state: no tree state at height {} (before Sapling activation?)",
+            tree_state.height
+        )));
+    }
+    Ok(TreeState {
         network: network.to_string(),
         height: tree_state.height,
         hash: tree_state.hash,
         time: tree_state.time,
-        sapling_tree: tree_state.sapling.commitments.final_state,
-        orchard_tree: tree_state.orchard.commitments.final_state,
-    }
+        sapling_tree,
+        orchard_tree,
+    })
 }

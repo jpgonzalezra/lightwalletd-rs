@@ -424,7 +424,7 @@ fn node_tree_state_to_proto_maps_final_state_per_pool() {
     .unwrap();
 
     assert_eq!(
-        node_tree_state_to_proto("main", tree_state),
+        node_tree_state_to_proto("main", tree_state).unwrap(),
         TreeState {
             network: "main".to_string(),
             height: 1234,
@@ -434,6 +434,20 @@ fn node_tree_state_to_proto_maps_final_state_per_pool() {
             orchard_tree: "bb".to_string(),
         }
     );
+}
+
+#[test]
+fn node_tree_state_to_proto_rejects_an_empty_frontier() {
+    // A pre-Sapling height: the node returns no commitment tree for either pool.
+    let tree_state: node::GetTreeState = serde_json::from_value(json!({
+        "hash": "abcd",
+        "height": 100,
+        "time": 42,
+    }))
+    .unwrap();
+
+    let status = node_tree_state_to_proto("main", tree_state).unwrap_err();
+    assert_eq!(status.code(), Code::InvalidArgument);
 }
 
 #[tokio::test]
