@@ -48,6 +48,9 @@ pub struct Upgrade {
     pub name: String,
     /// Height at which the upgrade activates.
     pub activationheight: u64,
+    /// Activation status reported by the node, `active` or `pending`.
+    #[serde(default)]
+    pub status: String,
 }
 
 /// Response of the verbose (`verbosity = 1`) `getblock` RPC (only the fields we use).

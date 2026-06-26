@@ -66,8 +66,10 @@ chain.
 ## Network upgrades
 
 - **[ZIP-200 — Network Upgrade Mechanism](https://zips.z.cash/zip-0200)** — consensus branch IDs and activation
-  heights; why the parser pins a branch and why `--start-height` defaults to Sapling activation.
-  *Where:* `BranchId::Nu5` in `src/compact.rs`, `docs/ARCHITECTURE.md` "Running" (`--start-height` default).
+  heights; why the parser pins a branch, why `--start-height` defaults to Sapling activation, and why
+  `GetLightdInfo` resolves Sapling and the next pending upgrade by branch ID.
+  *Where:* `BranchId::Nu5` in `src/compact.rs`, `SAPLING_BRANCH_ID` in `src/service/chain.rs`,
+  `docs/ARCHITECTURE.md` "Running" (`--start-height` default).
 - **[ZIP-252 — Deployment of the NU5 Network Upgrade](https://zips.z.cash/zip-0252)** — NU5 = v5 transactions plus
   Orchard, the upgrade the parser targets. (Surrounding deployments: [ZIP-250 Heartwood](https://zips.z.cash/zip-0250),
   [ZIP-251 Canopy](https://zips.z.cash/zip-0251).)

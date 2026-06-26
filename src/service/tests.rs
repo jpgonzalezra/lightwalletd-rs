@@ -695,3 +695,41 @@ async fn get_taddress_transactions_rejects_too_many_txids() {
     // The cap is enforced before any per-txid fetch reaches the node.
     assert!(fake.requested_txid.lock().unwrap().is_none());
 }
+
+#[tokio::test]
+async fn get_lightd_info_reports_sapling_by_branch_id_and_next_pending_upgrade() {
+    let fake = Arc::new(FakeNode {
+        info: Some(
+            serde_json::from_value(json!({ "build": "v1.2.3", "subversion": "/Zebra:5.1.1/" }))
+                .unwrap(),
+        ),
+        blockchain_info: Some(
+            serde_json::from_value(json!({
+                "chain": "main",
+                "blocks": 100,
+                "bestblockhash": "00",
+                "consensus": { "chaintip": "5437f330" },
+                "upgrades": {
+                    "76b809bb": { "name": "Sapling", "activationheight": 419200, "status": "active" },
+                    "c8e71055": { "name": "NU6", "activationheight": 2726400, "status": "active" },
+                    "aaaaaaaa": { "name": "NU7", "activationheight": 9000000, "status": "pending" },
+                    "bbbbbbbb": { "name": "NU8", "activationheight": 9999999, "status": "pending" },
+                },
+            }))
+            .unwrap(),
+        ),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake);
+
+    let info = streamer
+        .get_lightd_info(Request::new(Empty {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Sapling is found by branch ID; the next upgrade is the lowest-height pending one (NU7, not NU8).
+    assert_eq!(info.sapling_activation_height, 419200);
+    assert_eq!(info.upgrade_name, "NU7");
+    assert_eq!(info.upgrade_height, 9000000);
+}

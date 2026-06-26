@@ -380,6 +380,7 @@ impl DarksideState {
                 Upgrade {
                     name: "Sapling".to_string(),
                     activationheight: self.start_height,
+                    status: "active".to_string(),
                 },
             )]),
         })
