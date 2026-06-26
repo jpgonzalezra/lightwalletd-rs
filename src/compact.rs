@@ -42,6 +42,9 @@ pub enum ParseError {
     /// The block height could not be read from the coinbase transaction.
     #[error("could not read height from coinbase")]
     NoHeight,
+    /// Bytes remain after the last declared transaction (an overlong / malformed block).
+    #[error("block has trailing data after the last transaction")]
+    TrailingData,
 }
 
 /// Parse a raw block and build its [`CompactBlock`]. The `chainMetadata` tree sizes are left at zero;
@@ -74,6 +77,11 @@ pub fn to_compact_block(raw: &[u8]) -> Result<CompactBlock, ParseError> {
             height = Some(coinbase_height(&tx)?);
         }
         vtx.push(to_compact_tx(index as u64, &tx, index == 0));
+    }
+    // The declared transactions must consume the block exactly; leftover bytes mean a malformed or
+    // desynced block, rejected rather than silently accepted (and cached).
+    if header_end + tx_cursor.position() as usize != raw.len() {
+        return Err(ParseError::TrailingData);
     }
 
     Ok(CompactBlock {
@@ -209,6 +217,9 @@ pub fn split_block(raw: &[u8]) -> Result<(Vec<u8>, Vec<Vec<u8>>), ParseError> {
         Transaction::read(&mut tx_cursor, BranchId::Nu5)?;
         let end = tx_cursor.position() as usize;
         txs.push(raw[header_end + start..header_end + end].to_vec());
+    }
+    if header_end + tx_cursor.position() as usize != raw.len() {
+        return Err(ParseError::TrailingData);
     }
     Ok((header, txs))
 }
@@ -430,5 +441,21 @@ mod tests {
             }
             assert_eq!(rebuilt, raw, "split_block round-trip mismatch");
         }
+    }
+
+    #[test]
+    fn trailing_data_after_last_transaction_is_rejected() {
+        let raw = testdata_blocks().into_iter().next().unwrap();
+        let mut overlong = raw.clone();
+        overlong.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+        assert!(matches!(
+            to_compact_block(&overlong),
+            Err(ParseError::TrailingData)
+        ));
+        assert!(matches!(
+            split_block(&overlong),
+            Err(ParseError::TrailingData)
+        ));
     }
 }
