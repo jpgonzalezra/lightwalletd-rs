@@ -321,6 +321,15 @@ guards (`ParseError::Truncated`), a cut-off transaction body (`ParseError::Io`),
 height-push boundary (`ParseError::NoHeight`), and trailing bytes after the last transaction
 (`ParseError::TrailingData`).
 
+The hand-written framing arithmetic is additionally fuzzed with property tests (`proptest`). Both framing
+functions — `to_compact_block` and `split_block` — are fed hundreds of generated inputs under two
+strategies: arbitrary byte buffers (exercising the header guards and early returns) and real blocks
+mutated by byte flips, a random truncation, and trailing junk (driving inputs past the header into the
+`tx_count` loop and the per-transaction slicing). The invariant is that any input yields `Ok` or
+`Err(ParseError)` — never a panic, out-of-range slice, or overflow; when `split_block` returns `Ok`, the
+recovered header and transaction slices must reassemble into the original bytes exactly. A failing case is
+shrunk to a minimal reproducer and pinned under `proptest-regressions/`.
+
 ## Cache and ingestor
 
 The cache (`src/cache.rs`) is a `redb` table keyed by height; each value is a protobuf-encoded `CompactBlock`.
