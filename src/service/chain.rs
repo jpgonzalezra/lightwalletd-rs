@@ -44,6 +44,7 @@ pub(super) async fn get_lightd_info(streamer: &Streamer) -> Result<Response<Ligh
     let info = LightdInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         vendor: "lightwalletd-rs".to_string(),
+        git_commit: env!("GIT_COMMIT").to_string(),
         taddr_support: true,
         chain_name: chain.chain,
         sapling_activation_height,
