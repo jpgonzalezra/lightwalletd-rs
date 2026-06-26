@@ -109,9 +109,9 @@ stream.
 - `GetTransaction` requires a txid of exactly 32 bytes; an absent or wrong-length hash is
   `InvalidArgument`.
 - `SendTransaction` rejects empty transaction data.
-- `GetMempoolTx` and `GetBlockRange` reject an invalid pool type (`PoolType::Invalid`) in the
-  requested pools, through the shared `filter::validate_pool_types`; `GetMempoolTx` additionally
-  rejects an exclude-suffix longer than 32 bytes.
+- `GetMempoolTx`, `GetBlockRange`, and `GetBlockRangeNullifiers` reject an invalid pool type
+  (`PoolType::Invalid`) in the requested pools, through the shared `filter::validate_pool_types`;
+  `GetMempoolTx` additionally rejects an exclude-suffix longer than 32 bytes.
 - The transparent-address methods validate the address shape locally — a `t` followed by 34
   alphanumeric characters — before reaching the node, and `GetTaddressTransactions`/`GetTaddressTxids`
   additionally require a block `range` with a `start` height.

@@ -101,6 +101,9 @@ pub(super) async fn get_block_range_nullifiers(
     request: Request<BlockRange>,
 ) -> Result<Response<BoxStream<CompactBlock>>, Status> {
     let range = request.into_inner();
+    // Nullifiers-only ignores the requested pools, but an invalid pool type is still rejected up
+    // front, for parity with `get_block_range`.
+    filter::validate_pool_types(&range.pool_types)?;
     let (Some(start), Some(end)) = (range.start, range.end) else {
         return Err(Status::invalid_argument(
             "get_block_range_nullifiers: must specify start and end heights",
@@ -245,6 +248,28 @@ mod tests {
         };
         let status = streamer
             .get_block_range(Request::new(request))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_block_range_nullifiers_rejects_invalid_pool_type() {
+        let (_dir, streamer) = streamer();
+        let request = BlockRange {
+            start: Some(BlockId {
+                height: 1,
+                hash: vec![],
+            }),
+            end: Some(BlockId {
+                height: 10,
+                hash: vec![],
+            }),
+            pool_types: vec![PoolType::Invalid as i32],
+        };
+        let status = streamer
+            .get_block_range_nullifiers(Request::new(request))
             .await
             .err()
             .unwrap();
