@@ -128,6 +128,18 @@ impl Cache {
         Ok(())
     }
 
+    /// Drop every block at or above `height`, so re-ingestion refills from `height`. Backs the
+    /// `--sync-from-height`/`--redownload` operator levers; `truncate_from(0)` empties the cache.
+    pub fn truncate_from(&self, height: u64) -> Result<(), CacheError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(BLOCKS)?;
+            table.retain(|cached, _| cached < height)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
     /// A cheap open-time consistency check. On a non-empty cache it decodes the tip and verifies the
     /// height range has no gaps. O(log n) — it touches only the first and last entries, so the happy
     /// path stays scan-free. A detected symptom is localized and truncated by [`Self::reorg`].
@@ -293,6 +305,27 @@ mod tests {
         cache.reorg(102).unwrap();
         assert_eq!(cache.latest_height().unwrap(), Some(102));
         assert_eq!(cache.get(103).unwrap(), None);
+    }
+
+    #[test]
+    fn truncate_from_drops_blocks_at_or_above_the_given_height() {
+        let (_dir, cache) = temp_cache();
+        for height in 100..=105 {
+            cache.add(height, &block(height, height as u8)).unwrap();
+        }
+        cache.truncate_from(103).unwrap();
+        assert_eq!(cache.latest_height().unwrap(), Some(102));
+        assert_eq!(cache.get(103).unwrap(), None);
+    }
+
+    #[test]
+    fn truncate_from_zero_empties_the_cache() {
+        let (_dir, cache) = temp_cache();
+        for height in 100..=105 {
+            cache.add(height, &block(height, height as u8)).unwrap();
+        }
+        cache.truncate_from(0).unwrap();
+        assert_eq!(cache.latest_height().unwrap(), None);
     }
 
     #[test]

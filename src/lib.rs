@@ -110,6 +110,20 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             }
         }
 
+        // Operator cache-reset levers, applied after corruption recovery: --redownload clears the
+        // cache (re-ingesting from start_height); --sync-from-height N drops every cached block at
+        // or above N. Both then rebuild from the node.
+        if config.redownload {
+            tracing::warn!("--redownload: clearing the cache; re-ingesting from start_height");
+            cache.truncate_from(0)?;
+        } else if let Some(height) = config.sync_from_height {
+            tracing::warn!(
+                height,
+                "--sync-from-height: dropping cached blocks at or above height"
+            );
+            cache.truncate_from(height)?;
+        }
+
         tracing::info!(
             grpc_bind = %config.grpc_bind,
             node_url = %config.node.url,

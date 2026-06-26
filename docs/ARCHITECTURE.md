@@ -339,6 +339,13 @@ decode failure visible at the tip, so localization matches that shape: a decode/
 the tip (O(k), k ≈ 1), a gap is binary-searched (O(log n)). An isolated mid-cache corruption is out of scope —
 `redb`'s page checksums and transactional, strict-append writes make it practically impossible.
 
+Two operator levers force a re-sync at startup, for a cache that is structurally valid but *wrong* —
+e.g. a block cached during a transient node fault, which `validate_light` cannot detect.
+`--sync-from-height N` drops every cached block at or above `N` (via `Cache::truncate_from`);
+`--redownload` clears the cache entirely. In both cases the ingestor refills from the node,
+re-ingesting from `--start-height` whenever the cache is left empty; `--redownload` takes precedence
+over `--sync-from-height`.
+
 The ingestor (`src/ingestor.rs`) runs as a background task. At startup it resolves the chain with
 `connect_with_retry`: `getblockchaininfo` is retried indefinitely with capped exponential backoff (escalating
 to `error!` logs after several attempts), so the server waits for a slow-to-start node instead of exiting. Each

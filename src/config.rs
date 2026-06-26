@@ -57,6 +57,15 @@ pub struct Cli {
     #[arg(long)]
     pub start_height: Option<u64>,
 
+    /// Drop cached blocks at or above this height at startup, then re-ingest them from the node.
+    #[arg(long)]
+    pub sync_from_height: Option<u64>,
+
+    /// Clear the whole cache at startup and re-ingest from scratch. Takes precedence over
+    /// `--sync-from-height`.
+    #[arg(long)]
+    pub redownload: bool,
+
     /// Path to a PEM TLS certificate (required unless `--no-tls-very-insecure`).
     #[arg(long)]
     pub tls_cert: Option<PathBuf>,
@@ -111,6 +120,10 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Height to start ingesting from when the cache is empty.
     pub start_height: Option<u64>,
+    /// Drop cached blocks at or above this height at startup, then re-ingest them.
+    pub sync_from_height: Option<u64>,
+    /// Clear the whole cache at startup and re-ingest from scratch.
+    pub redownload: bool,
     /// Whether the gRPC server runs over TLS, and with which certificate.
     pub tls: TlsConfig,
     /// Address to serve Prometheus metrics on, if enabled.
@@ -217,6 +230,8 @@ impl Cli {
             },
             data_dir: self.data_dir,
             start_height: self.start_height,
+            sync_from_height: self.sync_from_height,
+            redownload: self.redownload,
             tls,
             metrics_bind: self.metrics_bind,
             darkside: self.darkside,
@@ -310,6 +325,8 @@ mod tests {
             zcash_conf,
             data_dir: PathBuf::from("./data"),
             start_height: None,
+            sync_from_height: None,
+            redownload: false,
             tls_cert: None,
             tls_key: None,
             no_tls: true,
