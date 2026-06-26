@@ -660,3 +660,38 @@ async fn get_lightd_info_donation_address_empty_when_unset() {
 
     assert!(response.donation_address.is_empty());
 }
+
+#[tokio::test]
+async fn get_taddress_transactions_rejects_too_many_txids() {
+    let fake = Arc::new(FakeNode {
+        address_txids: Some(vec![
+            "00".to_string();
+            super::address::MAX_TADDRESS_TXIDS + 1
+        ]),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake.clone());
+
+    let status = streamer
+        .get_taddress_transactions(Request::new(TransparentAddressBlockFilter {
+            address: TADDR.to_string(),
+            range: Some(BlockRange {
+                start: Some(BlockId {
+                    height: 1,
+                    hash: vec![],
+                }),
+                end: Some(BlockId {
+                    height: 1_000_000,
+                    hash: vec![],
+                }),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(status.code(), Code::ResourceExhausted);
+    // The cap is enforced before any per-txid fetch reaches the node.
+    assert!(fake.requested_txid.lock().unwrap().is_none());
+}

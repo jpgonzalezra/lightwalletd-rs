@@ -16,6 +16,10 @@ use super::{Streamer, decode_hex, mined_height};
 /// server rejects it, bounding the per-request accumulation.
 const MAX_STREAMED_ADDRESSES: usize = 10_000;
 
+/// Max matching txids a single `GetTaddressTransactions`/`GetTaddressTxids` request may have before
+/// the server rejects it, bounding the per-txid node fetches one request can trigger.
+pub(super) const MAX_TADDRESS_TXIDS: usize = 10_000;
+
 /// Append `address` to `addresses`, rejecting once it would exceed [`MAX_STREAMED_ADDRESSES`]
 /// so a single client stream cannot accumulate without bound.
 fn push_bounded(addresses: &mut Vec<String>, address: String) -> Result<(), Status> {
@@ -46,20 +50,18 @@ pub(super) async fn get_taddress_txids(
     streamer: &Streamer,
     request: Request<TransparentAddressBlockFilter>,
 ) -> Result<Response<BoxStream<RawTransaction>>, Status> {
-    Ok(Response::new(taddress_transactions(
-        streamer,
-        request.into_inner(),
-    )?))
+    Ok(Response::new(
+        taddress_transactions(streamer, request.into_inner()).await?,
+    ))
 }
 
 pub(super) async fn get_taddress_transactions(
     streamer: &Streamer,
     request: Request<TransparentAddressBlockFilter>,
 ) -> Result<Response<BoxStream<RawTransaction>>, Status> {
-    Ok(Response::new(taddress_transactions(
-        streamer,
-        request.into_inner(),
-    )?))
+    Ok(Response::new(
+        taddress_transactions(streamer, request.into_inner()).await?,
+    ))
 }
 
 pub(super) async fn get_taddress_balance(
@@ -157,8 +159,10 @@ pub(super) async fn collect_utxos(
 }
 
 /// Stream one full `RawTransaction` per txid that touches the filter's address within its block
-/// range. Shared by `GetTaddressTxids` (a deprecated alias) and `GetTaddressTransactions`.
-fn taddress_transactions(
+/// range. Shared by `GetTaddressTxids` (a deprecated alias) and `GetTaddressTransactions`. The
+/// matching txids are fetched up front so a request whose range matches more than
+/// [`MAX_TADDRESS_TXIDS`] transactions is rejected before any per-txid fetch hits the node.
+async fn taddress_transactions(
     streamer: &Streamer,
     filter: TransparentAddressBlockFilter,
 ) -> Result<BoxStream<RawTransaction>, Status> {
@@ -173,14 +177,20 @@ fn taddress_transactions(
         })?
         .height;
     let end = range.end.map(|block| block.height).unwrap_or(0);
-    let address = filter.address;
     let node = streamer.node.clone();
+
+    let addresses = [filter.address];
+    let txids = node
+        .get_address_txids(&addresses, start, end)
+        .await
+        .map_err(super::errors::address_query_to_status)?;
+    if txids.len() > MAX_TADDRESS_TXIDS {
+        return Err(Status::resource_exhausted(format!(
+            "get_taddress_transactions: more than {MAX_TADDRESS_TXIDS} matching transactions; narrow the block range"
+        )));
+    }
+
     Ok(Box::pin(try_stream! {
-        let addresses = [address];
-        let txids = node
-            .get_address_txids(&addresses, start, end)
-            .await
-            .map_err(super::errors::address_query_to_status)?;
         for txid in txids {
             let raw = node
                 .get_raw_transaction(&txid)

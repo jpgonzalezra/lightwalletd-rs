@@ -158,17 +158,22 @@ The shared `Server` builder in `src/lib.rs` — used by both the live and darksi
   `--keepalive-timeout-secs` (default 20 s). A quiet connection is pinged and dropped if it stops
   answering, so a dead peer cannot pin a long-lived stream indefinitely.
 
-Two per-request caps bound accumulation in handlers that read client input before acting:
+Three per-request caps bound the work a single request can accumulate or trigger:
 
 - `GetTaddressBalanceStream` drains a client-streamed list of addresses into a `Vec`; it stops at
   `MAX_STREAMED_ADDRESSES` (10,000) and rejects a longer stream with `ResourceExhausted`.
 - `GetBlockRange`/`GetBlockRangeNullifiers` cap the requested span at `MAX_BLOCK_RANGE` (10,000
   blocks) — see [Input validation](#input-validation).
+- `GetTaddressTransactions`/`GetTaddressTxids` cap the number of matching txids at
+  `MAX_TADDRESS_TXIDS` (10,000): the txid list is fetched first and a wider result is rejected with
+  `ResourceExhausted` before any per-txid fetch, so one request cannot pin the node on an unbounded
+  fetch loop. The client narrows its block range to proceed.
 
 The three server-builder limits are configurable at startup via `--max-concurrent-streams`,
 `--keepalive-interval-secs`, and `--keepalive-timeout-secs`, defaulting to the values above
-(256 / 60 s / 20 s). The two per-request caps (`MAX_BLOCK_RANGE`, `MAX_STREAMED_ADDRESSES`) remain
-module-local, with generous defaults chosen so legitimate wallets are unaffected.
+(256 / 60 s / 20 s). The three per-request caps (`MAX_BLOCK_RANGE`, `MAX_STREAMED_ADDRESSES`,
+`MAX_TADDRESS_TXIDS`) remain module-local, with generous defaults chosen so legitimate wallets are
+unaffected.
 
 ## Running
 
