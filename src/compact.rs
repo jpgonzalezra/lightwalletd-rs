@@ -459,3 +459,76 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use crate::testutil::testdata_blocks;
+    use proptest::prelude::*;
+
+    /// A real block with random mutations: byte flips, a random truncation point, and trailing junk.
+    /// Flips run before truncation (indices are valid against the full block); the result may or may
+    /// not still parse, which is the point — it drives the fuzzer past the header into the tx loop.
+    fn mutated_block() -> impl Strategy<Value = Vec<u8>> {
+        let base = testdata_blocks()
+            .into_iter()
+            .next()
+            .expect("a testdata block");
+        let len = base.len();
+        (
+            prop::collection::vec((0..len, any::<u8>()), 0..16), // (index, new_byte) flips
+            0..=len,                                             // truncate-to length
+            prop::collection::vec(any::<u8>(), 0..64),           // trailing junk
+        )
+            .prop_map(move |(flips, truncate_to, trailing)| {
+                let mut bytes = base.clone();
+                for (index, value) in flips {
+                    bytes[index] = value;
+                }
+                bytes.truncate(truncate_to);
+                bytes.extend_from_slice(&trailing);
+                bytes
+            })
+    }
+
+    proptest! {
+        // (a) arbitrary bytes — must return Ok or Err, never panic.
+        #[test]
+        fn to_compact_block_never_panics_on_arbitrary_bytes(
+            raw in prop::collection::vec(any::<u8>(), 0..2048),
+        ) {
+            let _ = to_compact_block(&raw);
+        }
+
+        #[test]
+        fn split_block_never_panics_on_arbitrary_bytes(
+            raw in prop::collection::vec(any::<u8>(), 0..2048),
+        ) {
+            let _ = split_block(&raw);
+        }
+
+        // (b) mutated valid block — exercises the header_end math and the tx-slice arithmetic.
+        #[test]
+        fn to_compact_block_never_panics_on_mutated_block(raw in mutated_block()) {
+            let _ = to_compact_block(&raw);
+        }
+
+        #[test]
+        fn split_block_never_panics_on_mutated_block(raw in mutated_block()) {
+            let _ = split_block(&raw);
+        }
+
+        // When split_block accepts the input, the pieces must reassemble into it exactly.
+        #[test]
+        fn split_block_round_trips_when_ok(raw in mutated_block()) {
+            if let Ok((header, txs)) = split_block(&raw) {
+                let mut rebuilt = header;
+                write_compact_size(&mut rebuilt, txs.len() as u64);
+                for tx in &txs {
+                    rebuilt.extend_from_slice(tx);
+                }
+                prop_assert_eq!(rebuilt, raw);
+            }
+        }
+    }
+}
