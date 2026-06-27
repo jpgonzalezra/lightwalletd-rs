@@ -3,6 +3,10 @@
 A Rust implementation of [`lightwalletd`](https://github.com/zcash/lightwalletd), the gRPC backend that serves
 Zcash blockchain data to shielded light wallets (Zashi, Ywallet, the mobile SDKs).
 
+> **Beta software.** lightwalletd-rs is under active development and has not been security-audited.
+> Expect breaking changes, and run it at your own risk — it is provided "as is", without warranty of
+> any kind (see [LICENSE](LICENSE)).
+
 ## What lightwalletd is
 
 It is neither a node nor a wallet: it is a **caching proxy** between a full node
@@ -10,17 +14,6 @@ It is neither a node nor a wallet: it is a **caching proxy** between a full node
 into `CompactBlock`s (a pruned form with the zk proofs stripped out) and streams them over gRPC. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). For the Zcash and Bitcoin specifications it implements, see
 [`docs/protocol-references.md`](docs/protocol-references.md).
-
-## Status
-
-Under active development, built in vertical slices.
-
-- [x] P0 — Skeleton: gRPC server + JSON-RPC client, `GetLightdInfo` + `GetLatestBlock`
-- [x] P1 — Parser → `CompactBlock` → `GetBlock`
-- [x] P2 — Cache + ingestor + `GetBlockRange`
-- [x] P3 — Proxies (send, tx, balance, utxos, treestate)
-- [x] P4 — Mempool, subtrees, t-addr txns, nullifiers
-- [ ] P5 — Hardening (TLS, metrics, darkside, Docker)
 
 ## Requirements
 
@@ -77,4 +70,4 @@ for how to provide one). The zebra node syncs the chain on first run, which take
 
 ## License
 
-MIT (same as upstream).
+Licensed under the [MIT License](LICENSE).
