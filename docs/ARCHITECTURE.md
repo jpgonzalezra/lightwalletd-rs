@@ -393,6 +393,9 @@ same seam — its stage/apply engine and `DarksideNode` reads are unit-tested di
 path is checked by driving the real `Streamer` (`GetBlockRange`, `GetSubtreeRoots`, `GetMempoolTx`) against a
 `DarksideNode` with an empty cache.
 
+Before committing, run `make verify`, which chains `fmt` + `lint` + `build` + `test` (fail-fast, in that
+order) as the single pre-commit check.
+
 ## Phase status
 
 - **P0 — Skeleton**: done. The gRPC server serves `GetLightdInfo` (from `getinfo` + `getblockchaininfo`)

@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt fmt-fix run
+.PHONY: build test lint fmt fmt-fix run verify
 
 build:
 	cargo build
@@ -17,3 +17,5 @@ fmt-fix:
 
 run:
 	cargo run --
+
+verify: fmt lint build test
