@@ -1,6 +1,6 @@
 # Architecture
 
-This is a living document. It is updated at the end of every phase. It describes what `lightwalletd-rs` is, how
+This is a living document. It describes what `lightwalletd-rs` is, how
 data flows through it, and the responsibility of each module. For the specifications each module implements, see
 [`protocol-references.md`](protocol-references.md).
 
@@ -46,22 +46,22 @@ the `CompactTxStreamerClient` and `DarksideStreamerClient` stubs alongside the s
 
 ## Module layout
 
-| Path | Responsibility | Phase |
-|---|---|---|
-| `src/lib.rs` | Library root: module declarations, the `run` startup entrypoint, and the `darkside_components` constructor that wires the darkside stack (shared by `run` and the test harness). | P5 |
-| `src/main.rs` | Binary wrapper: parses the CLI, initializes tracing, calls `run`. | P5 |
-| `proto/` + `build.rs` + `src/proto.rs` | The `.proto` contract and the `tonic`/`prost` generated code (server and client). | P0 |
-| `src/config.rs` | Configuration: CLI flags + `zcash.conf` parsing. | P0 |
-| `src/node/` | JSON-RPC client to `zebrad`: the `NodeRpc` trait (typed RPC surface, with a generic `request` helper) and its `NodeClient` implementation. | P0 |
-| `src/service/` | Implementation of the `CompactTxStreamer` gRPC service, split by method family (`chain`, `blocks`, `transactions`, `address`, `mempool`, `treestate`, `subtrees`, `ping`); `mod.rs` holds the `Streamer` and a thin trait impl that dispatches each method to its submodule. | P0+ |
-| `src/compact.rs` | Raw block bytes → `CompactBlock`, via `librustzcash`. | P1 |
-| `src/encoding.rs` | Display-order ↔ wire-order (endianness) conversions for hashes and txids. | P3 |
-| `src/filter.rs` | Prune a compact block or transaction to the requested value pools (`poolTypes`). | P3 |
-| `src/fetch.rs` | Fetch a block from the node and assemble its `CompactBlock` (shared by `GetBlock` and the ingestor). | P2 |
-| `src/cache.rs` | On-disk compact-block store (`redb`). | P2 |
-| `src/ingestor.rs` | Background task that polls the node and fills the cache; reorg handling. | P2 |
-| `src/metrics.rs` | Serves Prometheus metrics over an HTTP `/metrics` endpoint. | P5 |
-| `src/darkside/` | Darkside test harness, split by responsibility: `error` (error type), `block` (raw-block helpers and the held `ActiveBlock`), `state` (the in-memory mock chain `DarksideState`), `node` (its `NodeRpc` implementation `DarksideNode`), and `service` (the `DarksideStreamer` control plane). | P5 |
+| Path | Responsibility |
+|---|---|
+| `src/lib.rs` | Library root: module declarations, the `run` startup entrypoint, and the `darkside_components` constructor that wires the darkside stack (shared by `run` and the test harness). |
+| `src/main.rs` | Binary wrapper: parses the CLI, initializes tracing, calls `run`. |
+| `proto/` + `build.rs` + `src/proto.rs` | The `.proto` contract and the `tonic`/`prost` generated code (server and client). |
+| `src/config.rs` | Configuration: CLI flags + `zcash.conf` parsing. |
+| `src/node/` | JSON-RPC client to `zebrad`: the `NodeRpc` trait (typed RPC surface, with a generic `request` helper) and its `NodeClient` implementation. |
+| `src/service/` | Implementation of the `CompactTxStreamer` gRPC service, split by method family (`chain`, `blocks`, `transactions`, `address`, `mempool`, `treestate`, `subtrees`, `ping`); `mod.rs` holds the `Streamer` and a thin trait impl that dispatches each method to its submodule. |
+| `src/compact.rs` | Raw block bytes → `CompactBlock`, via `librustzcash`. |
+| `src/encoding.rs` | Display-order ↔ wire-order (endianness) conversions for hashes and txids. |
+| `src/filter.rs` | Prune a compact block or transaction to the requested value pools (`poolTypes`). |
+| `src/fetch.rs` | Fetch a block from the node and assemble its `CompactBlock` (shared by `GetBlock` and the ingestor). |
+| `src/cache.rs` | On-disk compact-block store (`redb`). |
+| `src/ingestor.rs` | Background task that polls the node and fills the cache; reorg handling. |
+| `src/metrics.rs` | Serves Prometheus metrics over an HTTP `/metrics` endpoint. |
+| `src/darkside/` | Darkside test harness, split by responsibility: `error` (error type), `block` (raw-block helpers and the held `ActiveBlock`), `state` (the in-memory mock chain `DarksideState`), `node` (its `NodeRpc` implementation `DarksideNode`), and `service` (the `DarksideStreamer` control plane). |
 
 ## Method classification
 
@@ -397,26 +397,26 @@ path is checked by driving the real `Streamer` (`GetBlockRange`, `GetSubtreeRoot
 Before committing, run `make verify`, which chains `fmt` + `lint` + `build` + `test` (fail-fast, in that
 order) as the single pre-commit check.
 
-## Phase status
+## Capabilities
 
-- **P0 — Skeleton**: done. The gRPC server serves `GetLightdInfo` (from `getinfo` + `getblockchaininfo`)
-  and `GetLatestBlock` (from `getblockchaininfo`); the JSON-RPC client (`src/node`) and configuration
-  (`src/config`) are in place.
-- **P1 — Parser & GetBlock**: done. `src/compact.rs` parses raw blocks into `CompactBlock`s, and `GetBlock`
-  serves a block by height (verbose `getblock` for hash + tree sizes, raw `getblock` for the bytes). Lookup
-  by hash is not yet supported.
-- **P2 — Cache, ingestor & GetBlockRange**: done. A `redb`-backed cache (`src/cache.rs`) is filled by a
-  background ingestor (`src/ingestor.rs`); `GetBlock` and `GetBlockRange` serve from it (falling back to the
-  node), and `GetBlockRange` streams with `poolTypes` filtering.
-- **P3 — Proxies**: done. `GetTransaction`, `SendTransaction`, `GetTreeState`/`GetLatestTreeState`,
-  `GetTaddressBalance(+Stream)`, `GetAddressUtxos(+Stream)`, and `Ping` translate a single node RPC each.
-- **P4 — Mempool, subtrees, t-addr txns & nullifiers**: done. `GetBlockNullifiers`/`GetBlockRangeNullifiers`
-  (pruned to shielded nullifiers), `GetTaddressTxids`/`GetTaddressTransactions`, `GetSubtreeRoots`
-  (`z_getsubtreesbyindex` + the completing block from the cache), `GetMempoolTx`, and `GetMempoolStream` (a
-  poll loop that ends when a new block is mined). All `CompactTxStreamer` methods are now implemented.
-- **P5 — Hardening**: in progress. TLS, Prometheus metrics, Docker, graceful shutdown, and per-method request
-  input validation (rejecting malformed arguments up front, see [Input validation](#input-validation)) are in
-  place, plus darkside mode (`--darkside-very-insecure`): a `DarksideStreamer` control plane over an in-memory mock chain
-  served through the `NodeRpc` seam, for deterministic wallet tests. The crate is split into a library
+All `CompactTxStreamer` gRPC methods are implemented. Grouped by area:
+
+- **Chain info** — `GetLightdInfo` (from `getinfo` + `getblockchaininfo`) and `GetLatestBlock`.
+- **Blocks** — `src/compact.rs` parses raw blocks into `CompactBlock`s. `GetBlock` (by height; verbose
+  `getblock` for hash + tree sizes, raw `getblock` for the bytes) and `GetBlockRange` serve from a `redb`-backed
+  cache (`src/cache.rs`) filled by a background ingestor (`src/ingestor.rs`) with reorg handling, falling back to
+  the node; `GetBlockRange` streams with `poolTypes` filtering. Lookup by hash is not yet supported.
+- **Transactions** — `GetTransaction` and `SendTransaction`.
+- **Tree state** — `GetTreeState`/`GetLatestTreeState` and `GetSubtreeRoots` (`z_getsubtreesbyindex` plus the
+  completing block from the cache).
+- **Transparent addresses** — `GetTaddressBalance(+Stream)`, `GetAddressUtxos(+Stream)`,
+  `GetTaddressTxids`/`GetTaddressTransactions`.
+- **Nullifiers** — `GetBlockNullifiers`/`GetBlockRangeNullifiers`, pruned to shielded nullifiers.
+- **Mempool** — `GetMempoolTx` and `GetMempoolStream` (a poll loop that ends when a new block is mined).
+- **Operations** — TLS by default, Prometheus metrics, Docker, graceful shutdown, and per-method input
+  validation (rejecting malformed arguments up front, see [Input validation](#input-validation)). `Ping` is a
+  benchmark RPC, disabled unless `--ping-very-insecure`.
+- **Testing** — darkside mode (`--darkside-very-insecure`): a `DarksideStreamer` control plane over an in-memory
+  mock chain served through the `NodeRpc` seam, for deterministic wallet tests. The crate is split into a library
   (`src/lib.rs`, exposing `run`) and a thin binary, with the gRPC client generated alongside the server, so it can
   be driven in-process by integration tests.
