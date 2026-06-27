@@ -33,7 +33,7 @@ implements, [`docs/protocol-references.md`](docs/protocol-references.md).
 
 ## Features
 
-- **All 18 `CompactTxStreamer` methods** — blocks, transactions, tree state, subtrees, nullifiers,
+- **All 20 `CompactTxStreamer` methods** — blocks, transactions, tree state, subtrees, nullifiers,
   transparent-address balances and txids, and mempool streaming.
 - **On-disk compact-block cache** (`redb`) filled by a background ingestor, with reorg rollback and
   automatic recovery from corruption or gaps.

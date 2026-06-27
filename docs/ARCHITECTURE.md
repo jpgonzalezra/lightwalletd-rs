@@ -12,9 +12,9 @@ node and light wallets:
 ```
             gRPC (CompactTxStreamer)            JSON-RPC (HTTP)
   wallet  <───────────────────────>  lightwalletd-rs  <───────────────────────>  zebrad (full node)
-  (Zashi,                              - serves compact blocks                     - has the full chain
-   Ywallet,                            - caches them on disk
-   SDKs)                               - proxies the rest
+  (Zcash                               - serves compact blocks                     - has the full chain
+   light                               - caches them on disk
+   wallets)                            - proxies the rest
 ```
 
 It does three things:
@@ -54,6 +54,8 @@ the `CompactTxStreamerClient` and `DarksideStreamerClient` stubs alongside the s
 | `src/config.rs` | Configuration: CLI flags + `zcash.conf` parsing. |
 | `src/node/` | JSON-RPC client to `zebrad`: the `NodeRpc` trait (typed RPC surface, with a generic `request` helper) and its `NodeClient` implementation. |
 | `src/service/` | Implementation of the `CompactTxStreamer` gRPC service, split by method family (`chain`, `blocks`, `transactions`, `address`, `mempool`, `treestate`, `subtrees`, `ping`); `mod.rs` holds the `Streamer` and a thin trait impl that dispatches each method to its submodule. |
+| `src/service/errors.rs` | Translates a backend JSON-RPC error into the per-method gRPC `Status` a wallet expects. |
+| `src/service/mempool_monitor.rs` | Live-mode shared mempool monitor: one background task refreshes the mempool and fans a parsed-once snapshot out via `watch`. |
 | `src/compact.rs` | Raw block bytes → `CompactBlock`, via `librustzcash`. |
 | `src/encoding.rs` | Display-order ↔ wire-order (endianness) conversions for hashes and txids. |
 | `src/filter.rs` | Prune a compact block or transaction to the requested value pools (`poolTypes`). |
@@ -65,7 +67,7 @@ the `CompactTxStreamerClient` and `DarksideStreamerClient` stubs alongside the s
 
 ## Method classification
 
-The 18 `CompactTxStreamer` methods split into two groups:
+The 20 `CompactTxStreamer` methods (two of them the deprecated `*Nullifiers` variants) split into two groups:
 
 - **Easy proxies** (one RPC, translated; no cache, no parsing): `GetLatestBlock`, `GetLightdInfo`,
   `GetTransaction`, `SendTransaction`, `GetTaddressBalance(+Stream)`, `GetAddressUtxos(+Stream)`,
@@ -115,6 +117,10 @@ stream.
 - The transparent-address methods validate the address shape locally — a `t` followed by 34
   alphanumeric characters — before reaching the node, and `GetTaddressTransactions`/`GetTaddressTxids`
   additionally require a block `range` with a `start` height.
+- `GetSubtreeRoots` rejects an unrecognized `shieldedProtocol` (neither Sapling nor Orchard) with
+  `InvalidArgument`; `GetTreeState`/`GetLatestTreeState` reject a height before Sapling activation (an
+  all-empty note-commitment frontier) with `InvalidArgument`.
+- `Ping` is disabled by default, returning `FailedPrecondition` unless `--ping-very-insecure` is set.
 
 The local address check is only a fast format gate: the node stays authoritative on the Base58Check
 checksum, so a well-formed address can still be rejected by the node and mapped to `InvalidArgument`
@@ -203,15 +209,18 @@ cargo run -- --rpc-url http://127.0.0.1:8232 --start-height 3375600 --data-dir /
   --no-tls-very-insecure
 ```
 
-Probe it with `grpcurl` (plaintext, since the server above runs with `--no-tls-very-insecure`):
+Probe it with `grpcurl`. The server does not expose gRPC reflection, so load the schema from the local
+`.proto` set with `-import-path proto -proto service.proto` (run from the repo root; plaintext, since the
+server above uses `--no-tls-very-insecure`):
 
 ```sh
-grpcurl -plaintext 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
-grpcurl -plaintext 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLatestBlock
-grpcurl -plaintext -d '{"height": 419200}' 127.0.0.1:9067 \
-  cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlock
-grpcurl -plaintext -d '{"start":{"height":3375690},"end":{"height":3375695}}' 127.0.0.1:9067 \
-  cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlockRange
+grpcurl -plaintext -import-path proto -proto service.proto \
+  127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
+grpcurl -plaintext -import-path proto -proto service.proto -d '{"height": 419200}' \
+  127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlock
+grpcurl -plaintext -import-path proto -proto service.proto \
+  -d '{"start":{"height":3375690},"end":{"height":3375695}}' \
+  127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlockRange
 ```
 
 ## TLS
@@ -222,10 +231,12 @@ The gRPC server runs over **TLS by default** and requires a PEM certificate and 
 cargo run -- --rpc-url http://127.0.0.1:8232 --tls-cert cert.pem --tls-key key.pem
 ```
 
-Probe it over TLS with `grpcurl` (`-cacert` to trust the certificate):
+Probe it over TLS with `grpcurl` (`-cacert` to trust the certificate; `-proto` because the server does not
+expose reflection):
 
 ```sh
-grpcurl -cacert cert.pem 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
+grpcurl -cacert cert.pem -import-path proto -proto service.proto \
+  127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
 ```
 
 For local development only, `--no-tls-very-insecure` runs the server in plaintext (so `grpcurl -plaintext`
@@ -306,8 +317,8 @@ darkside-aware, reached through an optional handle to the shared state that is `
 
 - The chain name and a tree state's `network` field come from `Reset`/config rather than being honoured
   per staged tree state; this is sufficient for the standard "main" test vectors.
-- The URL-based staging RPCs (`StageBlocks`/`StageTransactions`) fetch from the given URL with the server's
-  HTTP client, which is built without TLS (the backend node is plain HTTP), so they can only fetch over
+- The URL-based staging RPCs (`StageBlocks`/`StageTransactions`) fetch from the given URL with `reqwest`,
+  which the crate compiles without a TLS feature (the backend node is plain HTTP), so they can only fetch over
   `http://`. For remote data served over `https://` — such as the upstream `basic-reorg` test vectors on
   `raw.githubusercontent.com` — fetch it client-side and push it in through the streaming RPCs
   (`StageBlocksStream`/`StageTransactionsStream`), as `contrib/smoke-test.sh` does.
@@ -320,8 +331,9 @@ with `librustzcash`, which also yields the correct transaction ID for both legac
 transactions. The compact form keeps only what a shielded wallet needs — Sapling spends/outputs, Orchard
 actions, and transparent inputs/outputs — and the block height is read from the coinbase (BIP34).
 
-The note-commitment tree sizes in `ChainMetadata` are not part of the raw block; `GetBlock` fills them in
-from the verbose `getblock` response.
+The note-commitment tree sizes in `ChainMetadata` are not part of the raw block; the shared
+`fetch::compact_block` helper (used by both `GetBlock`'s cache-miss path and the ingestor) fills them in from
+the verbose `getblock` response.
 
 The parser is validated byte-for-byte against the golden fixtures in `testdata/compact_blocks.json` (the
 reference fixtures carry zeroed txids, so the test normalizes ours before comparing the rest of the
@@ -366,14 +378,16 @@ e.g. a block cached during a transient node fault, which `validate_light` cannot
 re-ingesting from `--start-height` whenever the cache is left empty; `--redownload` takes precedence
 over `--sync-from-height`.
 
-The ingestor (`src/ingestor.rs`) runs as a background task. At startup it resolves the chain with
-`connect_with_retry`: `getblockchaininfo` is retried indefinitely with capped exponential backoff (escalating
+The ingestor (`src/ingestor.rs`) runs as a background task. Before it starts, `run` resolves the chain with
+`connect_with_retry` (`src/lib.rs`): `getblockchaininfo` is retried indefinitely with capped exponential backoff (escalating
 to `error!` logs after several attempts), so the server waits for a slow-to-start node instead of exiting. Each
 step then reads the tip height **and** hash from a single `getblockchaininfo`. If the cache is behind, it
-fetches the next block (verifying the returned block's height matches the one requested), checks that its
+fetches the next block (verifying the returned block's height matches the request and that its bytes hash
+to the hash from the verbose response), checks that its
 `prevHash` chains onto the cached tip, and appends it or — on a mismatch — rolls back one block. If the cache is
 already at the tip height, it compares the tip *hash*: an equal hash means synced, a differing hash is an
-in-place tip reorg and rolls back one block. A cache-corruption error truncates from the corrupt point and
+in-place tip reorg and rolls back one block. If the cache is *ahead* of the node's reported tip (the node
+rolled back), it rolls back one block as well. A cache-corruption error truncates from the corrupt point and
 retries immediately (bounded, so recovery can never spin), while node/transport errors back off. When the cache
 reaches the tip it polls every couple of seconds. The cache persists across restarts, so the ingestor resumes
 from where it left off.
