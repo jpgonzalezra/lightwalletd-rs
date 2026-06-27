@@ -122,24 +122,33 @@ checksum, so a well-formed address can still be rejected by the node and mapped 
 
 ## Design decisions
 
-Short ADRs live under [`docs/decisions/`](decisions/). Notable ones:
+Short architecture decision records live under [`docs/decisions/`](decisions/), one per decision in a
+Context / Decision / Consequences format; the [index](decisions/README.md) lists them all. The
+headline ones:
 
-- **Local txid computation.** Transaction IDs (including v5 / Orchard
-  [ZIP-244](protocol-references.md#transaction-format--identifiers)) are computed locally from the raw
-  block bytes via `librustzcash`, so a single non-verbose `getblock` per block suffices for transaction data. A
-  verbose call is still made to obtain the note-commitment tree sizes (`ChainMetadata`), which are not part of the
-  raw block.
-- **Shared mempool monitor (live).** A single background task (`src/service/mempool_monitor.rs`) refreshes the
-  mempool at most once every 2 s and fans the deduplicated, parsed-once result out to all clients through a
-  `tokio::sync::watch` snapshot, so node load is independent of the number of connected wallets: `GetMempoolTx`
-  borrows the current snapshot and `GetMempoolStream` subscribes to it. Within a block interval the snapshot is
-  append-only (each transaction is fetched and parsed once); a tip change resets it, and wallets see at most 2 s
-  of staleness. The refresh is resilient to partial node failures: a transaction that disappears between the
-  `getrawmempool` listing and its `getrawtransaction` fetch is logged and skipped, never dropping the rest of the
-  tick. A `getrawmempool` failure (e.g. the node is down) aborts only that tick and retains the last good
-  snapshot, so clients keep serving it until the node returns and refreshes resume on their own. Darkside keeps
-  the per-request path (`Streamer.mempool == None`), where a staged transaction must appear and drain
-  synchronously.
+Data flow and storage:
+
+- [0001](decisions/0001-backend-zebrad-over-zcashd.md) — the backend node is `zebrad` (the only supported one), reached over plain-HTTP JSON-RPC with Basic auth.
+- [0002](decisions/0002-parse-blocks-with-librustzcash.md) — transactions are parsed with `librustzcash`; only the block header and framing are hand-parsed.
+- [0003](decisions/0003-compute-txids-locally.md) — transaction IDs (including v5 / Orchard [ZIP-244](protocol-references.md#transaction-format--identifiers)) are computed locally, so one non-verbose `getblock` per block suffices, with one extra verbose call per block for the note-commitment tree sizes (`ChainMetadata`) and the block hash.
+- [0004](decisions/0004-redb-block-cache.md) — compact blocks are cached on disk with `redb`, one per height; a reorg is a truncate-from-N.
+- [0014](decisions/0014-cache-ingestor-resilience.md) — the cache and ingestor recover from corruption and reorgs locally (truncate-from-N, reorg-by-hash, capped-backoff startup).
+- [0005](decisions/0005-shared-mempool-monitor.md) — in live mode a single background task (`src/service/mempool_monitor.rs`) refreshes the mempool at most every ~2 s and fans a parsed-once snapshot out via `tokio::sync::watch`, so node load is independent of the connected-wallet count; darkside keeps the per-request path.
+
+Structure and seams:
+
+- [0007](decisions/0007-noderpc-seam.md) — the `NodeRpc` trait is the single node-access seam; `service`, `ingestor`, and `fetch` depend on the `dyn NodeRpc` trait object rather than the concrete client.
+- [0008](decisions/0008-library-plus-binary.md) — the crate ships as a library plus a thin binary, exposing `run` so integration tests can drive the server in-process.
+- [0009](decisions/0009-service-per-method-family-modules.md) — the service is split into per-method-family submodules with a thin dispatcher in `mod.rs`.
+- [0006](decisions/0006-darkside-mock-via-noderpc-seam.md) — darkside injects the mock chain at the `NodeRpc` seam, reusing the cache and `CompactTxStreamer` path unchanged.
+
+Wallet-facing contract and hardening:
+
+- [0010](decisions/0010-node-error-grpc-mapping.md) — node errors map to per-method gRPC status codes, keyed primarily to the numeric JSON-RPC code rather than message text.
+- [0011](decisions/0011-up-front-input-validation.md) — malformed requests are rejected up front, before any node round-trip or stream is opened.
+- [0012](decisions/0012-tls-default-insecure-flags.md) — TLS is on by default; dangerous/testing features are gated behind off-by-default `*-very-insecure` flags.
+- [0013](decisions/0013-resource-limits.md) — the server bounds the resources a client can hold or accumulate (configurable stream/keepalive limits plus per-request caps).
+- [0015](decisions/0015-layered-testing-strategy.md) — testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.
 
 ## Resource limits
 
