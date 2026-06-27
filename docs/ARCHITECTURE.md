@@ -149,6 +149,7 @@ Wallet-facing contract and hardening:
 - [0012](decisions/0012-tls-default-insecure-flags.md) — TLS is on by default; dangerous/testing features are gated behind off-by-default `*-very-insecure` flags.
 - [0013](decisions/0013-resource-limits.md) — the server bounds the resources a client can hold or accumulate (configurable stream/keepalive limits plus per-request caps).
 - [0015](decisions/0015-layered-testing-strategy.md) — testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.
+- [0016](decisions/0016-test-placement-by-visibility.md) — tests are placed by visibility: handler tests grouped by family under `service/tests/`, private internals tested inline in their own module.
 
 ## Resource limits
 

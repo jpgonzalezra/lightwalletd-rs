@@ -22,3 +22,4 @@ choice stays discoverable after the fact. The living overview is
 | [0013](0013-resource-limits.md) | Bound the resources a client can hold or accumulate |
 | [0014](0014-cache-ingestor-resilience.md) | Cache and ingestor recover from corruption and reorgs locally |
 | [0015](0015-layered-testing-strategy.md) | Layered testing: fakes, golden fixtures, and in-process E2E |
+| [0016](0016-test-placement-by-visibility.md) | Place tests by visibility: handler tests grouped by family, internals tested inline |
