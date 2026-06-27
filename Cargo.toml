@@ -2,6 +2,10 @@
 name = "lightwalletd-rs"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "A Rust implementation of lightwalletd, the gRPC backend that serves Zcash blockchain data to shielded light wallets."
+repository = "https://github.com/jpgonzalezra/lightwalletd-rs"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.102"
