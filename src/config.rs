@@ -164,7 +164,7 @@ pub enum TlsConfig {
 }
 
 /// How to reach the zebrad JSON-RPC endpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NodeConfig {
     /// Base URL, e.g. `http://127.0.0.1:8232`.
     pub url: String,
@@ -172,6 +172,17 @@ pub struct NodeConfig {
     pub user: String,
     /// HTTP Basic auth password.
     pub password: String,
+}
+
+impl std::fmt::Debug for NodeConfig {
+    /// Hand-written so a stray `{:?}` on the config can never leak the node credential into a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("url", &self.url)
+            .field("user", &self.user)
+            .field("password", &"***")
+            .finish()
+    }
 }
 
 impl Cli {
@@ -453,5 +464,17 @@ mod tests {
         let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
         cli.keepalive_interval_secs = 0;
         assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn node_config_debug_redacts_password() {
+        let node = NodeConfig {
+            url: "http://127.0.0.1:8232".to_string(),
+            user: "user".to_string(),
+            password: "supersecret".to_string(),
+        };
+        let rendered = format!("{node:?}");
+        assert!(rendered.contains("***"));
+        assert!(!rendered.contains("supersecret"));
     }
 }
