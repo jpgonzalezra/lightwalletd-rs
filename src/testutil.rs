@@ -3,6 +3,9 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use zcash_address::unified::{Address, Encoding, Receiver};
+use zcash_address::{ToAddress, ZcashAddress};
+use zcash_protocol::consensus::NetworkType;
 
 use crate::cache::Cache;
 use crate::node::{
@@ -16,6 +19,20 @@ pub fn temp_cache() -> (tempfile::TempDir, Cache) {
     let dir = tempfile::tempdir().unwrap();
     let cache = Cache::open(&dir.path().join("blocks.redb")).unwrap();
     (dir, cache)
+}
+
+/// A deterministic, synthetic mainnet transparent address, derived through `zcash_address` (hash160
+/// of all zeros) so tests embed no real address.
+pub fn example_taddress() -> String {
+    ZcashAddress::from_transparent_p2pkh(NetworkType::Main, [0; 20]).encode()
+}
+
+/// A deterministic, synthetic mainnet unified address, derived through `zcash_address` (a single
+/// zeroed Orchard receiver) so tests embed no real address.
+pub fn example_unified_address() -> String {
+    Address::try_from_items(vec![Receiver::Orchard([0; 43])])
+        .expect("a single Orchard receiver is a valid unified address")
+        .encode(&NetworkType::Main)
 }
 
 /// The consecutive raw blocks in `testdata/blocks` (heights 380640..=380643).

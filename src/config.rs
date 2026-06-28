@@ -388,23 +388,21 @@ mod tests {
         assert!(cli.resolve().is_err());
     }
 
-    /// A valid mainnet unified address, used to exercise donation-address validation.
-    const VALID_UA: &str = "u1scrubbedbeforepublicationplan001000000000000000000";
-
     #[test]
     fn resolve_accepts_and_stores_a_valid_donation_address() {
+        let valid_ua = crate::testutil::example_unified_address();
         let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
-        cli.donation_address = Some(VALID_UA.to_string());
+        cli.donation_address = Some(valid_ua.clone());
 
         let config = cli.resolve().unwrap();
 
-        assert_eq!(config.donation_address.as_deref(), Some(VALID_UA));
+        assert_eq!(config.donation_address.as_deref(), Some(valid_ua.as_str()));
     }
 
     #[test]
     fn resolve_rejects_a_non_unified_donation_address() {
         let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
-        cli.donation_address = Some("t1ScrubbedBeforePublicationPlan001aaaaa".to_string());
+        cli.donation_address = Some(crate::testutil::example_taddress());
         assert!(cli.resolve().is_err());
     }
 
@@ -412,8 +410,9 @@ mod tests {
     fn resolve_rejects_a_truncated_donation_address() {
         // A valid unified address missing its last character still starts with `u`, but its
         // checksum no longer verifies, so decoding must reject it.
+        let valid_ua = crate::testutil::example_unified_address();
         let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
-        cli.donation_address = Some(VALID_UA[..VALID_UA.len() - 1].to_string());
+        cli.donation_address = Some(valid_ua[..valid_ua.len() - 1].to_string());
         assert!(cli.resolve().is_err());
     }
 

@@ -25,7 +25,9 @@ RECV_URL="$BASE/transactions/recv/0821a89be7f2fc1311792c3fa1dd2171a8cdfb2effd985
 # The recv transaction's txid in wire (protocol) order, base64-encoded — how it appears in CompactTx
 # and how GetTransaction expects it. Display order is 0821a8…491f.
 TXID_WIRE_B64="H0nPz83r1cuQhdn/LvvNqHEh3aE/LHkRE/zy55uoIQg="
-TADDR=t1ScrubbedBeforePublicationPlan001aaaaa
+# Synthetic mainnet t-address (P2PKH hash160 of all zeros) — the literal form of the Rust tests'
+# example_taddress(): ZcashAddress::from_transparent_p2pkh(Main, [0; 20]).
+TADDR=t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs
 RESET='{"saplingActivation":663150,"branchID":"bad","chainName":"x"}'
 
 command -v grpcurl >/dev/null || { echo "grpcurl not found (go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest)"; exit 1; }

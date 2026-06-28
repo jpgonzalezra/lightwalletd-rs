@@ -11,9 +11,6 @@ use crate::testutil::FakeNode;
 
 use super::streamer_with;
 
-/// A valid mainnet unified address, used to exercise the donation-address passthrough.
-const DONATION_UA: &str = "u1scrubbedbeforepublicationplan001000000000000000000";
-
 /// A node answering the two RPCs `get_lightd_info` issues (`getinfo` + `getblockchaininfo`).
 fn lightd_info_node() -> Arc<FakeNode> {
     Arc::new(FakeNode {
@@ -72,8 +69,9 @@ async fn get_latest_block_reverses_display_hash_to_wire() {
 
 #[tokio::test]
 async fn get_lightd_info_advertises_configured_donation_address() {
+    let donation_ua = crate::testutil::example_unified_address();
     let (_dir, streamer) = streamer_with(lightd_info_node());
-    let streamer = streamer.with_donation_address(Some(DONATION_UA.to_string()));
+    let streamer = streamer.with_donation_address(Some(donation_ua.clone()));
 
     let response = streamer
         .get_lightd_info(Request::new(Empty {}))
@@ -81,7 +79,7 @@ async fn get_lightd_info_advertises_configured_donation_address() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(response.donation_address, DONATION_UA);
+    assert_eq!(response.donation_address, donation_ua);
 }
 
 #[tokio::test]

@@ -3,19 +3,17 @@
 
 mod common;
 
-use common::{TestServer, recv_tx, wire_txid};
+use common::{TestServer, example_taddress, recv_tx, wire_txid};
 use lightwalletd_rs::proto::{
     BlockId, BlockRange, DarksideAddressTransaction, GetAddressUtxosArg, GetAddressUtxosReply,
     RawTransaction, TransparentAddressBlockFilter,
 };
 
-const ADDRESS: &str = "t1ScrubbedBeforePublicationPlan001aaaaa";
-
 async fn taddress_txs(server: &mut TestServer, start: u64, end: u64) -> Vec<RawTransaction> {
     let mut stream = server
         .compact
         .get_taddress_transactions(TransparentAddressBlockFilter {
-            address: ADDRESS.to_string(),
+            address: example_taddress(),
             range: Some(BlockRange {
                 start: Some(BlockId {
                     height: start,
@@ -47,7 +45,7 @@ async fn taddress_transactions_filter_by_address_and_height_range() {
     server
         .darkside
         .add_address_transaction(DarksideAddressTransaction {
-            address: ADDRESS.to_string(),
+            address: example_taddress(),
             data: raw.clone(),
             height: 644337,
         })
@@ -75,7 +73,7 @@ async fn address_utxos_round_trip_with_display_order_txid() {
     server
         .darkside
         .add_address_utxo(GetAddressUtxosReply {
-            address: ADDRESS.to_string(),
+            address: example_taddress(),
             txid: wire.clone(),
             index: 1,
             script: vec![0xab, 0xcd],
@@ -88,7 +86,7 @@ async fn address_utxos_round_trip_with_display_order_txid() {
     let reply = server
         .compact
         .get_address_utxos(GetAddressUtxosArg {
-            addresses: vec![ADDRESS.to_string()],
+            addresses: vec![example_taddress()],
             start_height: 0,
             max_entries: 0,
         })
@@ -98,7 +96,7 @@ async fn address_utxos_round_trip_with_display_order_txid() {
 
     assert_eq!(reply.address_utxos.len(), 1);
     let utxo = &reply.address_utxos[0];
-    assert_eq!(utxo.address, ADDRESS);
+    assert_eq!(utxo.address, example_taddress());
     // The wire txid round-trips: darkside stores it display-order, the service reverses it back.
     assert_eq!(utxo.txid, wire);
     assert_eq!(utxo.index, 1);

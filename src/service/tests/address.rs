@@ -14,7 +14,7 @@ use crate::proto::{
 use crate::service::address::{MAX_TADDRESS_TXIDS, collect_utxos};
 use crate::testutil::FakeNode;
 
-use super::{TADDR, streamer_with};
+use super::{streamer_with, taddr};
 
 fn address_utxo(txid: &str, height: u64) -> node::AddressUtxo {
     serde_json::from_value(json!({
@@ -44,7 +44,7 @@ async fn collect_utxos_reverses_txid_and_applies_start_height_and_max_entries() 
     let replies = collect_utxos(
         &streamer,
         &GetAddressUtxosArg {
-            addresses: vec![TADDR.to_string()],
+            addresses: vec![taddr()],
             start_height: 150,
             max_entries: 1,
         },
@@ -75,7 +75,7 @@ async fn get_taddress_balance_returns_value_zat() {
 
     let response = streamer
         .get_taddress_balance(Request::new(AddressList {
-            addresses: vec![TADDR.to_string()],
+            addresses: vec![taddr()],
         }))
         .await
         .unwrap()
@@ -94,7 +94,7 @@ async fn get_taddress_balance_invalid_address_maps_to_invalid_argument() {
 
     let status = streamer
         .get_taddress_balance(Request::new(AddressList {
-            addresses: vec![TADDR.to_string()],
+            addresses: vec![taddr()],
         }))
         .await
         .unwrap_err();
@@ -112,7 +112,7 @@ async fn get_address_utxos_invalid_address_maps_to_invalid_argument() {
 
     let status = streamer
         .get_address_utxos(Request::new(GetAddressUtxosArg {
-            addresses: vec![TADDR.to_string()],
+            addresses: vec![taddr()],
             start_height: 0,
             max_entries: 0,
         }))
@@ -132,7 +132,7 @@ async fn get_taddress_balance_no_information_available_maps_to_not_found() {
 
     let status = streamer
         .get_taddress_balance(Request::new(AddressList {
-            addresses: vec![TADDR.to_string()],
+            addresses: vec![taddr()],
         }))
         .await
         .unwrap_err();
@@ -153,7 +153,7 @@ async fn get_taddress_transactions_streams_one_raw_tx_per_txid() {
     let (_dir, streamer) = streamer_with(fake);
 
     let filter = TransparentAddressBlockFilter {
-        address: TADDR.to_string(),
+        address: taddr(),
         range: Some(BlockRange {
             start: Some(BlockId {
                 height: 1,
@@ -204,7 +204,7 @@ async fn get_taddress_transactions_without_range_is_invalid_argument() {
 
     let status = streamer
         .get_taddress_transactions(Request::new(TransparentAddressBlockFilter {
-            address: TADDR.to_string(),
+            address: taddr(),
             range: None,
         }))
         .await
@@ -220,7 +220,7 @@ async fn get_taddress_transactions_without_start_is_invalid_argument() {
 
     let status = streamer
         .get_taddress_transactions(Request::new(TransparentAddressBlockFilter {
-            address: TADDR.to_string(),
+            address: taddr(),
             range: Some(BlockRange {
                 start: None,
                 end: Some(BlockId {
@@ -247,7 +247,7 @@ async fn get_taddress_transactions_rejects_too_many_txids() {
 
     let status = streamer
         .get_taddress_transactions(Request::new(TransparentAddressBlockFilter {
-            address: TADDR.to_string(),
+            address: taddr(),
             range: Some(BlockRange {
                 start: Some(BlockId {
                     height: 1,

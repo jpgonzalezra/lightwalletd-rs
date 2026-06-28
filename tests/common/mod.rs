@@ -13,6 +13,8 @@ use lightwalletd_rs::proto::{
     DarksideBlock, DarksideEmptyBlocks, DarksideHeight, DarksideMetaState, RawTransaction,
 };
 use tonic::transport::{Channel, Endpoint, Server};
+use zcash_address::{ToAddress, ZcashAddress};
+use zcash_protocol::consensus::NetworkType;
 
 /// A running darkside server plus both clients connected to it. Dropping it aborts the server task
 /// (closing the listener), so no port or task leaks between tests.
@@ -153,4 +155,10 @@ pub fn wire_txid(display_hex: &str) -> Vec<u8> {
     let mut bytes = hex::decode(display_hex).unwrap();
     bytes.reverse();
     bytes
+}
+
+/// A deterministic, synthetic mainnet transparent address, derived through `zcash_address` (hash160
+/// of all zeros) so tests embed no real address.
+pub fn example_taddress() -> String {
+    ZcashAddress::from_transparent_p2pkh(NetworkType::Main, [0; 20]).encode()
 }
