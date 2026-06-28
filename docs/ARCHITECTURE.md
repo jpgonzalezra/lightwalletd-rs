@@ -387,7 +387,12 @@ to the hash from the verbose response), checks that its
 `prevHash` chains onto the cached tip, and appends it or — on a mismatch — rolls back one block. If the cache is
 already at the tip height, it compares the tip *hash*: an equal hash means synced, a differing hash is an
 in-place tip reorg and rolls back one block. If the cache is *ahead* of the node's reported tip (the node
-rolled back), it rolls back one block as well. A cache-corruption error truncates from the corrupt point and
+rolled back), it rolls back one block as well. Every rollback is floored at `--start-height`: since the cache
+only holds heights at or above it, a reorg that would cross the floor is necessarily deeper than the entire
+cache — a sign of a broken or inconsistent node rather than a real reorg — so it is refused
+(`ReorgBelowStartHeight`) and handled as a node-error backoff (slow-poll) instead of draining the cache past
+the floor or hot-looping; the `truncate_from` operator levers above may still empty the cache on purpose. A
+cache-corruption error truncates from the corrupt point and
 retries immediately (bounded, so recovery can never spin), while node/transport errors back off. When the cache
 reaches the tip it polls every couple of seconds. The cache persists across restarts, so the ingestor resumes
 from where it left off.

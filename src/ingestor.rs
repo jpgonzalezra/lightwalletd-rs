@@ -93,7 +93,7 @@ async fn step(node: &dyn NodeRpc, cache: &Cache, start_height: u64) -> Result<bo
                 height = latest_height,
                 "tip reorg detected; rolling back one block"
             );
-            cache.reorg(latest_height.saturating_sub(1))?;
+            reorg_to_floor(cache, latest_height.saturating_sub(1), start_height)?;
             return Ok(true);
         }
         Some(latest_height) if latest_height > tip_height => {
@@ -103,7 +103,7 @@ async fn step(node: &dyn NodeRpc, cache: &Cache, start_height: u64) -> Result<bo
                 tip_height,
                 "node behind cache; rolling back one block"
             );
-            cache.reorg(latest_height.saturating_sub(1))?;
+            reorg_to_floor(cache, latest_height.saturating_sub(1), start_height)?;
             return Ok(true);
         }
         Some(latest_height) => latest_height + 1,
@@ -129,9 +129,23 @@ async fn step(node: &dyn NodeRpc, cache: &Cache, start_height: u64) -> Result<bo
             height = next.saturating_sub(1),
             "reorg detected; rolling back one block"
         );
-        cache.reorg(next.saturating_sub(2))?;
+        reorg_to_floor(cache, next.saturating_sub(2), start_height)?;
     }
     Ok(true)
+}
+
+/// Roll the cache back to `target`, refusing to cross the `start_height` floor. A reorg that deep is
+/// anomalous (deeper than the whole cache), so we surface it as an error — the run loop backs off and
+/// logs, rather than draining the cache past the floor or hot-looping.
+fn reorg_to_floor(cache: &Cache, target: u64, start_height: u64) -> Result<(), StepError> {
+    if target < start_height {
+        return Err(StepError::ReorgBelowStartHeight {
+            target,
+            start_height,
+        });
+    }
+    cache.reorg(target)?;
+    Ok(())
 }
 
 /// Errors from a single ingestor step.
@@ -145,6 +159,15 @@ enum StepError {
     Cache(#[from] CacheError),
     #[error("decoding tip hash: {0}")]
     Encoding(#[from] hex::FromHexError),
+    /// A reorg would roll the cache back below `start_height`; refused, to cap the blast radius and
+    /// avoid hot-looping at the floor (handled as a slow-poll backoff by the run loop).
+    #[error("reorg would roll back below start height {start_height} (target {target})")]
+    ReorgBelowStartHeight {
+        /// The rollback target that fell below the floor.
+        target: u64,
+        /// The configured start height (the floor).
+        start_height: u64,
+    },
 }
 
 impl StepError {
@@ -268,16 +291,45 @@ mod tests {
         let (raw, parsed) = fixture(0);
         let height = parsed.height;
         let (_dir, cache) = temp_cache();
+        // Cache [height-2, height-1], floor = start_height = height-2. The fetched block `height`
+        // does not chain, so the reorg target is height-2 (== floor): allowed, keeping [height-2].
+        cache
+            .add(height - 2, &tip_block(height - 2, vec![0xee; 32]))
+            .unwrap();
         cache
             .add(height - 1, &tip_block(height - 1, vec![0xff; 32]))
             .unwrap();
 
-        let advanced = step(&fake_serving(raw, height), &cache, height - 1)
+        let advanced = step(&fake_serving(raw, height), &cache, height - 2)
             .await
             .unwrap();
 
         assert!(advanced);
-        assert_eq!(cache.latest_height().unwrap(), None);
+        assert_eq!(cache.latest_height().unwrap(), Some(height - 2));
+    }
+
+    #[tokio::test]
+    async fn step_reorg_below_start_height_floor_errors_without_draining() {
+        let (_dir, cache) = temp_cache();
+        // Cache [100], floor = start_height = 100.
+        cache.add(100, &tip_block(100, vec![0xaa; 32])).unwrap();
+
+        // Node reports the same height with a different tip hash → same-height reorg branch, whose
+        // target 99 falls below the floor.
+        let fake = FakeNode {
+            blockchain_info: Some(blockchain_info(100, &"cc".repeat(32))),
+            ..Default::default()
+        };
+        let error = step(&fake, &cache, 100).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            StepError::ReorgBelowStartHeight {
+                target: 99,
+                start_height: 100
+            }
+        ));
+        assert_eq!(cache.latest_height().unwrap(), Some(100)); // not drained
     }
 
     #[tokio::test]
