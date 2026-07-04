@@ -3,6 +3,8 @@
 All notable changes to this project are documented here. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
 ## [0.1.0] — beta
 
 First public release. A caching proxy in front of a `zebrad` node that implements all 20
