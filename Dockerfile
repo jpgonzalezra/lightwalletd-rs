@@ -1,5 +1,5 @@
 # Build stage: compile the release binary (needs protoc for the gRPC codegen).
-FROM rust:1-slim AS builder
+FROM rust:1-slim@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
@@ -8,7 +8,7 @@ COPY . .
 RUN cargo build --release --locked
 
 # Runtime stage: a slim image with just the binary, run as a non-root user.
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
 RUN useradd --system --uid 10001 --user-group lwd
 COPY --from=builder /build/target/release/lightwalletd-rs /usr/local/bin/lightwalletd-rs
 USER lwd
