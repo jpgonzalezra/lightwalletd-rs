@@ -2,6 +2,9 @@
 /certs
 /dev-certs
 /lightwalletd-rs-data
+.DS_Store
+__pycache__/
+*.pyc
 
 # Secrets and local artifacts — defense in depth; never commit these.
 *.pem
