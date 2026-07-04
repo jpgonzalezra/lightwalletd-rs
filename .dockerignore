@@ -4,3 +4,8 @@
 /dev-certs
 /lightwalletd-rs-data
 *.redb
+*.pem
+*.key
+.env
+.env.*
+zcash.conf
