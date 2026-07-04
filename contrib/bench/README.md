@@ -38,7 +38,8 @@ contrib/bench/
   go-lwd.Dockerfile          # clones zcash/lightwalletd @ fdf1af5 and builds
   mock-rpc/{Dockerfile,server.py}
   profiles/{dense.env,light.env}
-  scripts/{extract-dataset.sh,populate.sh,run-bench.sh,aggregate.py}
+  scripts/{extract-dataset.sh,populate.sh,run-bench.sh,aggregate.py,plot.py}
+  charts/                    # SVG charts committed for the README
   data/                      # extracted dataset artifacts (git-ignored)
   results/                   # per-run outputs (git-ignored)
 ```
@@ -80,10 +81,11 @@ docker compose -f docker-compose.bench.yml --env-file profiles/dense.env <cmd>
    scripts/run-bench.sh dense
    ```
 
-4. **Aggregate** the runs into tables:
+4. **Aggregate** the runs into tables, and render the charts:
 
    ```
-   scripts/aggregate.py results/
+   scripts/aggregate.py results/     # Markdown tables
+   scripts/plot.py                   # SVG charts -> charts/
    ```
 
 ## How the node is neutralized
