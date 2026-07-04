@@ -1,0 +1,103 @@
+# Benchmark harness: hot read-path comparison of lightwalletd-rs (Rust) against
+# the reference lightwalletd (Go). Both proxies serve compact blocks from a warm
+# on-disk cache with the backend node idle, under identical resource limits.
+#
+# The dataset profile (dense | light) is selected with
+#   docker compose -f docker-compose.bench.yml --env-file profiles/<profile>.env ...
+# which sets BASE / SPAN and the per-profile cache volume names. A service's
+# mounted volume cannot vary by Compose profile, so the dataset axis is driven by
+# --env-file rather than a Compose profile. The `ghz` load client sits behind a
+# Compose profile so it only runs on demand (docker compose run ghz ...).
+#
+# Defaults below let `docker compose config` render without an --env-file.
+
+name: lwd-bench
+
+# Shared config for both proxies: identical limits (2 vCPU / 2 GiB) and root, so a
+# fresh root-owned named volume at /data is writable (the images otherwise run as a
+# non-root user). Isolated benchmark containers only.
+x-proxy-common: &proxy-common
+  cpus: "2"
+  mem_limit: 2g
+  user: "0:0"
+
+networks:
+  bench:
+    driver: bridge
+
+# Native Docker volumes (not bind mounts) so the hot read-path measures
+# CPU/serialization, not Docker Desktop's slow bind-mount I/O.
+volumes:
+  rust-cache-dense:
+  rust-cache-light:
+  go-cache-dense:
+  go-cache-light:
+
+services:
+  # Serves the frozen dataset as JSON-RPC. Idle during measurement (reports the
+  # dataset tip so each proxy's ingestor sees itself synced).
+  mock-rpc:
+    build:
+      context: ./mock-rpc
+    networks: [bench]
+    environment:
+      PROFILE: ${PROFILE:-dense}
+    # The dataset artifact is a read-only input, only read at populate time, so a
+    # bind mount here is fine — it is never on the measured hot path.
+    volumes:
+      - ./data/${PROFILE:-dense}:/dataset:ro
+    expose:
+      - "8232"
+
+  rust-lwd:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on: [mock-rpc]
+    networks: [bench]
+    <<: *proxy-common
+    environment:
+      RUST_LOG: warn
+    command: >
+      --no-tls-very-insecure --grpc-bind 0.0.0.0:9067
+      --rpc-url http://mock-rpc:8232 --rpc-user bench --rpc-password bench
+      --data-dir /data --start-height ${BASE:-0} --metrics-bind 0.0.0.0:9100
+    volumes:
+      - ${RUST_CACHE_VOLUME:-rust-cache-dense}:/data
+    expose:
+      - "9067"
+      - "9100"
+
+  go-lwd:
+    build:
+      context: .
+      dockerfile: go-lwd.Dockerfile
+    depends_on: [mock-rpc]
+    networks: [bench]
+    <<: *proxy-common
+    # Go's ingestor is anchored at genesis in stock lightwalletd; the build-time
+    # patch reads this to start ingestion at the dataset base instead.
+    environment:
+      LWD_FIRST_HEIGHT: ${BASE:-0}
+    command: >
+      --no-tls-very-insecure --grpc-bind-addr 0.0.0.0:9067 --http-bind-addr 0.0.0.0:9068
+      --rpcuser bench --rpcpassword bench --rpchost mock-rpc --rpcport 8232
+      --data-dir /data --log-level 3 --log-file /dev/stdout
+    volumes:
+      - ${GO_CACHE_VOLUME:-go-cache-dense}:/data
+    expose:
+      - "9067"
+      - "9068"
+
+  # gRPC load client, on the same network (no host port-forwarding). Run on
+  # demand against rust-lwd:9067 or go-lwd:9067.
+  ghz:
+    profiles: [ghz]
+    build:
+      context: ./ghz
+    depends_on: [rust-lwd, go-lwd]
+    networks: [bench]
+    volumes:
+      - ../../proto:/proto:ro
+      - ./results:/results
+    entrypoint: ["ghz"]

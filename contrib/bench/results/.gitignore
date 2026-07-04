@@ -1,0 +1,3 @@
+# Per-run outputs (ghz JSON, metrics scrapes, resource samples); never commit.
+*
+!.gitignore

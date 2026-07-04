@@ -1,0 +1,3 @@
+# Extracted dataset artifacts (index.json, raw.bin) can be several GB; never commit.
+*
+!.gitignore

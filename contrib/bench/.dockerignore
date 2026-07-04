@@ -1,0 +1,4 @@
+# Build context for go-lwd.Dockerfile is this directory. It only needs the Go
+# helper under go-lwd/; keep the context tiny (data/ can be several GB).
+*
+!go-lwd
