@@ -26,14 +26,16 @@ services:
       - --grpc-bind=0.0.0.0:9067
       - --tls-cert=/certs/cert.pem
       - --tls-key=/certs/key.pem
-      - --metrics-bind=0.0.0.0:9100
+      # Metrics are disabled from outside the container by default (loopback bind). To scrape
+      # from an in-network Prometheus, change the bind to 0.0.0.0:9100 but do NOT publish the
+      # port to the host; never expose /metrics directly to the host or internet.
+      - --metrics-bind=127.0.0.1:9100
       - --data-dir=/var/lib/lightwalletd-rs
     volumes:
       - ./certs:/certs:ro
       - lwd-data:/var/lib/lightwalletd-rs
     ports:
       - "9067:9067" # gRPC
-      - "9100:9100" # Prometheus /metrics
     restart: unless-stopped
 
 volumes:
