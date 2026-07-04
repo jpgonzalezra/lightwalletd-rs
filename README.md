@@ -47,6 +47,7 @@ implements, [`docs/protocol-references.md`](docs/protocol-references.md).
 
 - **Rust** (stable, 2024 edition).
 - **`protoc`**, the Protocol Buffers compiler, on `PATH` — the `.proto` contract is compiled at build time.
+  Install it with `brew install protobuf` (macOS) or `apt-get install -y protobuf-compiler` (Debian/Ubuntu).
 - A reachable **`zebrad`** node with JSON-RPC enabled (mainnet, testnet, or regtest), synced far enough to
   serve the range you need.
 
@@ -314,6 +315,7 @@ than on `dense`**, not smaller.
 - [`docs/protocol-references.md`](docs/protocol-references.md) — the ZIPs, BIPs, and spec sections each
   module implements.
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes.
+- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability.
 
 ## Acknowledgments
 
