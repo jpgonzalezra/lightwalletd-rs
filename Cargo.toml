@@ -6,6 +6,9 @@ license = "MIT"
 description = "A Rust implementation of lightwalletd, the gRPC backend that serves Zcash blockchain data to shielded light wallets."
 repository = "https://github.com/jpgonzalezra/lightwalletd-rs"
 readme = "README.md"
+rust-version = "1.96"
+keywords = ["zcash", "lightwalletd", "grpc", "light-client"]
+publish = false
 
 [dependencies]
 anyhow = "1.0.102"
