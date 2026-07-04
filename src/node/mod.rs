@@ -12,9 +12,17 @@ pub use types::{
     Upgrade,
 };
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::NodeConfig;
+
+/// Per-call request timeout: generously above the slowest legitimate call (a verbose `getblock` /
+/// `getrawtransaction`), so a stalled node surfaces as a retryable error instead of hanging forever.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// TCP connect timeout for the node HTTP client.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Errors returned by the node client.
 #[derive(Debug, thiserror::Error)]
@@ -99,14 +107,28 @@ pub trait NodeRpc: Send + Sync {
 }
 
 impl NodeClient {
-    /// Build a client from the resolved node configuration.
-    pub fn new(config: &NodeConfig) -> Self {
-        Self {
-            http: reqwest::Client::new(),
+    /// Build a client from the resolved node configuration, using the default request and connect
+    /// timeouts.
+    pub fn new(config: &NodeConfig) -> Result<Self, reqwest::Error> {
+        Self::with_timeouts(config, REQUEST_TIMEOUT, CONNECT_TIMEOUT)
+    }
+
+    /// Build a client with explicit request and connect timeouts.
+    fn with_timeouts(
+        config: &NodeConfig,
+        request_timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Result<Self, reqwest::Error> {
+        let http = reqwest::Client::builder()
+            .timeout(request_timeout)
+            .connect_timeout(connect_timeout)
+            .build()?;
+        Ok(Self {
+            http,
             url: config.url.clone(),
             user: config.user.clone(),
             password: config.password.clone(),
-        }
+        })
     }
 
     /// Issue a raw JSON-RPC call and return the decoded `result` value.
@@ -279,6 +301,7 @@ mod tests {
             user: "rpcuser".to_string(),
             password: "rpcpass".to_string(),
         })
+        .unwrap()
     }
 
     async fn mock_response(body: serde_json::Value) -> MockServer {
@@ -364,5 +387,35 @@ mod tests {
         let server = mock_response(serde_json::json!({ "result": "deadbeef" })).await;
         let bytes = client_for(&server).get_block_raw("somehash").await.unwrap();
         assert_eq!(bytes, vec![0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn raw_request_times_out_on_a_stalled_node_instead_of_hanging() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "result": "ok" }))
+                    .set_delay(Duration::from_secs(60)),
+            )
+            .mount(&server)
+            .await;
+        let client = NodeClient::with_timeouts(
+            &NodeConfig {
+                url: server.uri(),
+                user: "rpcuser".to_string(),
+                password: "rpcpass".to_string(),
+            },
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        let error = client
+            .raw_request("getinfo", serde_json::json!([]))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, NodeError::Http(_)));
     }
 }

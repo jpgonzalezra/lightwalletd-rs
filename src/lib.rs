@@ -78,7 +78,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             .await?;
     } else {
         // Real node: query the chain, open the cache, spawn the ingestor, serve `CompactTxStreamer`.
-        let node: Arc<dyn NodeRpc> = Arc::new(node::NodeClient::new(&config.node));
+        let node: Arc<dyn NodeRpc> = Arc::new(node::NodeClient::new(&config.node)?);
 
         // Query the chain (retrying until the node is reachable): its name keys the cache file, and
         // its Sapling activation height is the default place to start ingesting from.
