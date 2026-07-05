@@ -29,13 +29,15 @@ pub struct Cli {
     #[arg(long)]
     pub rpc_url: Option<String>,
 
-    /// zebrad RPC host, used when `--rpc-url` is not given.
-    #[arg(long, default_value = "127.0.0.1")]
-    pub rpc_host: String,
+    /// zebrad RPC host, used when `--rpc-url` is not given (overrides `zcash.conf`; defaults to
+    /// 127.0.0.1 when neither flag nor `zcash.conf` provide it).
+    #[arg(long)]
+    pub rpc_host: Option<String>,
 
-    /// zebrad RPC port, used when `--rpc-url` is not given.
-    #[arg(long, default_value_t = 8232)]
-    pub rpc_port: u16,
+    /// zebrad RPC port, used when `--rpc-url` is not given (overrides `zcash.conf`; defaults to
+    /// 8232 when neither flag nor `zcash.conf` provide it).
+    #[arg(long)]
+    pub rpc_port: Option<u16>,
 
     /// RPC username (overrides the value from `--zcash-conf`).
     #[arg(long)]
@@ -199,8 +201,11 @@ impl Cli {
         let url = match self.rpc_url {
             Some(url) => url,
             None => {
-                let host = conf.rpcbind.unwrap_or(self.rpc_host);
-                let port = conf.rpcport.unwrap_or(self.rpc_port);
+                let host = self
+                    .rpc_host
+                    .or(conf.rpcbind)
+                    .unwrap_or_else(|| "127.0.0.1".to_string());
+                let port = self.rpc_port.or(conf.rpcport).unwrap_or(8232);
                 format!("http://{host}:{port}")
             }
         };
@@ -284,7 +289,15 @@ fn parse_zcash_conf(path: &Path) -> Result<ZcashConf> {
             "rpcuser" => conf.rpcuser = Some(value),
             "rpcpassword" => conf.rpcpassword = Some(value),
             "rpcbind" => conf.rpcbind = Some(value),
-            "rpcport" => conf.rpcport = value.parse().ok(),
+            "rpcport" => {
+                conf.rpcport = match value.parse() {
+                    Ok(port) => Some(port),
+                    Err(error) => {
+                        tracing::warn!(%value, %error, "ignoring unparseable rpcport in zcash.conf");
+                        None
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -322,14 +335,14 @@ mod tests {
         rpc_user: Option<&str>,
         rpc_password: Option<&str>,
         rpc_url: Option<&str>,
-        rpc_host: &str,
-        rpc_port: u16,
+        rpc_host: Option<&str>,
+        rpc_port: Option<u16>,
         zcash_conf: Option<PathBuf>,
     ) -> Cli {
         Cli {
             grpc_bind: "127.0.0.1:9067".parse().unwrap(),
             rpc_url: rpc_url.map(str::to_string),
-            rpc_host: rpc_host.to_string(),
+            rpc_host: rpc_host.map(str::to_string),
             rpc_port,
             rpc_user: rpc_user.map(str::to_string),
             rpc_password: rpc_password.map(str::to_string),
@@ -360,8 +373,8 @@ mod tests {
             Some("flaguser"),
             Some("flagpass"),
             None,
-            "127.0.0.1",
-            8232,
+            None,
+            Some(9999),
             Some(f.path().to_path_buf()),
         )
         .resolve()
@@ -369,13 +382,25 @@ mod tests {
 
         assert_eq!(config.node.user, "flaguser");
         assert_eq!(config.node.password, "flagpass");
-        // No rpcbind in the file, so the host falls back to the flag; the port comes from the file.
-        assert_eq!(config.node.url, "http://127.0.0.1:18232");
+        // Explicit non-default port flag beats the conf file's rpcport.
+        assert_eq!(config.node.url, "http://127.0.0.1:9999");
+    }
+
+    #[test]
+    fn resolve_uses_zcash_conf_host_and_port_when_no_flag_given() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "rpcbind=10.0.0.5\nrpcport=18232\n").unwrap();
+
+        let config = cli_with(None, None, None, None, None, Some(f.path().to_path_buf()))
+            .resolve()
+            .unwrap();
+
+        assert_eq!(config.node.url, "http://10.0.0.5:18232");
     }
 
     #[test]
     fn resolve_builds_url_from_host_and_port_when_rpc_url_absent() {
-        let config = cli_with(None, None, None, "192.168.0.5", 8232, None)
+        let config = cli_with(None, None, None, Some("192.168.0.5"), Some(8232), None)
             .resolve()
             .unwrap();
 
@@ -386,7 +411,7 @@ mod tests {
 
     #[test]
     fn resolve_with_no_tls_yields_disabled() {
-        let config = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None)
+        let config = cli_with(None, None, Some("http://node"), None, None, None)
             .resolve()
             .unwrap();
         assert!(matches!(config.tls, TlsConfig::Disabled));
@@ -394,7 +419,7 @@ mod tests {
 
     #[test]
     fn resolve_requires_a_cert_when_tls_is_enabled() {
-        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.no_tls = false;
         assert!(cli.resolve().is_err());
     }
@@ -402,7 +427,7 @@ mod tests {
     #[test]
     fn resolve_accepts_and_stores_a_valid_donation_address() {
         let valid_ua = crate::testutil::example_unified_address();
-        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.donation_address = Some(valid_ua.clone());
 
         let config = cli.resolve().unwrap();
@@ -412,7 +437,7 @@ mod tests {
 
     #[test]
     fn resolve_rejects_a_non_unified_donation_address() {
-        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.donation_address = Some(crate::testutil::example_taddress());
         assert!(cli.resolve().is_err());
     }
@@ -422,14 +447,14 @@ mod tests {
         // A valid unified address missing its last character still starts with `u`, but its
         // checksum no longer verifies, so decoding must reject it.
         let valid_ua = crate::testutil::example_unified_address();
-        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.donation_address = Some(valid_ua[..valid_ua.len() - 1].to_string());
         assert!(cli.resolve().is_err());
     }
 
     #[test]
     fn resolve_uses_default_server_limits() {
-        let config = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None)
+        let config = cli_with(None, None, Some("http://node"), None, None, None)
             .resolve()
             .unwrap();
         assert_eq!(
@@ -442,7 +467,7 @@ mod tests {
 
     #[test]
     fn resolve_overrides_server_limits_from_flags() {
-        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.max_concurrent_streams = 512;
         cli.keepalive_interval_secs = 90;
         cli.keepalive_timeout_secs = 30;
@@ -454,14 +479,14 @@ mod tests {
 
     #[test]
     fn resolve_rejects_zero_max_concurrent_streams() {
-        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.max_concurrent_streams = 0;
         assert!(cli.resolve().is_err());
     }
 
     #[test]
     fn resolve_rejects_zero_keepalive() {
-        let mut cli = cli_with(None, None, Some("http://node"), "127.0.0.1", 8232, None);
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.keepalive_interval_secs = 0;
         assert!(cli.resolve().is_err());
     }
