@@ -65,6 +65,30 @@ pub fn shielded_v5_txs() -> Vec<(Vec<u8>, u32, u32)> {
         .collect()
 }
 
+/// The real testnet v6 coinbase transactions in `testdata/tx_v6/`, each as
+/// `(raw_tx, height, display_txid)`: block 4,134,000 (NU6.3 activation, no shielded components)
+/// and block 4,134,683 (the first Ironwood action).
+pub fn v6_coinbase_txs() -> Vec<(Vec<u8>, u64, &'static str)> {
+    [
+        (
+            "testdata/tx_v6/cb_4134000.hex",
+            4_134_000,
+            "75603877d537d293ce68f97993d787e017919d7830f4069ebc00a9f83daf9f5d",
+        ),
+        (
+            "testdata/tx_v6/cb_4134683.hex",
+            4_134_683,
+            "e8c35c23638e432a2e5f0b351cbc916bb36f0ad637454b1eabe9507ac8fdb5f6",
+        ),
+    ]
+    .into_iter()
+    .map(|(path, height, txid)| {
+        let hex = std::fs::read_to_string(path).unwrap();
+        (hex::decode(hex.trim()).unwrap(), height, txid)
+    })
+    .collect()
+}
+
 /// A representative v5 transaction carrying both Sapling outputs and Orchard actions (the vector with
 /// `nOutputsSapling = 2` and `nActionsOrchard = 4`).
 pub fn shielded_v5_tx() -> (Vec<u8>, u32, u32) {

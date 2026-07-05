@@ -4,6 +4,9 @@
 //! transaction is parsed with `librustzcash`, which also computes the correct txid (legacy and ZIP-244).
 //! The compact form keeps only what a shielded wallet needs: Sapling spends/outputs, Orchard actions, and
 //! transparent inputs/outputs.
+//!
+//! Every `Transaction::read` call passes a fixed `BranchId::Nu5`: the branch ID is only consulted for
+//! pre-v5 transactions (where it does not affect the legacy double-SHA txid); v5/v6 read it from the wire.
 
 use std::io::Cursor;
 
@@ -272,7 +275,7 @@ pub fn txid_display(raw_tx: &[u8]) -> Result<String, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{shielded_v5_txs, testdata_blocks};
+    use crate::testutil::{shielded_v5_txs, testdata_blocks, v6_coinbase_txs};
     use prost::Message;
     use serde::Deserialize;
 
@@ -322,6 +325,27 @@ mod tests {
                 shielded_counts(&raw).unwrap(),
                 (sapling_outputs, orchard_actions)
             );
+        }
+    }
+
+    #[test]
+    fn v6_coinbase_txids_match_the_node() {
+        for (raw, _, expected_txid) in v6_coinbase_txs() {
+            assert_eq!(txid_display(&raw).unwrap(), expected_txid);
+        }
+    }
+
+    #[test]
+    fn v6_coinbase_heights_read_from_coinbase_script() {
+        for (raw, height, _) in v6_coinbase_txs() {
+            assert_eq!(coinbase_height_from_raw(&raw).unwrap(), height);
+        }
+    }
+
+    #[test]
+    fn v6_coinbase_shielded_counts_are_zero() {
+        for (raw, _, _) in v6_coinbase_txs() {
+            assert_eq!(shielded_counts(&raw).unwrap(), (0, 0));
         }
     }
 
