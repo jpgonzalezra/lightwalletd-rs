@@ -19,6 +19,13 @@ const RPC_INVALID_ADDRESS_OR_KEY: i64 = -5;
 
 impl From<NodeError> for Status {
     fn from(err: NodeError) -> Self {
+        // `NodeError::Http` wraps a `reqwest::Error`, whose Display can include the backend node's
+        // URL (and any userinfo credentials embedded in `--rpc-url`). Keep that detail server-side
+        // and hand the client a generic message instead.
+        if let NodeError::Http(_) = err {
+            tracing::warn!(%err, "node transport error");
+            return Status::unavailable("backend node unavailable");
+        }
         Status::unavailable(err.to_string())
     }
 }
@@ -26,7 +33,7 @@ impl From<NodeError> for Status {
 impl From<FetchError> for Status {
     fn from(err: FetchError) -> Self {
         match err {
-            FetchError::Node(e) => Status::unavailable(e.to_string()),
+            FetchError::Node(e) => e.into(),
             FetchError::Parse(e) => Status::internal(e.to_string()),
             FetchError::UnexpectedHeight { requested, got } => Status::unavailable(format!(
                 "node returned block at height {got}, expected {requested}"
@@ -88,4 +95,61 @@ pub(super) fn address_query_to_status(err: NodeError) -> Status {
         return Status::invalid_argument(format!("invalid transparent address: {message}"));
     }
     err.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::config::NodeConfig;
+    use crate::node::NodeClient;
+
+    /// Produce a real `NodeError::Http` (a request timeout against a stalled mock node) plus the
+    /// mock server's URI, to assert the URI never reaches a client-facing `Status`.
+    async fn http_transport_error() -> (NodeError, String) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(60)))
+            .mount(&server)
+            .await;
+        let client = NodeClient::new(&NodeConfig {
+            url: server.uri(),
+            user: "rpcuser".to_string(),
+            password: "rpcpass".to_string(),
+        })
+        .unwrap();
+
+        let error = client
+            .raw_request("getinfo", serde_json::json!([]))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, NodeError::Http(_)));
+        (error, server.uri())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn node_http_transport_error_maps_to_generic_unavailable_status() {
+        let (error, server_uri) = http_transport_error().await;
+
+        let status: Status = error.into();
+
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert_eq!(status.message(), "backend node unavailable");
+        assert!(!status.message().contains(&server_uri));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fetch_error_wrapping_http_transport_error_maps_to_generic_unavailable_status() {
+        let (error, server_uri) = http_transport_error().await;
+
+        let status: Status = FetchError::Node(error).into();
+
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert_eq!(status.message(), "backend node unavailable");
+        assert!(!status.message().contains(&server_uri));
+    }
 }
