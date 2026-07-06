@@ -47,15 +47,17 @@ pub(super) async fn get_latest_tree_state(
 }
 
 /// Build the gRPC `TreeState` from a node `z_gettreestate` response and the network name. A response
-/// with an empty frontier for both pools — a height before Sapling activation — is rejected with
-/// `InvalidArgument` rather than returned as a malformed, empty `TreeState`.
+/// with an empty frontier for every pool — a height before Sapling activation — is rejected with
+/// `InvalidArgument` rather than returned as a malformed, empty `TreeState`. An empty Ironwood
+/// frontier alone is normal (every height before NU6.3 activation) and maps to an empty string.
 pub(super) fn node_tree_state_to_proto(
     network: &str,
     tree_state: node::GetTreeState,
 ) -> Result<TreeState, Status> {
     let sapling_tree = tree_state.sapling.commitments.final_state;
     let orchard_tree = tree_state.orchard.commitments.final_state;
-    if sapling_tree.is_empty() && orchard_tree.is_empty() {
+    let ironwood_tree = tree_state.ironwood.commitments.final_state;
+    if sapling_tree.is_empty() && orchard_tree.is_empty() && ironwood_tree.is_empty() {
         return Err(Status::invalid_argument(format!(
             "get_tree_state: no tree state at height {} (before Sapling activation?)",
             tree_state.height
@@ -68,6 +70,6 @@ pub(super) fn node_tree_state_to_proto(
         time: tree_state.time,
         sapling_tree,
         orchard_tree,
-        ironwood_tree: String::new(),
+        ironwood_tree,
     })
 }

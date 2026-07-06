@@ -535,6 +535,11 @@ impl DarksideState {
                     final_state: tree_state.orchard_tree.clone(),
                 },
             },
+            ironwood: TreePool {
+                commitments: TreeCommitments {
+                    final_state: tree_state.ironwood_tree.clone(),
+                },
+            },
         })
     }
 

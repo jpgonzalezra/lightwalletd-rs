@@ -2,6 +2,7 @@ mod address;
 mod blocks;
 mod chain;
 mod ping;
+mod subtrees;
 mod transactions;
 mod treestate;
 

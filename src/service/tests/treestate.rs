@@ -36,6 +36,33 @@ fn node_tree_state_to_proto_maps_final_state_per_pool() {
         "time": 42,
         "sapling": { "commitments": { "finalState": "aa" } },
         "orchard": { "commitments": { "finalState": "bb" } },
+        "ironwood": { "commitments": { "finalState": "cc" } },
+    }))
+    .unwrap();
+
+    assert_eq!(
+        node_tree_state_to_proto("main", tree_state).unwrap(),
+        TreeState {
+            network: "main".to_string(),
+            height: 1234,
+            hash: "abcd".to_string(),
+            time: 42,
+            sapling_tree: "aa".to_string(),
+            orchard_tree: "bb".to_string(),
+            ironwood_tree: "cc".to_string(),
+        }
+    );
+}
+
+#[test]
+fn node_tree_state_to_proto_defaults_absent_ironwood_to_empty() {
+    // A pre-NU6.3 node response: sapling/orchard present, no `ironwood` key.
+    let tree_state: node::GetTreeState = serde_json::from_value(json!({
+        "hash": "abcd",
+        "height": 1234,
+        "time": 42,
+        "sapling": { "commitments": { "finalState": "aa" } },
+        "orchard": { "commitments": { "finalState": "bb" } },
     }))
     .unwrap();
 

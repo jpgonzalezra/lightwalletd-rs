@@ -111,6 +111,9 @@ pub struct GetTreeState {
     /// Orchard note-commitment tree.
     #[serde(default)]
     pub orchard: TreePool,
+    /// Ironwood note-commitment tree. Absent before NU6.3 activation.
+    #[serde(default)]
+    pub ironwood: TreePool,
 }
 
 /// A shielded pool's tree state inside `z_gettreestate`.

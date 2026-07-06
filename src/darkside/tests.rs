@@ -364,6 +364,38 @@ async fn streamer_get_subtree_roots_serves_staged_roots() {
     assert_eq!(root.root_hash, vec![1, 2, 3]);
 }
 
+// Staging is keyed by the raw protocol i32, so the new enum value must round-trip unchanged.
+#[tokio::test]
+async fn streamer_get_subtree_roots_serves_staged_ironwood_roots() {
+    let handle = applied_handle(1).await;
+    handle.lock().await.set_subtree_roots(DarksideSubtreeRoots {
+        shielded_protocol: ShieldedProtocol::Ironwood as i32,
+        start_index: 0,
+        subtree_roots: vec![SubtreeRoot {
+            root_hash: vec![7; 32],
+            completing_block_hash: vec![8; 32],
+            completing_block_height: 380640,
+        }],
+    });
+    let node: Arc<dyn NodeRpc> = Arc::new(DarksideNode::new(handle.clone()));
+    let (_dir, cache) = temp_cache();
+    let streamer = Streamer::new(node, Arc::new(cache), "main".to_string(), Some(handle));
+
+    let response = streamer
+        .get_subtree_roots(Request::new(GetSubtreeRootsArg {
+            start_index: 0,
+            shielded_protocol: ShieldedProtocol::Ironwood as i32,
+            max_entries: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let roots: Vec<_> = response.collect().await;
+
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].as_ref().unwrap().root_hash, vec![7; 32]);
+}
+
 #[tokio::test]
 async fn streamer_get_mempool_tx_emits_staged_transaction() {
     let handle = applied_handle(3).await;
