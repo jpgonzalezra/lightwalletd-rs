@@ -62,6 +62,7 @@ pub async fn compact_block(node: &dyn NodeRpc, height: u64) -> Result<CompactBlo
     if let Some(meta) = block.chain_metadata.as_mut() {
         meta.sapling_commitment_tree_size = verbose.trees.sapling.size;
         meta.orchard_commitment_tree_size = verbose.trees.orchard.size;
+        meta.ironwood_commitment_tree_size = verbose.trees.ironwood.size;
     }
     Ok(block)
 }
@@ -90,7 +91,11 @@ mod tests {
             block_verbose: Some(
                 serde_json::from_value(json!({
                     "hash": hash,
-                    "trees": { "sapling": { "size": 11 }, "orchard": { "size": 22 } },
+                    "trees": {
+                        "sapling": { "size": 11 },
+                        "orchard": { "size": 22 },
+                        "ironwood": { "size": 33 },
+                    },
                 }))
                 .unwrap(),
             ),
@@ -103,6 +108,34 @@ mod tests {
 
         assert_eq!(meta.sapling_commitment_tree_size, 11);
         assert_eq!(meta.orchard_commitment_tree_size, 22);
+        assert_eq!(meta.ironwood_commitment_tree_size, 33);
+    }
+
+    // Pre-NU6.3 nodes (and post-activation blocks while the Ironwood tree is still empty) omit the
+    // `ironwood` key from `trees`; the size must default to zero.
+    #[tokio::test]
+    async fn compact_block_defaults_absent_ironwood_tree_size_to_zero() {
+        let raw = fixture_raw();
+        let parsed = compact::to_compact_block(&raw).unwrap();
+        let height = parsed.height;
+        let hash = encoding::wire_to_display_hex(&parsed.hash);
+
+        let fake = FakeNode {
+            block_verbose: Some(
+                serde_json::from_value(json!({
+                    "hash": hash,
+                    "trees": { "sapling": { "size": 11 }, "orchard": { "size": 22 } },
+                }))
+                .unwrap(),
+            ),
+            block_raw: Some(raw),
+            ..Default::default()
+        };
+
+        let block = compact_block(&fake, height).await.unwrap();
+        let meta = block.chain_metadata.unwrap();
+
+        assert_eq!(meta.ironwood_commitment_tree_size, 0);
     }
 
     #[tokio::test]

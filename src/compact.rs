@@ -2,8 +2,8 @@
 //!
 //! A block is `[header][CompactSize tx_count][tx]*`. The header is parsed by hand (fixed layout); each
 //! transaction is parsed with `librustzcash`, which also computes the correct txid (legacy and ZIP-244).
-//! The compact form keeps only what a shielded wallet needs: Sapling spends/outputs, Orchard actions, and
-//! transparent inputs/outputs.
+//! The compact form keeps only what a shielded wallet needs: Sapling spends/outputs, Orchard and
+//! Ironwood actions, and transparent inputs/outputs.
 //!
 //! Every `Transaction::read` call passes a fixed `BranchId::Nu5`: the branch ID is only consulted for
 //! pre-v5 transactions (where it does not affect the legacy double-SHA txid); v5/v6 read it from the wire.
@@ -88,7 +88,6 @@ pub fn to_compact_block(raw: &[u8]) -> Result<CompactBlock, ParseError> {
     }
 
     Ok(CompactBlock {
-        proto_version: 0,
         height: height.ok_or(ParseError::NoHeight)?,
         hash,
         prev_hash,
@@ -155,6 +154,19 @@ fn to_compact_tx(index: u64, tx: &Transaction, is_coinbase: bool) -> CompactTx {
         }
     }
 
+    let mut ironwood_actions = Vec::new();
+    if let Some(ironwood) = tx.ironwood_bundle() {
+        for action in ironwood.actions().iter() {
+            let note = action.encrypted_note();
+            ironwood_actions.push(CompactOrchardAction {
+                nullifier: action.nullifier().to_bytes().to_vec(),
+                cmx: action.cmx().to_bytes().to_vec(),
+                ephemeral_key: note.epk_bytes.to_vec(),
+                ciphertext: note.enc_ciphertext[..COMPACT_CIPHERTEXT_LEN].to_vec(),
+            });
+        }
+    }
+
     let mut vin = Vec::new();
     let mut vout = Vec::new();
     if let Some(transparent) = tx.transparent_bundle() {
@@ -181,6 +193,7 @@ fn to_compact_tx(index: u64, tx: &Transaction, is_coinbase: bool) -> CompactTx {
         spends,
         outputs,
         actions,
+        ironwood_actions,
         vin,
         vout,
     }
@@ -288,7 +301,9 @@ mod tests {
 
     // The reference fixtures were generated without transaction IDs (the txids are 32 zero bytes),
     // so we normalize ours to zero before comparing the rest of the structure byte-for-byte, while
-    // separately asserting that we do compute a real txid for every transaction.
+    // separately asserting that we do compute a real txid for every transaction. The first six
+    // entries are mainnet blocks; the last two are testnet v6 blocks (NU6.3 activation 4,134,000
+    // and 4,134,683, whose coinbase carries the first Ironwood action).
     #[test]
     fn compact_block_structure_matches_golden_fixtures() {
         let json = std::fs::read_to_string("testdata/compact_blocks.json").unwrap();

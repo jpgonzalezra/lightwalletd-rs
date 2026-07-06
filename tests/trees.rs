@@ -71,6 +71,7 @@ fn staged_tree_state() -> TreeState {
         time: 1,
         sapling_tree: "aa".to_string(),
         orchard_tree: "bb".to_string(),
+        ironwood_tree: String::new(),
     }
 }
 

@@ -68,5 +68,6 @@ pub(super) fn node_tree_state_to_proto(
         time: tree_state.time,
         sapling_tree,
         orchard_tree,
+        ironwood_tree: String::new(),
     })
 }

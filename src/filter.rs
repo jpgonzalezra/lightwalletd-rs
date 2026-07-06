@@ -12,16 +12,19 @@ pub struct Pools {
     pub transparent: bool,
     pub sapling: bool,
     pub orchard: bool,
+    pub ironwood: bool,
 }
 
 impl Pools {
     /// Resolve a gRPC `pool_types` list into the pools to keep. An empty list means the legacy
-    /// default: shielded (Sapling + Orchard) only, with transparent inputs/outputs stripped.
+    /// default: shielded (Sapling + Orchard + Ironwood) only, with transparent inputs/outputs
+    /// stripped.
     pub fn from_pool_types(pool_types: &[i32]) -> Self {
         Self {
             transparent: pool_types.contains(&(PoolType::Transparent as i32)),
             sapling: pool_types.is_empty() || pool_types.contains(&(PoolType::Sapling as i32)),
             orchard: pool_types.is_empty() || pool_types.contains(&(PoolType::Orchard as i32)),
+            ironwood: pool_types.is_empty() || pool_types.contains(&(PoolType::Ironwood as i32)),
         }
     }
 }
@@ -47,6 +50,7 @@ pub fn filter_block_to_pools(mut block: CompactBlock, pool_types: &[i32]) -> Com
         !tx.spends.is_empty()
             || !tx.outputs.is_empty()
             || !tx.actions.is_empty()
+            || !tx.ironwood_actions.is_empty()
             || !tx.vin.is_empty()
             || !tx.vout.is_empty()
     });
@@ -62,6 +66,9 @@ pub fn filter_tx_to_pools(tx: &mut CompactTx, pools: Pools) {
     if !pools.orchard {
         tx.actions.clear();
     }
+    if !pools.ironwood {
+        tx.ironwood_actions.clear();
+    }
     if !pools.transparent {
         tx.vin.clear();
         tx.vout.clear();
@@ -69,18 +76,19 @@ pub fn filter_tx_to_pools(tx: &mut CompactTx, pools: Pools) {
 }
 
 /// Reduce a compact block to shielded nullifiers only: Sapling spend nullifiers and the nullifier of
-/// each Orchard action. Drops transparent data, Sapling outputs, the rest of every Orchard action,
-/// and the commitment tree sizes (`GetBlockNullifiers`/`GetBlockRangeNullifiers`).
+/// each Orchard and Ironwood action. Drops transparent data, Sapling outputs, the rest of every
+/// action, and the commitment tree sizes (`GetBlockNullifiers`/`GetBlockRangeNullifiers`).
 pub fn nullifiers_only(mut block: CompactBlock) -> CompactBlock {
     if let Some(metadata) = block.chain_metadata.as_mut() {
         metadata.sapling_commitment_tree_size = 0;
         metadata.orchard_commitment_tree_size = 0;
+        metadata.ironwood_commitment_tree_size = 0;
     }
     for tx in &mut block.vtx {
         tx.outputs.clear();
         tx.vin.clear();
         tx.vout.clear();
-        for action in &mut tx.actions {
+        for action in tx.actions.iter_mut().chain(tx.ironwood_actions.iter_mut()) {
             action.cmx.clear();
             action.ephemeral_key.clear();
             action.ciphertext.clear();
@@ -102,6 +110,7 @@ mod tests {
             spends: vec![CompactSaplingSpend::default()],
             outputs: vec![CompactSaplingOutput::default()],
             actions: vec![CompactOrchardAction::default()],
+            ironwood_actions: vec![CompactOrchardAction::default()],
             vin: vec![CompactTxIn::default()],
             vout: vec![TxOut::default()],
             ..Default::default()
@@ -118,6 +127,7 @@ mod tests {
         let tx = &block.vtx[0];
         assert!(tx.vin.is_empty() && tx.vout.is_empty());
         assert!(!tx.outputs.is_empty() && !tx.actions.is_empty() && !tx.spends.is_empty());
+        assert!(!tx.ironwood_actions.is_empty());
     }
 
     #[test]
@@ -126,6 +136,33 @@ mod tests {
         let tx = &block.vtx[0];
         assert!(!tx.vin.is_empty() && !tx.vout.is_empty());
         assert!(tx.spends.is_empty() && tx.outputs.is_empty() && tx.actions.is_empty());
+        assert!(tx.ironwood_actions.is_empty());
+    }
+
+    #[test]
+    fn ironwood_only_strips_every_other_pool() {
+        let block = filter_block_to_pools(block_with_every_pool(), &[PoolType::Ironwood as i32]);
+        let tx = &block.vtx[0];
+        assert!(!tx.ironwood_actions.is_empty());
+        assert!(tx.spends.is_empty() && tx.outputs.is_empty() && tx.actions.is_empty());
+        assert!(tx.vin.is_empty() && tx.vout.is_empty());
+    }
+
+    #[test]
+    fn transaction_left_ironwood_only_survives_retention() {
+        let ironwood_only = CompactTx {
+            ironwood_actions: vec![CompactOrchardAction::default()],
+            vin: vec![CompactTxIn::default()],
+            ..Default::default()
+        };
+        let block = CompactBlock {
+            vtx: vec![ironwood_only],
+            ..Default::default()
+        };
+
+        let filtered = filter_block_to_pools(block, &[PoolType::Ironwood as i32]);
+        assert_eq!(filtered.vtx.len(), 1);
+        assert!(!filtered.vtx[0].ironwood_actions.is_empty());
     }
 
     #[test]
@@ -176,22 +213,34 @@ mod tests {
             ephemeral_key: vec![3; 32],
             ciphertext: vec![4; 52],
         };
+        block.vtx[0].ironwood_actions[0] = CompactOrchardAction {
+            nullifier: vec![5; 32],
+            cmx: vec![6; 32],
+            ephemeral_key: vec![7; 32],
+            ciphertext: vec![8; 52],
+        };
         block.chain_metadata = Some(ChainMetadata {
             sapling_commitment_tree_size: 99,
             orchard_commitment_tree_size: 99,
+            ironwood_commitment_tree_size: 99,
         });
 
         let block = nullifiers_only(block);
         let tx = &block.vtx[0];
 
-        // Kept: Sapling spend nullifiers and the Orchard action nullifier.
+        // Kept: Sapling spend nullifiers and the Orchard/Ironwood action nullifiers.
         assert!(!tx.spends.is_empty());
         assert_eq!(tx.actions[0].nullifier, vec![1; 32]);
-        // Dropped: outputs, transparent data, the rest of the action, and the tree sizes.
+        assert_eq!(tx.ironwood_actions[0].nullifier, vec![5; 32]);
+        // Dropped: outputs, transparent data, the rest of every action, and the tree sizes.
         assert!(tx.outputs.is_empty() && tx.vin.is_empty() && tx.vout.is_empty());
         assert!(tx.actions[0].cmx.is_empty() && tx.actions[0].ciphertext.is_empty());
+        assert!(
+            tx.ironwood_actions[0].cmx.is_empty() && tx.ironwood_actions[0].ciphertext.is_empty()
+        );
         let metadata = block.chain_metadata.unwrap();
         assert_eq!(metadata.sapling_commitment_tree_size, 0);
         assert_eq!(metadata.orchard_commitment_tree_size, 0);
+        assert_eq!(metadata.ironwood_commitment_tree_size, 0);
     }
 }

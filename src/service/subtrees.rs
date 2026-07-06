@@ -16,6 +16,11 @@ pub(super) async fn get_subtree_roots(
     let protocol = match ShieldedProtocol::try_from(arg.shielded_protocol) {
         Ok(ShieldedProtocol::Sapling) => "sapling",
         Ok(ShieldedProtocol::Orchard) => "orchard",
+        Ok(ShieldedProtocol::Ironwood) => {
+            return Err(Status::unimplemented(
+                "get_subtree_roots: ironwood is not yet supported",
+            ));
+        }
         Err(_) => return Err(Status::invalid_argument("unrecognized shielded protocol")),
     };
     // In darkside mode the roots are staged complete (with their completing block already set),

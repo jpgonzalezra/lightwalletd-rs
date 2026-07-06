@@ -72,6 +72,9 @@ pub struct Trees {
     /// Orchard tree.
     #[serde(default)]
     pub orchard: TreeSize,
+    /// Ironwood tree. Absent from the node's response while the tree is empty.
+    #[serde(default)]
+    pub ironwood: TreeSize,
 }
 
 /// The `size` of a note-commitment tree.

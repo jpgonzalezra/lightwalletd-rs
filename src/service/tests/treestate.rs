@@ -48,6 +48,7 @@ fn node_tree_state_to_proto_maps_final_state_per_pool() {
             time: 42,
             sapling_tree: "aa".to_string(),
             orchard_tree: "bb".to_string(),
+            ironwood_tree: String::new(),
         }
     );
 }

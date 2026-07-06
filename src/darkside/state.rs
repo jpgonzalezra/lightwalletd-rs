@@ -397,6 +397,7 @@ impl DarksideState {
                 orchard: TreeSize {
                     size: block.orchard_size,
                 },
+                ironwood: TreeSize::default(),
             },
         })
     }
