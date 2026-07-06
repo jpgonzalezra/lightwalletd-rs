@@ -17,6 +17,10 @@ use crate::proto::{BoxStream, CompactTx, GetMempoolTxRequest, RawTransaction};
 
 use super::{Streamer, decode_hex};
 
+/// Max exclude-txid suffixes a single `GetMempoolTx` request may submit, bounding the
+/// O(suffixes × mempool entries) exclusion scan per request.
+const MAX_EXCLUDE_TXID_SUFFIXES: usize = 10_000;
+
 pub(super) async fn get_mempool_tx(
     streamer: &Streamer,
     request: Request<GetMempoolTxRequest>,
@@ -25,6 +29,11 @@ pub(super) async fn get_mempool_tx(
     let exclude = mempool_request.exclude_txid_suffixes;
     let pool_types = mempool_request.pool_types;
 
+    if exclude.len() > MAX_EXCLUDE_TXID_SUFFIXES {
+        return Err(Status::resource_exhausted(format!(
+            "get_mempool_tx: more than {MAX_EXCLUDE_TXID_SUFFIXES} exclude txid suffixes; narrow the request"
+        )));
+    }
     for (index, suffix) in exclude.iter().enumerate() {
         if suffix.len() > 32 {
             return Err(Status::invalid_argument(format!(
@@ -207,6 +216,7 @@ mod tests {
 
     use super::super::Streamer;
     use super::super::mempool_monitor::{MempoolEntry, MempoolHandle, MempoolSnapshot};
+    use super::MAX_EXCLUDE_TXID_SUFFIXES;
 
     /// A `Streamer` whose mempool is served from `snapshot`, over a `FakeNode` that panics on any
     /// RPC — so a passing test proves the snapshot path issues zero node calls.
@@ -317,6 +327,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_mempool_tx_rejects_too_many_exclude_suffixes() {
+        let (_dir, streamer) = streamer_with_snapshot(snapshot_of(vec![]));
+
+        let status = streamer
+            .get_mempool_tx(Request::new(GetMempoolTxRequest {
+                exclude_txid_suffixes: vec![vec![0u8]; MAX_EXCLUDE_TXID_SUFFIXES + 1],
+                ..Default::default()
+            }))
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(status.code(), Code::ResourceExhausted);
     }
 
     #[tokio::test]
