@@ -12,3 +12,4 @@ __pycache__/
 *.redb
 .env
 .env.*
+zcash.conf
