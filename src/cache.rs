@@ -194,10 +194,10 @@ impl Cache {
     ///
     /// Realistic corruption in this transactional, strict-append store is a contiguous suffix (an
     /// interrupted final write) or a schema-wide decode failure visible at the tip — not an isolated
-    /// mid-cache block. Localization matches that: a gap is binary-searched (the valid prefix is
-    /// contiguous), a decode/height symptom is found by walking down from the tip. An isolated
-    /// mid-cache corruption (which redb's page checksums and transactionality make practically
-    /// impossible) is out of scope.
+    /// mid-cache block. Localization matches that: a gap is found by scanning up from the lowest
+    /// cached height, a decode/height symptom by walking down from the tip. An isolated mid-cache
+    /// corruption (which redb's page checksums and transactionality make practically impossible) is
+    /// out of scope.
     pub fn lowest_corrupt_height(&self) -> Result<Option<u64>, CacheError> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(BLOCKS)?;
@@ -212,20 +212,15 @@ impl Cache {
         let first = first_height.value();
         let last = last_height.value();
 
-        // Gap symptom: the valid prefix is contiguous, so binary-search the lowest missing height.
+        // Gap symptom: present blocks can sit above the hole (the last entry always does), so a
+        // present→missing boundary search would land on a present height. Scan up from `first` for
+        // the lowest missing height instead — O(n) is fine on this rare, cold recovery path.
         if len != last - first + 1 {
-            // Invariant: `present` is a present height, a gap exists in `(present, missing]`.
-            let mut present = first;
-            let mut missing = last;
-            while present + 1 < missing {
-                let mid = present + (missing - present) / 2;
-                if table.get(mid)?.is_some() {
-                    present = mid;
-                } else {
-                    missing = mid;
+            for height in first..=last {
+                if table.get(height)?.is_none() {
+                    return Ok(Some(height));
                 }
             }
-            return Ok(Some(missing));
         }
 
         // Decode/height symptom: walk down from the tip until a block decodes with a matching height;
@@ -398,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn lowest_corrupt_height_locates_a_gap_by_binary_search() {
+    fn lowest_corrupt_height_locates_a_gap_adjacent_to_the_tip() {
         let (_dir, cache) = temp_cache();
         cache
             .insert_raw(100, &block(100, 1).encode_to_vec())
@@ -406,6 +401,23 @@ mod tests {
         cache
             .insert_raw(102, &block(102, 3).encode_to_vec())
             .unwrap();
+
+        assert_eq!(cache.lowest_corrupt_height().unwrap(), Some(101));
+    }
+
+    #[test]
+    fn lowest_corrupt_height_locates_a_gap_with_present_blocks_above_it() {
+        let (_dir, cache) = temp_cache();
+        // A detected gap always has present blocks above the hole (the last entry is present by
+        // definition), so localization must not assume a single present→missing boundary.
+        cache
+            .insert_raw(100, &block(100, 1).encode_to_vec())
+            .unwrap();
+        for height in 102..=104 {
+            cache
+                .insert_raw(height, &block(height, height as u8).encode_to_vec())
+                .unwrap();
+        }
 
         assert_eq!(cache.lowest_corrupt_height().unwrap(), Some(101));
     }
