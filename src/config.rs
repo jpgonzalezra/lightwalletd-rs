@@ -17,6 +17,32 @@ pub const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 60;
 /// Default time, in seconds, to wait for a keepalive ack before dropping a connection.
 pub const DEFAULT_KEEPALIVE_TIMEOUT_SECS: u64 = 20;
 
+/// A CLI-parsed string whose `Debug` prints `"***"`, so a secret flag can never leak via a stray
+/// `{:?}` on [`Cli`] (which derives `Debug` for clap's error messages).
+#[derive(Clone)]
+pub struct RedactedString(String);
+
+impl std::fmt::Debug for RedactedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "***")
+    }
+}
+
+impl std::str::FromStr for RedactedString {
+    type Err = std::convert::Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(RedactedString(value.to_string()))
+    }
+}
+
+impl RedactedString {
+    /// Consume the wrapper and return the underlying secret.
+    fn into_inner(self) -> String {
+        self.0
+    }
+}
+
 /// Command-line arguments.
 #[derive(Debug, Parser)]
 #[command(name = "lightwalletd-rs", about = "A Rust lightwalletd for Zcash")]
@@ -41,11 +67,11 @@ pub struct Cli {
 
     /// RPC username (overrides the value from `--zcash-conf`).
     #[arg(long)]
-    pub rpc_user: Option<String>,
+    pub rpc_user: Option<RedactedString>,
 
     /// RPC password (overrides the value from `--zcash-conf`).
     #[arg(long)]
-    pub rpc_password: Option<String>,
+    pub rpc_password: Option<RedactedString>,
 
     /// Path to a `zcash.conf` to read `rpcuser`/`rpcpassword`/`rpcbind`/`rpcport` from.
     #[arg(long)]
@@ -195,8 +221,16 @@ impl Cli {
             None => ZcashConf::default(),
         };
 
-        let user = self.rpc_user.or(conf.rpcuser).unwrap_or_default();
-        let password = self.rpc_password.or(conf.rpcpassword).unwrap_or_default();
+        let user = self
+            .rpc_user
+            .map(RedactedString::into_inner)
+            .or(conf.rpcuser)
+            .unwrap_or_default();
+        let password = self
+            .rpc_password
+            .map(RedactedString::into_inner)
+            .or(conf.rpcpassword)
+            .unwrap_or_default();
 
         let url = match self.rpc_url {
             Some(url) => url,
@@ -344,8 +378,8 @@ mod tests {
             rpc_url: rpc_url.map(str::to_string),
             rpc_host: rpc_host.map(str::to_string),
             rpc_port,
-            rpc_user: rpc_user.map(str::to_string),
-            rpc_password: rpc_password.map(str::to_string),
+            rpc_user: rpc_user.map(|value| value.parse().unwrap()),
+            rpc_password: rpc_password.map(|value| value.parse().unwrap()),
             zcash_conf,
             data_dir: PathBuf::from("./data"),
             start_height: None,
@@ -501,5 +535,21 @@ mod tests {
         let rendered = format!("{node:?}");
         assert!(rendered.contains("***"));
         assert!(!rendered.contains("supersecret"));
+    }
+
+    #[test]
+    fn cli_debug_redacts_rpc_user_and_password() {
+        let cli = cli_with(
+            Some("alice"),
+            Some("supersecret"),
+            Some("http://node"),
+            None,
+            None,
+            None,
+        );
+        let rendered = format!("{cli:?}");
+        assert!(rendered.contains("***"));
+        assert!(!rendered.contains("supersecret"));
+        assert!(!rendered.contains("alice"));
     }
 }

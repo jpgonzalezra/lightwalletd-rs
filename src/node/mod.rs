@@ -50,12 +50,23 @@ pub enum NodeError {
 }
 
 /// A client for the zebrad JSON-RPC endpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NodeClient {
     http: reqwest::Client,
     url: String,
     user: String,
     password: String,
+}
+
+impl std::fmt::Debug for NodeClient {
+    /// Hand-written so a stray `{:?}` on the client can never leak the node credential into a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeClient")
+            .field("url", &self.url)
+            .field("user", &self.user)
+            .field("password", &"***")
+            .finish()
+    }
 }
 
 /// The typed surface of the backend node's JSON-RPC API.
@@ -387,6 +398,19 @@ mod tests {
         let server = mock_response(serde_json::json!({ "result": "deadbeef" })).await;
         let bytes = client_for(&server).get_block_raw("somehash").await.unwrap();
         assert_eq!(bytes, vec![0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    #[test]
+    fn node_client_debug_redacts_password() {
+        let client = NodeClient::new(&NodeConfig {
+            url: "http://127.0.0.1:8232".to_string(),
+            user: "rpcuser".to_string(),
+            password: "supersecret".to_string(),
+        })
+        .unwrap();
+        let rendered = format!("{client:?}");
+        assert!(rendered.contains("***"));
+        assert!(!rendered.contains("supersecret"));
     }
 
     #[tokio::test(start_paused = true)]
