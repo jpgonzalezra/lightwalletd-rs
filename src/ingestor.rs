@@ -134,11 +134,18 @@ async fn step(node: &dyn NodeRpc, cache: &Cache, start_height: u64) -> Result<bo
     Ok(true)
 }
 
-/// Roll the cache back to `target`, refusing to cross the `start_height` floor. A reorg that deep is
-/// anomalous (deeper than the whole cache), so we surface it as an error — the run loop backs off and
-/// logs, rather than draining the cache past the floor or hot-looping.
+/// Roll the cache back to `target`, refusing to cross the `start_height` floor and refusing a rollback
+/// that would not actually lower the cache tip. A reorg that deep is anomalous (deeper than the whole
+/// cache), so we surface it as an error — the run loop backs off and logs, rather than draining the
+/// cache past the floor. A `target` that does not lower the tip (e.g. at the genesis floor, where
+/// `saturating_sub` clamps the target to the current tip) is refused for the same reason: executing it
+/// as a no-op `reorg` would report `Ok(true)` and hot-loop the run loop with zero cache progress.
 fn reorg_to_floor(cache: &Cache, target: u64, start_height: u64) -> Result<(), StepError> {
-    if target < start_height {
+    let would_not_lower_tip = match cache.latest_height()? {
+        Some(tip) => target >= tip,
+        None => true,
+    };
+    if target < start_height || would_not_lower_tip {
         return Err(StepError::ReorgBelowStartHeight {
             target,
             start_height,
@@ -330,6 +337,31 @@ mod tests {
             }
         ));
         assert_eq!(cache.latest_height().unwrap(), Some(100)); // not drained
+    }
+
+    #[tokio::test]
+    async fn step_genesis_floor_reorg_errors_instead_of_no_op_progress() {
+        let (_dir, cache) = temp_cache();
+        // Cache [0], floor = start_height = 0 (empty upgrade list, e.g. regtest).
+        cache.add(0, &tip_block(0, vec![0xaa; 32])).unwrap();
+
+        // Node reports the same height 0 with a different tip hash → in-place tip reorg branch, whose
+        // target saturates to 0 — a rollback that would not lower the tip, so it must error (backoff)
+        // rather than run a no-op reorg reported as progress (a sleepless hot loop).
+        let fake = FakeNode {
+            blockchain_info: Some(blockchain_info(0, &"cc".repeat(32))),
+            ..Default::default()
+        };
+        let error = step(&fake, &cache, 0).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            StepError::ReorgBelowStartHeight {
+                target: 0,
+                start_height: 0
+            }
+        ));
+        assert_eq!(cache.latest_height().unwrap(), Some(0)); // not drained
     }
 
     #[tokio::test]
