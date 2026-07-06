@@ -11,7 +11,7 @@ use crate::proto::{
     AddressList, Balance, BlockId, BlockRange, GetAddressUtxosArg, GetAddressUtxosReply,
     RawTransaction, TransparentAddressBlockFilter,
 };
-use crate::service::address::{MAX_TADDRESS_TXIDS, collect_utxos};
+use crate::service::address::{MAX_STREAMED_ADDRESSES, MAX_TADDRESS_TXIDS, collect_utxos};
 use crate::testutil::FakeNode;
 
 use super::{streamer_with, taddr};
@@ -138,6 +138,22 @@ async fn get_taddress_balance_no_information_available_maps_to_not_found() {
         .unwrap_err();
 
     assert_eq!(status.code(), Code::NotFound);
+}
+
+#[tokio::test]
+async fn get_taddress_balance_rejects_too_many_addresses() {
+    // The FakeNode panics on any RPC, so a passing test proves the cap rejects before the node call.
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+
+    let status = streamer
+        .get_taddress_balance(Request::new(AddressList {
+            addresses: vec![taddr(); MAX_STREAMED_ADDRESSES + 1],
+        }))
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(status.code(), Code::ResourceExhausted);
 }
 
 #[tokio::test]

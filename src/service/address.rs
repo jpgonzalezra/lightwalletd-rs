@@ -12,9 +12,9 @@ use crate::proto::{
 
 use super::{Streamer, decode_hex, mined_height};
 
-/// Max addresses a single `GetTaddressBalanceStream` request may submit before the
-/// server rejects it, bounding the per-request accumulation.
-const MAX_STREAMED_ADDRESSES: usize = 10_000;
+/// Max addresses a single `GetTaddressBalance`/`GetTaddressBalanceStream` request may carry
+/// before the server rejects it, bounding the per-request accumulation.
+pub(super) const MAX_STREAMED_ADDRESSES: usize = 10_000;
 
 /// Max matching txids a single `GetTaddressTransactions`/`GetTaddressTxids` request may have before
 /// the server rejects it, bounding the per-txid node fetches one request can trigger.
@@ -69,6 +69,11 @@ pub(super) async fn get_taddress_balance(
     request: Request<AddressList>,
 ) -> Result<Response<Balance>, Status> {
     let address_list = request.into_inner();
+    if address_list.addresses.len() > MAX_STREAMED_ADDRESSES {
+        return Err(Status::resource_exhausted(
+            "get_taddress_balance: too many addresses submitted",
+        ));
+    }
     for address in &address_list.addresses {
         check_taddress(address)?;
     }
