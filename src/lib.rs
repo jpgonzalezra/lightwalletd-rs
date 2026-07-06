@@ -92,6 +92,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 .unwrap_or(0)
         });
 
+        validate_chain_name(&chain_info.chain)?;
         let cache_path = config
             .data_dir
             .join(format!("{}-blocks.redb", chain_info.chain));
@@ -196,6 +197,23 @@ async fn connect_with_retry(node: &dyn NodeRpc) -> GetBlockchainInfo {
     }
 }
 
+/// Validate a node-supplied chain name before it is used to build the cache file name.
+///
+/// The node is trusted-local (see ADR 0001), but `getblockchaininfo`'s `chain` field still flows
+/// unsanitized into `data_dir.join(format!("{chain}-blocks.redb"))`; a name containing a path
+/// separator or `..` could otherwise redirect the cache file outside `data_dir`. Real chain values
+/// (`main`, `test`, `regtest`) are all plain alphanumerics, so a conservative charset is safe.
+fn validate_chain_name(chain: &str) -> anyhow::Result<()> {
+    if chain.is_empty()
+        || !chain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        anyhow::bail!("node returned an invalid chain name: {chain:?}");
+    }
+    Ok(())
+}
+
 /// Wire the darkside mock chain: the shared state, a `DarksideNode` over it, the block cache at
 /// `cache_path`, the shutdown notifier, the `DarksideService` control plane, and a `Streamer` bound
 /// to the same state. Returned as `(streamer, control service, shared state, shutdown)` so `run`'s
@@ -288,5 +306,27 @@ mod tests {
     async fn connect_with_retry_keeps_retrying_past_the_escalation_threshold() {
         let info = connect_with_retry(&fake(ESCALATE_AFTER + 3)).await;
         assert_eq!(info.blocks, 4242);
+    }
+
+    #[test]
+    fn validate_chain_name_accepts_real_chain_values() {
+        assert!(validate_chain_name("main").is_ok());
+        assert!(validate_chain_name("test").is_ok());
+        assert!(validate_chain_name("regtest").is_ok());
+    }
+
+    #[test]
+    fn validate_chain_name_rejects_a_path_traversal_attempt() {
+        assert!(validate_chain_name("../evil").is_err());
+    }
+
+    #[test]
+    fn validate_chain_name_rejects_a_path_separator() {
+        assert!(validate_chain_name("a/b").is_err());
+    }
+
+    #[test]
+    fn validate_chain_name_rejects_an_empty_name() {
+        assert!(validate_chain_name("").is_err());
     }
 }
