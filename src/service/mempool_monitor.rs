@@ -116,17 +116,19 @@ async fn refresh(
         state.entries.clear();
     }
     for txid in node.get_raw_mempool().await? {
-        if !state.seen.insert(txid.clone()) {
+        if state.seen.contains(&txid) {
             continue;
         }
         let raw = match node.get_raw_transaction(&txid).await {
             Ok(raw) => raw,
-            // The tx left the mempool between the listing and this fetch; skip it, not the tick.
+            // Transient failure (node briefly busy, not an actual eviction): leave the txid out
+            // of `seen` so the next tick retries it, instead of dropping it for the whole interval.
             Err(error) => {
-                tracing::debug!(%error, txid, "mempool tx fetch failed; skipping");
+                tracing::debug!(%error, txid, "mempool tx fetch failed; will retry next tick");
                 continue;
             }
         };
+        state.seen.insert(txid.clone());
         // A non-zero height means the tx was mined between getrawmempool listing it and this fetch.
         if raw.height != 0 {
             continue;
@@ -425,6 +427,31 @@ mod tests {
 
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].txid_display, txid_ok);
+    }
+
+    #[tokio::test]
+    async fn transient_fetch_failure_is_retried_on_next_tick_without_tip_change() {
+        let (raw, _, _) = crate::testutil::shielded_v5_tx();
+        let txid = compact::txid_display(&raw).unwrap();
+        let node = ScriptedNode::new(
+            vec!["aa"],
+            vec![txid.clone()],
+            vec![(txid.clone(), hex::encode(&raw), 0)],
+        );
+        node.fail_tx(&txid);
+        let mut state = MonitorState::empty();
+
+        // Tick 1: the fetch fails, so the txid must not be marked `seen`.
+        let first = refresh(&node, &mut state).await.unwrap();
+        assert!(first.entries.is_empty());
+
+        // Tick 2 (same tip, no reset): the node recovers and the retry succeeds.
+        node.recover_tx(&txid);
+        let second = refresh(&node, &mut state).await.unwrap();
+
+        assert_eq!(node.tx_call_count(), 2);
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(second.entries[0].txid_display, txid);
     }
 
     #[tokio::test]
