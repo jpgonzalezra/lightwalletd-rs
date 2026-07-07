@@ -117,9 +117,10 @@ stream.
 - The transparent-address methods validate the address shape locally — a `t` followed by 34
   alphanumeric characters — before reaching the node, and `GetTaddressTransactions`/`GetTaddressTxids`
   additionally require a block `range` with a `start` height.
-- `GetSubtreeRoots` rejects an unrecognized `shieldedProtocol` (neither Sapling nor Orchard) with
+- `GetSubtreeRoots` rejects an unrecognized `shieldedProtocol` (not Sapling, Orchard, or Ironwood) with
   `InvalidArgument`; `GetTreeState`/`GetLatestTreeState` reject a height before Sapling activation (an
-  all-empty note-commitment frontier) with `InvalidArgument`.
+  all-empty note-commitment frontier — an empty Ironwood tree alone is normal before NU6.3 and is served
+  as an empty string) with `InvalidArgument`.
 - `Ping` is disabled by default, returning `FailedPrecondition` unless `--ping-very-insecure` is set.
 
 The local address check is only a fast format gate: the node stays authoritative on the Base58Check
@@ -140,6 +141,11 @@ Data flow and storage:
 - [0004](decisions/0004-redb-block-cache.md) — compact blocks are cached on disk with `redb`, one per height; a reorg is a truncate-from-N.
 - [0014](decisions/0014-cache-ingestor-resilience.md) — the cache and ingestor recover from corruption and reorgs locally (truncate-from-N, reorg-by-hash, capped-backoff startup).
 - [0005](decisions/0005-shared-mempool-monitor.md) — in live mode a single background task (`src/service/mempool_monitor.rs`) refreshes the mempool at most every ~2 s and fans a parsed-once snapshot out via `tokio::sync::watch`, so node load is independent of the connected-wallet count; darkside keeps the per-request path.
+
+Protocol upgrades:
+
+- [0018](decisions/0018-parse-time-branch-id-hardcoded.md) — the parse-time consensus branch ID stays hardcoded at `Nu5`: it is only consulted for pre-v5 transactions (where it does not affect the legacy txid); v5/v6 read the branch ID from the wire.
+- [0019](decisions/0019-pin-librustzcash-prereleases-nu63.md) — NU6.3 support rides the exact-pinned librustzcash pre-release cohort, re-bumped when the finals are published; the crates move together (`cargo tree -d` must show one `zcash_protocol`/`zcash_address`).
 
 Structure and seams:
 
@@ -293,8 +299,9 @@ State is built with a stage-then-apply model:
   which is how a reorg is produced), mines staged transactions into their block by height, re-chains each
   block's previous-hash field, sets the presented tip, and clears the staging area.
 
-Each active block tracks its accumulated Sapling and Orchard commitment-tree sizes, carried forward from the
-sizes set by `Reset`; mining a transaction grows the sizes of its block and every later block. Blocks are
+Each active block tracks its accumulated Sapling, Orchard, and Ironwood commitment-tree sizes, carried
+forward from the sizes set by `Reset`; mining a transaction grows the sizes of its block and every later
+block. Blocks are
 held split as `(header, [tx_bytes])` and re-serialized on demand, so a mined transaction is appended without
 rewriting length prefixes by hand.
 
@@ -331,17 +338,23 @@ darkside-aware, reached through an optional handle to the shared state that is `
 
 `src/compact.rs` turns a raw block into a `CompactBlock`. The header is parsed by hand (fixed layout) to
 recover the block hash (double SHA-256, little-endian), previous hash, and time; each transaction is parsed
-with `librustzcash`, which also yields the correct transaction ID for both legacy and v5 (ZIP-244)
-transactions. The compact form keeps only what a shielded wallet needs — Sapling spends/outputs, Orchard
-actions, and transparent inputs/outputs — and the block height is read from the coinbase (BIP34).
+with `librustzcash`, which also yields the correct transaction ID for legacy, v5 (ZIP-244), and v6 (ZIP-229)
+transactions. The compact form keeps only what a shielded wallet needs — Sapling spends/outputs, Orchard and
+Ironwood actions, and transparent inputs/outputs — and the block height is read from the coinbase (BIP34).
+Ironwood actions (NU6.3) share the `CompactOrchardAction` encoding and are emitted in the `ironwoodActions`
+field of `CompactTx`; the parser passes a fixed `BranchId::Nu5`, which is only consulted for pre-v5
+transactions ([ADR 0018](decisions/0018-parse-time-branch-id-hardcoded.md)).
 
-The note-commitment tree sizes in `ChainMetadata` are not part of the raw block; the shared
-`fetch::compact_block` helper (used by both `GetBlock`'s cache-miss path and the ingestor) fills them in from
-the verbose `getblock` response.
+The note-commitment tree sizes in `ChainMetadata` — Sapling, Orchard, and Ironwood
+(`ironwoodCommitmentTreeSize`) — are not part of the raw block; the shared `fetch::compact_block` helper
+(used by both `GetBlock`'s cache-miss path and the ingestor) fills them in from the verbose `getblock`
+response. The node omits the `ironwood` tree key while that tree is empty (every block before NU6.3
+activation), which deserializes as size 0.
 
 The parser is validated byte-for-byte against the golden fixtures in `testdata/compact_blocks.json` (the
 reference fixtures carry zeroed txids, so the test normalizes ours before comparing the rest of the
-structure, and asserts that a real txid is computed for every transaction). The error paths are
+structure, and asserts that a real txid is computed for every transaction). The fixture set includes two
+testnet NU6.3 blocks: the activation block and the first block carrying an Ironwood action. The error paths are
 characterized by negative tests that truncate and corrupt those real fixtures, pinning the truncation
 guards (`ParseError::Truncated`), a cut-off transaction body (`ParseError::Io`), the coinbase BIP34
 height-push boundary (`ParseError::NoHeight`), and trailing bytes after the last transaction
@@ -403,8 +416,8 @@ from where it left off.
 
 `GetBlock` and `GetBlockRange` read from the cache and fall back to the node on a miss. `GetBlockRange` streams
 the range (ascending if `start <= end`, otherwise descending) and prunes each block to the requested
-`poolTypes` — an empty list means the legacy default of shielded-only data (transparent inputs/outputs
-stripped).
+`poolTypes` — an empty list means the legacy default of shielded-only data (Sapling, Orchard, and Ironwood;
+transparent inputs/outputs stripped).
 
 ## Testing
 

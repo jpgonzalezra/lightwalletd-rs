@@ -24,11 +24,19 @@ chain.
 ## Transaction format & identifiers
 
 - **[ZIP-225 — Version 5 Transaction Format](https://zips.z.cash/zip-0225)** — the v5 serialization that
-  `librustzcash` parses to recover Sapling, Orchard, and transparent bundles.
+  `librustzcash` parses to recover Sapling, Orchard, and transparent bundles; the v6 format (ZIP-229) is
+  this layout with an Ironwood component appended.
   *Where:* `src/compact.rs` `to_compact_block` (`Transaction::read(.., BranchId::Nu5)`).
+- **[ZIP-229 — Version 6 Transaction Format](https://zips.z.cash/zip-0229)** — the NU6.3 v6 serialization
+  (v5 plus the Ironwood bundle fields) and its txid/auth digests, which extend ZIP-244 with an Ironwood
+  component digest and move the shielded anchors from effecting to authorizing data. Parsed and digested by
+  `zcash_primitives`; validated against real testnet v6 transactions.
+  *Where:* `src/compact.rs` `to_compact_tx` (`tx.ironwood_bundle()`, `tx.txid()`), `testdata/tx_v6/`,
+  `testdata/compact_blocks.json` (testnet blocks 4,134,000 / 4,134,683).
 - **[ZIP-244 — Transaction Identifier Non-Malleability](https://zips.z.cash/zip-0244)** — the v5 TxId digest,
   computed locally from the raw block (the project's headline design decision); also renames the header's
-  `hashLightClientRoot` to `hashBlockCommitments`.
+  `hashLightClientRoot` to `hashBlockCommitments`. For v6 transactions the digest tree is extended by
+  ZIP-229 (see above).
   *Where:* `src/compact.rs` `to_compact_tx` (`tx.txid()`), `src/encoding.rs` (display ↔ wire byte order),
   `docs/ARCHITECTURE.md` "Local txid computation".
 - **[Zcash Protocol Specification §7.1 — Transaction Encoding and Consensus / Transaction Identifiers](https://zips.z.cash/protocol/protocol.pdf#txnidentifiers)**
@@ -46,6 +54,16 @@ chain.
   nullifier, the `cmx` commitment), shipped in NU5; action encoding lives in
   [§ Action Encoding and Consensus](https://zips.z.cash/protocol/protocol.pdf#actionencodingandconsensus).
   *Where:* `src/compact.rs` `to_compact_tx` (`orchard_bundle` → `CompactOrchardAction`).
+- **Ironwood pool (NU6.3)** — a second value pool of the Orchard protocol with its own note commitment
+  tree, anchor, and nullifier set; actions reuse the Orchard action encoding, so compact Ironwood actions
+  share the `CompactOrchardAction` shape. Deployed by [ZIP-258](https://zips.z.cash/zip-0258); its
+  transaction fields are defined in [ZIP-229](https://zips.z.cash/zip-0229).
+  *Where:* `src/compact.rs` `to_compact_tx` (`ironwood_bundle` → `ironwoodActions`), `src/filter.rs`
+  (`Pools::ironwood`), `src/service/treestate.rs` / `src/service/subtrees.rs` (`ironwood` tree and
+  subtrees), `src/darkside/state.rs` (Ironwood tree-size tracking).
+- **[ZIP-2005 — Quantum-Recoverable Note Plaintexts](https://zips.z.cash/zip-2005)** — all Ironwood outputs
+  use the quantum-recoverable note plaintext (lead byte `0x03`). Informational for this server: the compact
+  ciphertext prefix is opaque bytes here and only wallets interpret it; no code implements this ZIP.
 
 ## Note commitment trees, subtree roots & tree state
 
@@ -74,6 +92,11 @@ chain.
   Orchard, the upgrade the parser targets. (Surrounding deployments: [ZIP-250 Heartwood](https://zips.z.cash/zip-0250),
   [ZIP-251 Canopy](https://zips.z.cash/zip-0251).)
   *Where:* `BranchId::Nu5` in `src/compact.rs`.
+- **[ZIP-258 — Deployment of the NU6.3 Network Upgrade](https://zips.z.cash/zip-0258)** — NU6.3 = the
+  Ironwood pool plus v6 transactions (branch ID `0x37A5165B`; testnet activation 4,134,000, mainnet height
+  pending at the time of writing — re-check on the librustzcash final-release re-bump, see
+  [ADR 0019](decisions/0019-pin-librustzcash-prereleases-nu63.md)).
+  *Where:* the librustzcash cohort pin in `Cargo.toml`; v6 fixtures under `testdata/tx_v6/`.
 - **[Network Upgrade Guide (activation-height table)](https://zcash.readthedocs.io/en/latest/rtd_pages/nu_dev_guide.html)**
   — the activation heights per network.
 
