@@ -11,7 +11,7 @@ use crate::proto::{
     GetMempoolTxRequest, GetSubtreeRootsArg, ShieldedProtocol, SubtreeRoot,
 };
 use crate::service::Streamer;
-use crate::testutil::{shielded_v5_tx, temp_cache, testdata_blocks};
+use crate::testutil::{shielded_v5_tx, temp_cache, testdata_blocks, v6_coinbase_txs};
 
 use super::block::{raw_block_height, synthetic_block};
 use super::{DarksideError, DarksideHandle, DarksideNode, DarksideState};
@@ -26,6 +26,7 @@ fn meta(start_height: u64) -> DarksideMetaState {
         chain_name: "main".to_string(),
         start_sapling_commitment_tree_size: 0,
         start_orchard_commitment_tree_size: 0,
+        start_ironwood_commitment_tree_size: 0,
     }
 }
 
@@ -92,6 +93,7 @@ fn apply_staged_starts_tree_sizes_from_reset() {
     let mut meta = meta(START_HEIGHT);
     meta.start_sapling_commitment_tree_size = 100;
     meta.start_orchard_commitment_tree_size = 200;
+    meta.start_ironwood_commitment_tree_size = 300;
     state.reset(&meta);
     state.stage_block(testdata_blocks()[0].clone()).unwrap();
     state.apply_staged(380640).unwrap();
@@ -100,6 +102,37 @@ fn apply_staged_starts_tree_sizes_from_reset() {
     // configured start sizes.
     assert_eq!(state.active[0].sapling_size, 100);
     assert_eq!(state.active[0].orchard_size, 200);
+    assert_eq!(state.active[0].ironwood_size, 300);
+}
+
+#[test]
+fn apply_staged_accumulates_ironwood_tree_size_from_v6_transaction() {
+    // The testnet 4,134,683 coinbase carries the first Ironwood action.
+    let (v6_tx, _, _) = v6_coinbase_txs()
+        .into_iter()
+        .find(|(_, height, _)| *height == 4_134_683)
+        .expect("the v6 coinbase with an Ironwood action");
+
+    let mut state = DarksideState::new();
+    state.reset(&meta(START_HEIGHT));
+    for raw in testdata_blocks().into_iter().take(3) {
+        state.stage_block(raw).unwrap();
+    }
+    // Mine the v6 transaction into the middle block (height 380641, index 1).
+    state.stage_transaction(380641, v6_tx).unwrap();
+    state.apply_staged(380642).unwrap();
+
+    // The block before the mined transaction is unchanged; the mined block and every later block
+    // grow by the transaction's single Ironwood action. Sapling/Orchard are untouched.
+    assert_eq!(state.active[0].ironwood_size, 0);
+    assert_eq!(state.active[1].ironwood_size, 1);
+    assert_eq!(state.active[2].ironwood_size, 1);
+    assert_eq!(state.active[1].sapling_size, 0);
+    assert_eq!(state.active[1].orchard_size, 0);
+
+    // The size reaches the node plane: verbose getblock reports the grown Ironwood tree.
+    let verbose = state.block_verbose(380641).unwrap();
+    assert_eq!(verbose.trees.ironwood.size, 1);
 }
 
 #[test]

@@ -18,6 +18,7 @@ pub(super) struct ActiveBlock {
     pub(super) txs: Vec<Vec<u8>>,
     pub(super) sapling_size: u32,
     pub(super) orchard_size: u32,
+    pub(super) ironwood_size: u32,
 }
 
 impl ActiveBlock {

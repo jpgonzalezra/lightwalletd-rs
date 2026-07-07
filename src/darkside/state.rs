@@ -34,6 +34,8 @@ pub struct DarksideState {
     start_sapling_size: u32,
     /// Orchard commitment tree size as of `start_height - 1`.
     start_orchard_size: u32,
+    /// Ironwood commitment tree size as of `start_height - 1`.
+    start_ironwood_size: u32,
     branch_id: String,
     chain_name: String,
     /// Highest height presented by the mock node; `-1` before the first `ApplyStaged`.
@@ -68,6 +70,7 @@ impl DarksideState {
             start_height: 0,
             start_sapling_size: 0,
             start_orchard_size: 0,
+            start_ironwood_size: 0,
             branch_id: String::new(),
             chain_name: "main".to_string(),
             latest_height: -1,
@@ -89,6 +92,7 @@ impl DarksideState {
             start_height: meta.sapling_activation.max(0) as u64,
             start_sapling_size: meta.start_sapling_commitment_tree_size,
             start_orchard_size: meta.start_orchard_commitment_tree_size,
+            start_ironwood_size: meta.start_ironwood_commitment_tree_size,
             branch_id: meta.branch_id.clone(),
             chain_name: meta.chain_name.clone(),
             latest_height: -1,
@@ -205,7 +209,8 @@ impl DarksideState {
                     "transaction height too high".to_string(),
                 ));
             }
-            let (sapling_outputs, orchard_actions) = compact::shielded_counts(&raw)?;
+            let (sapling_outputs, orchard_actions, ironwood_actions) =
+                compact::shielded_counts(&raw)?;
             {
                 let block = &mut self.active[index];
                 block.txs.push(raw);
@@ -216,6 +221,7 @@ impl DarksideState {
             for block in &mut self.active[index..] {
                 block.sapling_size += sapling_outputs;
                 block.orchard_size += orchard_actions;
+                block.ironwood_size += ironwood_actions;
             }
         }
         Ok(())
@@ -241,16 +247,22 @@ impl DarksideState {
             )));
         }
         let offset = (height - self.start_height) as usize;
-        let (mut sapling_size, mut orchard_size) = if offset > 0 {
+        let (mut sapling_size, mut orchard_size, mut ironwood_size) = if offset > 0 {
             let prev = &self.active[offset - 1];
-            (prev.sapling_size, prev.orchard_size)
+            (prev.sapling_size, prev.orchard_size, prev.ironwood_size)
         } else {
-            (self.start_sapling_size, self.start_orchard_size)
+            (
+                self.start_sapling_size,
+                self.start_orchard_size,
+                self.start_ironwood_size,
+            )
         };
         for tx in &txs {
-            let (sapling_outputs, orchard_actions) = compact::shielded_counts(tx)?;
+            let (sapling_outputs, orchard_actions, ironwood_actions) =
+                compact::shielded_counts(tx)?;
             sapling_size += sapling_outputs;
             orchard_size += orchard_actions;
+            ironwood_size += ironwood_actions;
         }
         self.active.truncate(offset);
         self.active.push(ActiveBlock {
@@ -258,6 +270,7 @@ impl DarksideState {
             txs,
             sapling_size,
             orchard_size,
+            ironwood_size,
         });
         Ok(())
     }
@@ -397,7 +410,9 @@ impl DarksideState {
                 orchard: TreeSize {
                     size: block.orchard_size,
                 },
-                ironwood: TreeSize::default(),
+                ironwood: TreeSize {
+                    size: block.ironwood_size,
+                },
             },
         })
     }

@@ -263,9 +263,9 @@ pub fn coinbase_height_from_raw(raw_tx: &[u8]) -> Result<u64, ParseError> {
     coinbase_height(&transaction)
 }
 
-/// Count the Sapling outputs and Orchard actions in a raw transaction, used to grow the
-/// note-commitment tree sizes as darkside mines transactions into blocks.
-pub fn shielded_counts(raw_tx: &[u8]) -> Result<(u32, u32), ParseError> {
+/// Count the Sapling outputs and the Orchard and Ironwood actions in a raw transaction, used to
+/// grow the note-commitment tree sizes as darkside mines transactions into blocks.
+pub fn shielded_counts(raw_tx: &[u8]) -> Result<(u32, u32, u32), ParseError> {
     let transaction = Transaction::read(&mut Cursor::new(raw_tx), BranchId::Nu5)?;
     let sapling_outputs = transaction
         .sapling_bundle()
@@ -275,7 +275,11 @@ pub fn shielded_counts(raw_tx: &[u8]) -> Result<(u32, u32), ParseError> {
         .orchard_bundle()
         .map(|bundle| bundle.actions().len() as u32)
         .unwrap_or(0);
-    Ok((sapling_outputs, orchard_actions))
+    let ironwood_actions = transaction
+        .ironwood_bundle()
+        .map(|bundle| bundle.actions().len() as u32)
+        .unwrap_or(0);
+    Ok((sapling_outputs, orchard_actions, ironwood_actions))
 }
 
 /// Compute the display-order (big-endian) hex txid of a raw transaction, matching what a wallet
@@ -335,10 +339,11 @@ mod tests {
     fn shielded_counts_matches_v5_vectors() {
         let vectors = shielded_v5_txs();
         assert!(!vectors.is_empty());
+        // A v5 transaction has no Ironwood component, so its count is always zero.
         for (raw, sapling_outputs, orchard_actions) in vectors {
             assert_eq!(
                 shielded_counts(&raw).unwrap(),
-                (sapling_outputs, orchard_actions)
+                (sapling_outputs, orchard_actions, 0)
             );
         }
     }
@@ -358,9 +363,12 @@ mod tests {
     }
 
     #[test]
-    fn v6_coinbase_shielded_counts_are_zero() {
-        for (raw, _, _) in v6_coinbase_txs() {
-            assert_eq!(shielded_counts(&raw).unwrap(), (0, 0));
+    fn v6_coinbase_shielded_counts_count_ironwood_actions() {
+        // The activation coinbase (4,134,000) has no shielded components; the 4,134,683 coinbase
+        // carries the first Ironwood action.
+        for (raw, height, _) in v6_coinbase_txs() {
+            let expected_ironwood = if height == 4_134_683 { 1 } else { 0 };
+            assert_eq!(shielded_counts(&raw).unwrap(), (0, 0, expected_ironwood));
         }
     }
 

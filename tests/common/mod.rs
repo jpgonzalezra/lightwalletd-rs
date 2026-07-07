@@ -68,6 +68,7 @@ impl TestServer {
                 chain_name: chain_name.to_string(),
                 start_sapling_commitment_tree_size: 0,
                 start_orchard_commitment_tree_size: 0,
+                start_ironwood_commitment_tree_size: 0,
             })
             .await
             .unwrap();
