@@ -20,6 +20,10 @@ pub const DEFAULT_INGEST_CONCURRENCY: usize = 8;
 pub const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 60;
 /// Default time, in seconds, to wait for a keepalive ack before dropping a connection.
 pub const DEFAULT_KEEPALIVE_TIMEOUT_SECS: u64 = 20;
+/// Default darkside auto-shutdown timeout, in minutes — matches the Go reference's fixed default.
+pub const DEFAULT_DARKSIDE_TIMEOUT_MINUTES: u64 = 30;
+/// Default tracing filter when neither `--log-level` nor `RUST_LOG` is given.
+pub const DEFAULT_LOG_LEVEL: &str = "info";
 
 /// A CLI-parsed string whose `Debug` prints `"***"`, so a secret flag can never leak via a stray
 /// `{:?}` on [`Cli`] (which derives `Debug` for clap's error messages).
@@ -98,11 +102,13 @@ pub struct Cli {
     #[arg(long)]
     pub redownload: bool,
 
-    /// Path to a PEM TLS certificate (required unless `--no-tls-very-insecure`).
+    /// Path to a PEM TLS certificate (required unless `--no-tls-very-insecure` or
+    /// `--gen-cert-very-insecure`).
     #[arg(long)]
     pub tls_cert: Option<PathBuf>,
 
-    /// Path to the PEM TLS private key (required unless `--no-tls-very-insecure`).
+    /// Path to the PEM TLS private key (required unless `--no-tls-very-insecure` or
+    /// `--gen-cert-very-insecure`).
     #[arg(long)]
     pub tls_key: Option<PathBuf>,
 
@@ -110,14 +116,39 @@ pub struct Cli {
     #[arg(long = "no-tls-very-insecure")]
     pub no_tls: bool,
 
-    /// Address to serve Prometheus metrics on (`/metrics`); metrics are disabled if unset.
+    /// Generate an in-memory self-signed TLS certificate at startup instead of reading
+    /// `--tls-cert`/`--tls-key` from disk. Insecure — the certificate is not trusted by anything,
+    /// so it only helps a client that already skips verification; development only. Mutually
+    /// exclusive with `--tls-cert`/`--tls-key` and `--no-tls-very-insecure`.
+    #[arg(long = "gen-cert-very-insecure")]
+    pub gen_cert: bool,
+
+    /// Address to serve Prometheus metrics on (`/metrics`). On by default, matching the Go
+    /// reference's fixed `:9068`; disable with `--no-metrics`.
+    #[arg(long, default_value = "127.0.0.1:9068")]
+    pub metrics_bind: SocketAddr,
+
+    /// Disable the Prometheus metrics HTTP server.
     #[arg(long)]
-    pub metrics_bind: Option<SocketAddr>,
+    pub no_metrics: bool,
 
     /// Run as a darkside mock server (no real node) for deterministic wallet tests. Insecure —
     /// testing only; never deploy in production.
     #[arg(long = "darkside-very-insecure")]
     pub darkside: bool,
+
+    /// In darkside mode, shut the mock server down after this many minutes so a forgotten or
+    /// leaked CI job cannot serve indefinitely (matches the Go reference's fixed 30-minute
+    /// default; Go has no way to disable it, so neither do we — pass a very large value for an
+    /// effectively unbounded local session). Ignored outside darkside mode.
+    #[arg(long, default_value_t = DEFAULT_DARKSIDE_TIMEOUT_MINUTES)]
+    pub darkside_timeout_minutes: u64,
+
+    /// Run without the on-disk block cache: every block read falls through to the node instead of
+    /// being served from `--data-dir`. Debugging only — throughput suffers badly against a real
+    /// chain, since nothing is cached between requests.
+    #[arg(long)]
+    pub nocache: bool,
 
     /// Enable the `Ping` gRPC (testing/benchmark only). Off by default; insecure — it lets a client
     /// hold server resources, so never enable in production.
@@ -141,12 +172,23 @@ pub struct Cli {
     pub keepalive_timeout_secs: u64,
 
     /// Blocks fetched and committed per ingest window while catching up to the node tip.
-    #[arg(long, default_value_t = DEFAULT_INGEST_WINDOW)]
+    #[arg(long, default_value_t = DEFAULT_INGEST_WINDOW, env = "LWD_INGEST_WINDOW")]
     pub ingest_window: usize,
 
     /// Concurrent block fetches from the node while catching up.
-    #[arg(long, default_value_t = DEFAULT_INGEST_CONCURRENCY)]
+    #[arg(long, default_value_t = DEFAULT_INGEST_CONCURRENCY, env = "LWD_INGEST_CONCURRENCY")]
     pub ingest_concurrency: usize,
+
+    /// Tracing filter (a level like "info"/"debug", or full `EnvFilter` directives such as
+    /// "lightwalletd_rs=debug,warn"). An explicit `RUST_LOG` environment variable always takes
+    /// precedence over this flag, matching the usual `tracing-subscriber` convention.
+    #[arg(long, default_value = DEFAULT_LOG_LEVEL, env = "LWD_LOG_LEVEL")]
+    pub log_level: String,
+
+    /// Write JSON lines to this file instead of human-readable text on stderr (matches the Go
+    /// reference's `--log-file`, which switches its logrus output to JSON).
+    #[arg(long, env = "LWD_LOG_FILE")]
+    pub log_file: Option<PathBuf>,
 }
 
 /// Resolved runtime configuration.
@@ -170,6 +212,12 @@ pub struct Config {
     pub metrics_bind: Option<SocketAddr>,
     /// Whether to run as a darkside mock server instead of proxying a real node.
     pub darkside: bool,
+    /// How long a darkside server runs before auto-shutting down (see `--darkside-timeout-minutes`).
+    /// Ignored outside darkside mode.
+    pub darkside_timeout: Duration,
+    /// Run without the on-disk block cache (see `--nocache`): the cache is opened in a throwaway
+    /// temp dir and the ingestor is not spawned, so every read falls through to the node.
+    pub nocache: bool,
     /// Whether the `Ping` gRPC is enabled (testing/benchmark only); off by default for hardening.
     pub ping_enable: bool,
     /// Donation unified address advertised in `GetLightdInfo`, if configured.
@@ -201,7 +249,7 @@ pub struct ServerLimits {
 }
 
 /// How the gRPC server presents itself on the wire.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum TlsConfig {
     /// Serve over TLS with the given PEM certificate and private-key file paths.
     Enabled {
@@ -210,8 +258,36 @@ pub enum TlsConfig {
         /// Path to the PEM private key.
         key: PathBuf,
     },
+    /// Serve over TLS with an in-memory self-signed certificate generated at startup via
+    /// `--gen-cert-very-insecure` (see [`Cli::resolve`]).
+    GeneratedInsecure {
+        /// PEM-encoded self-signed certificate.
+        cert_pem: String,
+        /// PEM-encoded private key.
+        key_pem: String,
+    },
     /// Serve plaintext (no TLS) — insecure, development only.
     Disabled,
+}
+
+impl std::fmt::Debug for TlsConfig {
+    /// Hand-written so a stray `{:?}` can never leak `GeneratedInsecure`'s private key into a log,
+    /// the same discipline applied to [`NodeConfig`]'s credentials.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TlsConfig::Enabled { cert, key } => f
+                .debug_struct("Enabled")
+                .field("cert", cert)
+                .field("key", key)
+                .finish(),
+            TlsConfig::GeneratedInsecure { cert_pem, .. } => f
+                .debug_struct("GeneratedInsecure")
+                .field("cert_pem", cert_pem)
+                .field("key_pem", &"***")
+                .finish(),
+            TlsConfig::Disabled => write!(f, "Disabled"),
+        }
+    }
 }
 
 /// How to reach the zebrad JSON-RPC endpoint.
@@ -267,10 +343,36 @@ impl Cli {
             }
         };
 
+        if self.gen_cert && self.no_tls {
+            anyhow::bail!(
+                "--gen-cert-very-insecure and --no-tls-very-insecure select mutually exclusive \
+                 transport modes (self-signed TLS vs. plaintext); pass only one"
+            );
+        }
+        if self.gen_cert && (self.tls_cert.is_some() || self.tls_key.is_some()) {
+            anyhow::bail!(
+                "--gen-cert-very-insecure cannot be combined with --tls-cert/--tls-key; pass \
+                 either an on-disk certificate or --gen-cert-very-insecure, not both"
+            );
+        }
+
         let tls = if self.no_tls {
             TlsConfig::Disabled
+        } else if self.gen_cert {
+            tracing::warn!(
+                "--gen-cert-very-insecure: generating an in-memory self-signed TLS certificate \
+                 for \"localhost\" — trusted by nothing, development only, never use in production"
+            );
+            let rcgen::CertifiedKey { cert, signing_key } =
+                rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                    .context("generating a self-signed TLS certificate")?;
+            TlsConfig::GeneratedInsecure {
+                cert_pem: cert.pem(),
+                key_pem: signing_key.serialize_pem(),
+            }
         } else {
-            let message = "TLS is required: pass --tls-cert and --tls-key, or --no-tls-very-insecure for plaintext";
+            let message = "TLS is required: pass --tls-cert and --tls-key, --gen-cert-very-insecure \
+                for a self-signed certificate, or --no-tls-very-insecure for plaintext";
             TlsConfig::Enabled {
                 cert: self.tls_cert.context(message)?,
                 key: self.tls_key.context(message)?,
@@ -309,8 +411,10 @@ impl Cli {
             sync_from_height: self.sync_from_height,
             redownload: self.redownload,
             tls,
-            metrics_bind: self.metrics_bind,
+            metrics_bind: (!self.no_metrics).then_some(self.metrics_bind),
             darkside: self.darkside,
+            darkside_timeout: Duration::from_secs(self.darkside_timeout_minutes.saturating_mul(60)),
+            nocache: self.nocache,
             ping_enable: self.ping_enable,
             donation_address: self.donation_address,
             limits: ServerLimits {
@@ -413,6 +517,7 @@ fn looks_like_toml(text: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
 
     #[test]
     fn parse_zcash_conf_reads_known_keys_and_skips_comments() {
@@ -518,8 +623,12 @@ mod tests {
             tls_cert: None,
             tls_key: None,
             no_tls: true,
-            metrics_bind: None,
+            gen_cert: false,
+            metrics_bind: "127.0.0.1:9068".parse().unwrap(),
+            no_metrics: false,
             darkside: false,
+            darkside_timeout_minutes: DEFAULT_DARKSIDE_TIMEOUT_MINUTES,
+            nocache: false,
             ping_enable: false,
             donation_address: None,
             max_concurrent_streams: DEFAULT_MAX_CONCURRENT_STREAMS,
@@ -527,6 +636,8 @@ mod tests {
             keepalive_timeout_secs: DEFAULT_KEEPALIVE_TIMEOUT_SECS,
             ingest_window: DEFAULT_INGEST_WINDOW,
             ingest_concurrency: DEFAULT_INGEST_CONCURRENCY,
+            log_level: DEFAULT_LOG_LEVEL.to_string(),
+            log_file: None,
         }
     }
 
@@ -675,6 +786,169 @@ mod tests {
         let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.keepalive_interval_secs = 0;
         assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn resolve_metrics_bind_defaults_to_localhost_9068() {
+        // Matches the Go reference, which always serves Prometheus on :9068.
+        let config = cli_with(None, None, Some("http://node"), None, None, None)
+            .resolve()
+            .unwrap();
+        assert_eq!(config.metrics_bind, Some("127.0.0.1:9068".parse().unwrap()));
+    }
+
+    #[test]
+    fn resolve_no_metrics_disables_the_metrics_server() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.no_metrics = true;
+        let config = cli.resolve().unwrap();
+        assert_eq!(config.metrics_bind, None);
+    }
+
+    #[test]
+    fn resolve_metrics_bind_is_overridable() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.metrics_bind = "0.0.0.0:9200".parse().unwrap();
+        let config = cli.resolve().unwrap();
+        assert_eq!(config.metrics_bind, Some("0.0.0.0:9200".parse().unwrap()));
+    }
+
+    #[test]
+    fn resolve_gen_cert_generates_an_in_memory_self_signed_certificate() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.no_tls = false;
+        cli.gen_cert = true;
+        let config = cli.resolve().unwrap();
+        match config.tls {
+            TlsConfig::GeneratedInsecure { cert_pem, key_pem } => {
+                assert!(cert_pem.contains("BEGIN CERTIFICATE"));
+                assert!(key_pem.contains("PRIVATE KEY"));
+            }
+            other => panic!("expected TlsConfig::GeneratedInsecure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_gen_cert_debug_redacts_the_private_key() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.no_tls = false;
+        cli.gen_cert = true;
+        let config = cli.resolve().unwrap();
+        let rendered = format!("{:?}", config.tls);
+        assert!(rendered.contains("***"));
+        assert!(!rendered.contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn resolve_rejects_gen_cert_combined_with_no_tls_very_insecure() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        // cli_with's default already sets no_tls: true.
+        cli.gen_cert = true;
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn resolve_rejects_gen_cert_combined_with_explicit_cert_and_key() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.no_tls = false;
+        cli.gen_cert = true;
+        cli.tls_cert = Some(PathBuf::from("cert.pem"));
+        cli.tls_key = Some(PathBuf::from("key.pem"));
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn resolve_uses_default_darkside_timeout() {
+        let config = cli_with(None, None, Some("http://node"), None, None, None)
+            .resolve()
+            .unwrap();
+        assert_eq!(config.darkside_timeout, Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn resolve_overrides_darkside_timeout_from_flag() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.darkside_timeout_minutes = 5;
+        let config = cli.resolve().unwrap();
+        assert_eq!(config.darkside_timeout, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn resolve_propagates_the_nocache_flag() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.nocache = true;
+        let config = cli.resolve().unwrap();
+        assert!(config.nocache);
+
+        let config = cli_with(None, None, Some("http://node"), None, None, None)
+            .resolve()
+            .unwrap();
+        assert!(!config.nocache);
+    }
+
+    /// Serializes tests that mutate process-global environment variables, so they cannot
+    /// interleave and observe each other's values.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn cli_parsing_reads_ingest_tuning_from_env_when_flags_are_absent() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK; no other thread reads/writes these vars concurrently.
+        unsafe {
+            std::env::set_var("LWD_INGEST_WINDOW", "128");
+            std::env::set_var("LWD_INGEST_CONCURRENCY", "4");
+        }
+        let cli = Cli::try_parse_from(["lightwalletd-rs", "--no-tls-very-insecure"]).unwrap();
+        assert_eq!(cli.ingest_window, 128);
+        assert_eq!(cli.ingest_concurrency, 4);
+        unsafe {
+            std::env::remove_var("LWD_INGEST_WINDOW");
+            std::env::remove_var("LWD_INGEST_CONCURRENCY");
+        }
+    }
+
+    #[test]
+    fn cli_parsing_flag_overrides_env_for_ingest_tuning() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK; no other thread reads/writes this var concurrently.
+        unsafe {
+            std::env::set_var("LWD_INGEST_WINDOW", "128");
+        }
+        let cli = Cli::try_parse_from([
+            "lightwalletd-rs",
+            "--no-tls-very-insecure",
+            "--ingest-window",
+            "16",
+        ])
+        .unwrap();
+        assert_eq!(cli.ingest_window, 16);
+        unsafe {
+            std::env::remove_var("LWD_INGEST_WINDOW");
+        }
+    }
+
+    #[test]
+    fn cli_parsing_reads_log_flags_from_env_when_flags_are_absent() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK; no other thread reads/writes these vars concurrently.
+        unsafe {
+            std::env::set_var("LWD_LOG_LEVEL", "debug");
+            std::env::set_var("LWD_LOG_FILE", "/tmp/lwd-test.log");
+        }
+        let cli = Cli::try_parse_from(["lightwalletd-rs", "--no-tls-very-insecure"]).unwrap();
+        assert_eq!(cli.log_level, "debug");
+        assert_eq!(cli.log_file, Some(PathBuf::from("/tmp/lwd-test.log")));
+        unsafe {
+            std::env::remove_var("LWD_LOG_LEVEL");
+            std::env::remove_var("LWD_LOG_FILE");
+        }
+    }
+
+    #[test]
+    fn cli_parsing_defaults_log_level_to_info_with_no_log_file() {
+        let cli = Cli::try_parse_from(["lightwalletd-rs", "--no-tls-very-insecure"]).unwrap();
+        assert_eq!(cli.log_level, "info");
+        assert_eq!(cli.log_file, None);
     }
 
     #[test]

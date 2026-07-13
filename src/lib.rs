@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 pub mod cache;
@@ -53,6 +54,12 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             let identity = Identity::from_pem(std::fs::read(cert)?, std::fs::read(key)?);
             server = server.tls_config(ServerTlsConfig::new().identity(identity))?;
         }
+        config::TlsConfig::GeneratedInsecure { cert_pem, key_pem } => {
+            // The loud warning is logged from `Cli::resolve` (config.rs), which runs before the
+            // subscriber-consuming `run` is even called, so it is not repeated here.
+            let identity = Identity::from_pem(cert_pem.as_bytes(), key_pem.as_bytes());
+            server = server.tls_config(ServerTlsConfig::new().identity(identity))?;
+        }
         config::TlsConfig::Disabled => {
             tracing::warn!("running without TLS (plaintext) — do not use in production");
         }
@@ -71,9 +78,26 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             .with_ping_enabled(config.ping_enable)
             .with_donation_address(config.donation_address.clone());
 
+        // Auto-shutdown so a forgotten or leaked darkside process (e.g. a CI job that fails to
+        // tear it down) never serves indefinitely — matches the Go reference's fixed 30-minute
+        // darkside timeout, which has no way to be disabled (see ADR 0022). Unlike Go's abrupt
+        // `Log.Fatal`/process exit, this drives the same graceful-shutdown `Notify` the `Stop` RPC
+        // uses, so in-flight requests still drain before the process exits `run` normally.
+        let timeout = config.darkside_timeout;
+        let timeout_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            tracing::warn!(
+                timeout_secs = timeout.as_secs(),
+                "darkside auto-shutdown timeout elapsed; shutting down the mock server"
+            );
+            timeout_shutdown.notify_one();
+        });
+
         server
             .add_service(CompactTxStreamerServer::new(streamer))
             .add_service(DarksideStreamerServer::new(darkside_service))
+            .add_service(reflection_service()?)
             .serve_with_shutdown(config.grpc_bind, darkside_shutdown(shutdown))
             .await?;
     } else {
@@ -93,53 +117,81 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         });
 
         validate_chain_name(&chain_info.chain)?;
-        let cache_path = config
-            .data_dir
-            .join(format!("{}-blocks.redb", chain_info.chain));
-        let cache = Arc::new(Cache::open(&cache_path)?);
 
-        // A light open-time check: a pre-existing gap or schema-mismatch is localized and truncated
-        // here so the ingestor re-ingests from that height instead of serving corrupt blocks.
-        if let Err(error) = cache.validate_light() {
-            tracing::warn!(%error, "cache failed open-time validation; locating corruption");
-            if let Some(corrupt) = cache.lowest_corrupt_height()? {
-                tracing::warn!(
-                    corrupt,
-                    "truncating cache from corrupt height; it will re-ingest"
-                );
-                cache.reorg(corrupt.saturating_sub(1))?;
-            }
-        }
-
-        // Operator cache-reset levers, applied after corruption recovery: --redownload clears the
-        // cache (re-ingesting from start_height); --sync-from-height N drops every cached block at
-        // or above N. Both then rebuild from the node.
-        if config.redownload {
-            tracing::warn!("--redownload: clearing the cache; re-ingesting from start_height");
-            cache.truncate_from(0)?;
-        } else if let Some(height) = config.sync_from_height {
+        // `--nocache` opens the cache in a throwaway temp dir instead of under `--data-dir` and
+        // skips the ingestor below, so the cache never gains a single block and every read falls
+        // through to the node — for debugging only, since it forfeits all caching benefit. The
+        // `TempDir` guard is bound for the rest of `run` so its directory is not removed while the
+        // cache is still open.
+        let (cache, cache_location, _nocache_tempdir) = if config.nocache {
             tracing::warn!(
-                height,
-                "--sync-from-height: dropping cached blocks at or above height"
+                "--nocache: running without the on-disk block cache (debugging only); every \
+                 block read falls through to the node"
             );
-            cache.truncate_from(height)?;
-        }
+            let tempdir = tempfile::tempdir().context("creating --nocache temp dir")?;
+            let cache_path = tempdir
+                .path()
+                .join(format!("{}-blocks.redb", chain_info.chain));
+            let cache = Arc::new(Cache::open(&cache_path)?);
+            let location = cache_path.display().to_string();
+            (cache, location, Some(tempdir))
+        } else {
+            let cache_path = config
+                .data_dir
+                .join(format!("{}-blocks.redb", chain_info.chain));
+            let cache = Arc::new(Cache::open(&cache_path)?);
+
+            // A light open-time check: a pre-existing gap or schema-mismatch is localized and
+            // truncated here so the ingestor re-ingests from that height instead of serving
+            // corrupt blocks.
+            if let Err(error) = cache.validate_light() {
+                tracing::warn!(%error, "cache failed open-time validation; locating corruption");
+                if let Some(corrupt) = cache.lowest_corrupt_height()? {
+                    tracing::warn!(
+                        corrupt,
+                        "truncating cache from corrupt height; it will re-ingest"
+                    );
+                    cache.reorg(corrupt.saturating_sub(1))?;
+                }
+            }
+
+            // Operator cache-reset levers, applied after corruption recovery: --redownload clears
+            // the cache (re-ingesting from start_height); --sync-from-height N drops every cached
+            // block at or above N. Both then rebuild from the node.
+            if config.redownload {
+                tracing::warn!("--redownload: clearing the cache; re-ingesting from start_height");
+                cache.truncate_from(0)?;
+            } else if let Some(height) = config.sync_from_height {
+                tracing::warn!(
+                    height,
+                    "--sync-from-height: dropping cached blocks at or above height"
+                );
+                cache.truncate_from(height)?;
+            }
+
+            let location = cache_path.display().to_string();
+            (cache, location, None)
+        };
 
         tracing::info!(
             grpc_bind = %config.grpc_bind,
             node_url = %config.node.url,
             chain = %chain_info.chain,
             start_height,
-            cache = %cache_path.display(),
+            cache = %cache_location,
             "lightwalletd-rs starting"
         );
 
-        tokio::spawn(ingestor::run(
-            node.clone(),
-            cache.clone(),
-            start_height,
-            config.ingest.clone(),
-        ));
+        if config.nocache {
+            tracing::info!("--nocache: ingestor not started");
+        } else {
+            tokio::spawn(ingestor::run(
+                node.clone(),
+                cache.clone(),
+                start_height,
+                config.ingest.clone(),
+            ));
+        }
 
         // One shared mempool monitor fans the mempool out to all clients, so node load stays
         // independent of the number of connected wallets.
@@ -150,12 +202,28 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             .with_donation_address(config.donation_address.clone());
         server
             .add_service(CompactTxStreamerServer::new(streamer))
+            .add_service(reflection_service()?)
             .serve_with_shutdown(config.grpc_bind, shutdown_signal())
             .await?;
     }
     tracing::info!("server stopped");
 
     Ok(())
+}
+
+/// Build the gRPC Server Reflection (v1) service, advertising every method in
+/// `service.proto`/`darkside.proto` from the descriptor set `build.rs` emits at compile time.
+/// Registered unconditionally (both live and darkside modes) so `grpcurl`/`grpcui`-style tools can
+/// discover and describe the API on a running server without a local `.proto` checkout. `pub` so
+/// the in-process test harness (`tests/common/mod.rs`) can register the same service.
+pub fn reflection_service() -> anyhow::Result<
+    tonic_reflection::server::v1::ServerReflectionServer<
+        impl tonic_reflection::server::v1::ServerReflection,
+    >,
+> {
+    Ok(tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+        .build_v1()?)
 }
 
 /// After this many consecutive failures we keep retrying but log at `error!`, so a genuinely

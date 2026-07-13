@@ -40,6 +40,33 @@ All notable changes to this project are documented here. The format is loosely b
 - `--zcash-conf` pointed at a TOML file (e.g. a `zebrad.toml`) now fails fast with an actionable
   error instead of silently extracting nothing and falling back to `127.0.0.1:8232` with no auth.
 
+### Operations (ADR 0022: ops-surface parity with the Go reference)
+- **Prometheus metrics are now on by default**, bound to `127.0.0.1:9068` (matching the Go
+  reference's fixed port). `--metrics-bind` still overrides the address; `--no-metrics` disables the
+  metrics server entirely. Previously metrics were off unless `--metrics-bind` was given explicitly.
+- **gRPC Server Reflection** is always registered (both live and darkside modes), so
+  `grpcurl -plaintext <addr> list`/`describe` work against a running server with no local `.proto`
+  checkout needed.
+- **`--log-level <level>`** (default `info`) sets the tracing filter; an explicit `RUST_LOG`
+  environment variable still takes precedence. **`--log-file <path>`** switches output to JSON lines
+  appended to that file instead of human-readable stderr text, matching the Go reference's
+  `--log-file`/logrus-JSON behavior.
+- **`--gen-cert-very-insecure`** generates an in-memory self-signed TLS certificate at startup
+  (via `rcgen`) instead of requiring `--tls-cert`/`--tls-key` on disk. Insecure and mutually
+  exclusive with `--tls-cert`/`--tls-key` and `--no-tls-very-insecure`; logs a loud warning on use.
+- **`--darkside-timeout-minutes`** (default 30, matching Go's fixed default): darkside mode now
+  auto-shuts-down after this long, so a forgotten or leaked mock server (e.g. a stuck CI job) never
+  serves indefinitely.
+- **`--nocache`** runs without the on-disk block cache (opened in a throwaway temp dir instead, and
+  the ingestor is not spawned), so every block read falls through to the node — matching Go's
+  `--nocache`. Debugging only.
+- **Env-var fallbacks**: `--ingest-window`/`--ingest-concurrency` and `--log-level`/`--log-file` now
+  also read `LWD_INGEST_WINDOW`/`LWD_INGEST_CONCURRENCY`/`LWD_LOG_LEVEL`/`LWD_LOG_FILE` when the flag
+  is not given; an explicit flag still wins over the environment variable, which wins over the
+  default.
+- The `./lightwalletd-rs-data` default data directory is kept as a deliberate divergence from Go's
+  `/var/lib/lightwalletd` default, which requires root on a stock system.
+
 ## [0.1.0] — beta
 
 First public release. A caching proxy in front of a `zebrad` node that implements all 20

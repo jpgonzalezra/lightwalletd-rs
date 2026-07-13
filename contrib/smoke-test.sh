@@ -5,10 +5,15 @@
 #
 # The vector is downloaded here with curl and pushed in via the streaming control RPCs, because the
 # server's reqwest client is built without TLS (the backend node is plain HTTP) and so the URL-based
-# StageBlocks/StageTransactions RPCs cannot fetch from https. The server's gRPC reflection is not
-# enabled either, so the .proto files are passed to grpcurl explicitly.
+# StageBlocks/StageTransactions RPCs cannot fetch from https. The .proto files are still passed to
+# grpcurl explicitly below (rather than relying on the server's gRPC reflection) so this script keeps
+# working unchanged against a server built before reflection was added.
 #
 # Requirements: grpcurl, jq. Usage: ./contrib/smoke-test.sh
+#
+# --nocache and --metrics-bind are left at their defaults here (the on-disk cache and Prometheus on
+# 127.0.0.1:9068), since neither affects this script's assertions and the metrics port is otherwise
+# unused in this process tree.
 
 set -eo pipefail
 

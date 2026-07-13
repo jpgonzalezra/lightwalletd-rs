@@ -38,7 +38,8 @@ implements, [`docs/protocol-references.md`](docs/protocol-references.md).
 - **On-disk compact-block cache** (`redb`) filled by a background ingestor, with reorg rollback and
   automatic recovery from corruption or gaps.
 - **TLS by default** — plaintext requires an explicit opt-in flag.
-- **Prometheus metrics** — per-method request counts and latency histograms.
+- **Prometheus metrics on by default** (`127.0.0.1:9068`) and gRPC Server Reflection — per-method request
+  counts/latency histograms, and `grpcurl`-discoverable services with no local `.proto` checkout.
 - **Hardened by default** — up-front input validation, per-connection stream and keepalive limits, and a
   graceful drain on `SIGINT`/`SIGTERM`.
 - **Darkside test mode** — a controllable in-memory mock chain for deterministic wallet tests.
@@ -93,17 +94,22 @@ over the file.
 | `--zcash-conf` | — | read credentials and host/port from a `zcash.conf` |
 | `--data-dir` | `./lightwalletd-rs-data` | directory for the on-disk block cache |
 | `--start-height` | Sapling activation | height to ingest from when the cache is empty |
-| `--tls-cert` / `--tls-key` | — | PEM certificate / key (required unless `--no-tls-very-insecure`) |
-| `--metrics-bind` | — | address to serve Prometheus `/metrics` on (disabled if unset) |
+| `--tls-cert` / `--tls-key` | — | PEM certificate / key (required unless `--no-tls-very-insecure` or `--gen-cert-very-insecure`) |
+| `--metrics-bind` | `127.0.0.1:9068` | address to serve Prometheus `/metrics` on (disable with `--no-metrics`) |
+| `--log-level` | `info` | tracing filter (an explicit `RUST_LOG` env var always wins) |
+| `--log-file` | — | write JSON lines here instead of human-readable stderr output |
 
 Run `lightwalletd-rs --help` for the full list, including cache resync (`--sync-from-height`,
-`--redownload`) and per-connection resource limits (`--max-concurrent-streams`, `--keepalive-*`).
+`--redownload`, `--nocache`) and per-connection resource limits (`--max-concurrent-streams`, `--keepalive-*`).
+`--ingest-window`/`--ingest-concurrency` and `--log-level`/`--log-file` also read from
+`LWD_INGEST_WINDOW`/`LWD_INGEST_CONCURRENCY`/`LWD_LOG_LEVEL`/`LWD_LOG_FILE` when the flag is absent.
 
 ## TLS
 
 The gRPC server runs over TLS by default: `--tls-cert` and `--tls-key` are required unless you pass
-`--no-tls-very-insecure` (plaintext — development only, never in production). For local testing you can
-generate a self-signed pair:
+`--no-tls-very-insecure` (plaintext — development only, never in production) or `--gen-cert-very-insecure`
+(an in-memory self-signed certificate generated at startup — also development only). For local testing you
+can instead generate a self-signed pair yourself:
 
 ```sh
 openssl req -x509 -newkey rsa:4096 -nodes -keyout key.pem -out cert.pem -days 365 \
@@ -114,14 +120,24 @@ See [`docs/ARCHITECTURE.md#tls`](docs/ARCHITECTURE.md#tls) for details.
 
 ## Observability
 
-Set `--metrics-bind` to expose Prometheus metrics — per-method request counts and latency histograms — on
-`/metrics`:
+Prometheus metrics — per-method request counts and latency histograms — are served on `/metrics` at
+`127.0.0.1:9068` **by default**; override the address with `--metrics-bind` or turn it off entirely with
+`--no-metrics`:
 
 ```sh
+lightwalletd-rs ...                        # metrics on 127.0.0.1:9068
 lightwalletd-rs ... --metrics-bind 127.0.0.1:9100
+lightwalletd-rs ... --no-metrics
 ```
 
-Metrics are disabled when the flag is unset. See [`docs/ARCHITECTURE.md#metrics`](docs/ARCHITECTURE.md#metrics).
+See [`docs/ARCHITECTURE.md#metrics`](docs/ARCHITECTURE.md#metrics).
+
+gRPC Server Reflection is always registered, so `grpcurl -plaintext <addr> list` (and `describe`) work
+against a running server with no local `.proto` checkout needed.
+
+Logging defaults to human-readable text on stderr, controlled by `--log-level` (an explicit `RUST_LOG`
+always wins). `--log-file <path>` switches to JSON lines appended to that file instead. See
+[`docs/ARCHITECTURE.md#logging`](docs/ARCHITECTURE.md#logging).
 
 ## Docker
 
@@ -155,8 +171,9 @@ the internet, so it is not run in CI.
 
 `--darkside-very-insecure` serves a controllable, in-memory mock chain instead of proxying a real node, for
 deterministic wallet tests (reorgs, confirmations, edge cases). It exposes a `DarksideStreamer` control
-plane alongside the normal `CompactTxStreamer`. Testing only — never use it in production. See
-[`docs/ARCHITECTURE.md#darkside-mode`](docs/ARCHITECTURE.md#darkside-mode).
+plane alongside the normal `CompactTxStreamer`. Testing only — never use it in production. It shuts itself
+down after `--darkside-timeout-minutes` (default 30) so a forgotten or leaked mock server does not run
+forever. See [`docs/ARCHITECTURE.md#darkside-mode`](docs/ARCHITECTURE.md#darkside-mode).
 
 ### Donation address
 
