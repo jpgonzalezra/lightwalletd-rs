@@ -103,7 +103,27 @@ fn sha256d(data: &[u8]) -> Vec<u8> {
     Sha256::digest(Sha256::digest(data)).to_vec()
 }
 
+/// `OP_0`: pushes an empty array, read as the height 0.
+const OP_0: u8 = 0x00;
+/// `OP_1`: pushes the value 1. Together with `OP_16`, bounds the single-opcode small-integer pushes a
+/// BIP34 coinbase uses to encode heights 1..=16 (only length-prefixed pushes are used from height 17
+/// on, since 17 is the first height that no longer fits a single opcode).
+const OP_1: u8 = 0x51;
+/// `OP_16`: pushes the value 16, the top of the single-opcode small-integer range.
+const OP_16: u8 = 0x60;
+
+/// The value a BIP34 height-push decodes to for the genesis block, whose coinbase predates BIP34 and
+/// instead pushes the genesis target difficulty as a 4-byte little-endian value. Mapped to the true
+/// genesis height, 0 (matches `genesisTargetDifficulty` in the Go reference; see
+/// https://github.com/zcash/lightwalletd/issues/17#issuecomment-467110828).
+const GENESIS_TARGET_DIFFICULTY: u64 = 520_617_983;
+
 /// Read the block height from the coinbase transaction's BIP34 scriptSig.
+///
+/// Mirrors Go's `ReadScriptInt64`: the first script byte is either a small-integer push opcode
+/// (`OP_0`, or `OP_1`..`OP_16` for heights 1..16) or, for every larger height, the length (1..=8) of a
+/// little-endian push that follows. The genesis coinbase predates BIP34 and is handled as a special
+/// case below.
 fn coinbase_height(tx: &Transaction) -> Result<u64, ParseError> {
     let bundle = tx.transparent_bundle().ok_or(ParseError::NoHeight)?;
     let script = &bundle
@@ -113,13 +133,26 @@ fn coinbase_height(tx: &Transaction) -> Result<u64, ParseError> {
         .script_sig()
         .0
         .0;
-    let n = *script.first().ok_or(ParseError::NoHeight)? as usize;
-    if n == 0 || n > 8 || script.len() < 1 + n {
-        return Err(ParseError::NoHeight);
-    }
-    let mut bytes = [0u8; 8];
-    bytes[..n].copy_from_slice(&script[1..1 + n]);
-    Ok(u64::from_le_bytes(bytes))
+    let first = *script.first().ok_or(ParseError::NoHeight)?;
+    let height = if first == OP_0 {
+        0
+    } else if (OP_1..=OP_16).contains(&first) {
+        (first - (OP_1 - 1)) as u64
+    } else {
+        let n = first as usize;
+        if n > 8 || script.len() < 1 + n {
+            return Err(ParseError::NoHeight);
+        }
+        let mut bytes = [0u8; 8];
+        bytes[..n].copy_from_slice(&script[1..1 + n]);
+        u64::from_le_bytes(bytes)
+    };
+    // The genesis coinbase's push decodes to the genesis target difficulty, not a real height.
+    Ok(if height == GENESIS_TARGET_DIFFICULTY {
+        0
+    } else {
+        height
+    })
 }
 
 /// Build the compact form of a single transaction. A coinbase omits its (null) inputs.
@@ -362,6 +395,99 @@ mod tests {
         }
     }
 
+    /// Replace the BIP34 height-push segment (`[length_byte, height_bytes...]`) at the front of the
+    /// first testdata block's coinbase scriptSig with `replacement`, adjusting the scriptSig's own
+    /// CompactSize length prefix so the transaction stays well-formed. The prefix is assumed to fit in
+    /// a single byte (true for every real coinbase scriptSig, which is always well under 253 bytes).
+    /// Used to exercise `coinbase_height`'s opcode and genesis-pseudo-height handling against a real,
+    /// otherwise-unmodified coinbase transaction, the same way `out_of_range_coinbase_height_push_is_no_height`
+    /// locates and corrupts the push.
+    fn coinbase_with_height_push_replaced(replacement: &[u8]) -> Vec<u8> {
+        let raw = testdata_blocks().into_iter().next().unwrap();
+        let (_header, mut txs) = split_block(&raw).unwrap();
+        let coinbase = &mut txs[0];
+        let height = coinbase_height_from_raw(coinbase).unwrap();
+
+        let mut height_le = Vec::new();
+        let mut value = height;
+        while value > 0 {
+            height_le.push((value & 0xff) as u8);
+            value >>= 8;
+        }
+        let mut needle = vec![height_le.len() as u8];
+        needle.extend_from_slice(&height_le);
+        let positions: Vec<usize> = coinbase
+            .windows(needle.len())
+            .enumerate()
+            .filter(|(_, window)| *window == needle.as_slice())
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            positions.len(),
+            1,
+            "coinbase height push must be uniquely locatable"
+        );
+        let push_start = positions[0];
+        let script_len_index = push_start - 1;
+        let old_script_len = coinbase[script_len_index] as usize;
+        assert!(
+            old_script_len < 253,
+            "scriptSig length prefix assumed single-byte"
+        );
+        let new_script_len = old_script_len - needle.len() + replacement.len();
+        assert!(
+            new_script_len < 253,
+            "replacement must keep the length prefix single-byte"
+        );
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&coinbase[..script_len_index]);
+        out.push(new_script_len as u8);
+        out.extend_from_slice(replacement);
+        out.extend_from_slice(&coinbase[push_start + needle.len()..]);
+        out
+    }
+
+    #[test]
+    fn op_1_decodes_to_height_1() {
+        // 0x51 == OP_1, the single-opcode push BIP34 uses for height 1 (below the 8-byte
+        // length-prefixed push range this parser used to require).
+        let coinbase = coinbase_with_height_push_replaced(&[0x51]);
+        assert_eq!(coinbase_height_from_raw(&coinbase).unwrap(), 1);
+    }
+
+    #[test]
+    fn op_16_decodes_to_height_16() {
+        // 0x60 == OP_16, the top of the single-opcode small-integer range.
+        let coinbase = coinbase_with_height_push_replaced(&[0x60]);
+        assert_eq!(coinbase_height_from_raw(&coinbase).unwrap(), 16);
+    }
+
+    #[test]
+    fn op_0_decodes_to_height_0() {
+        // 0x00 == OP_0, which pushes an empty array read as the value 0 (matches Go's `ReadScriptInt64`).
+        let coinbase = coinbase_with_height_push_replaced(&[0x00]);
+        assert_eq!(coinbase_height_from_raw(&coinbase).unwrap(), 0);
+    }
+
+    #[test]
+    fn genesis_target_difficulty_push_maps_to_height_0() {
+        // 520,617,983 == 0x1f07ffff; the genesis coinbase predates BIP34 and instead pushes this
+        // value (the genesis target difficulty) as a 4-byte little-endian length-prefixed push. It
+        // decodes as a nonsensical height and is mapped to the true genesis height, 0.
+        let coinbase = coinbase_with_height_push_replaced(&[0x04, 0xff, 0xff, 0x07, 0x1f]);
+        assert_eq!(coinbase_height_from_raw(&coinbase).unwrap(), 0);
+    }
+
+    #[test]
+    fn length_prefixed_height_push_above_op_16_range_still_works() {
+        // A normal length-prefixed little-endian push (unaffected by the opcode/genesis handling)
+        // still decodes correctly; height 17 is the first height that no longer fits a single
+        // small-integer opcode, so it must go through the length-prefixed path.
+        let coinbase = coinbase_with_height_push_replaced(&[0x01, 17]);
+        assert_eq!(coinbase_height_from_raw(&coinbase).unwrap(), 17);
+    }
+
     #[test]
     fn v6_coinbase_shielded_counts_count_ironwood_actions() {
         // The activation coinbase (4,134,000) has no shielded components; the 4,134,683 coinbase
@@ -416,9 +542,11 @@ mod tests {
 
     #[test]
     fn out_of_range_coinbase_height_push_is_no_height() {
-        // Corrupt the coinbase BIP34 height-push length byte to an out-of-range value (0). The byte
-        // is located by its content: the push-length byte followed by the minimal little-endian
-        // height bytes forms a sequence that occurs exactly once in the coinbase transaction.
+        // Corrupt the coinbase BIP34 height-push length byte to an out-of-range value (255): larger
+        // than the maximum 8-byte push and outside both the `OP_0` and `OP_1..=OP_16` small-integer
+        // opcodes, so it can only be read as an (invalid) push length. The byte is located by its
+        // content: the push-length byte followed by the minimal little-endian height bytes forms a
+        // sequence that occurs exactly once in the coinbase transaction.
         let raw = testdata_blocks().into_iter().next().unwrap();
         let (header, mut txs) = split_block(&raw).unwrap();
         let coinbase = &mut txs[0];
@@ -443,7 +571,7 @@ mod tests {
             1,
             "coinbase height push must be uniquely locatable"
         );
-        coinbase[positions[0]] = 0;
+        coinbase[positions[0]] = 0xff;
 
         let mut corrupted = header;
         write_compact_size(&mut corrupted, txs.len() as u64);

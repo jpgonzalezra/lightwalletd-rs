@@ -71,20 +71,42 @@ impl Cache {
                 detail: format!("block.height {} does not match key {height}", block.height),
             });
         }
-        let bytes = block.encode_to_vec();
+        self.add_batch(std::slice::from_ref(block))
+    }
+
+    /// Store a run of consecutive compact blocks in a single transaction, appending onto the cache
+    /// tip. One commit — and thus one fsync — covers the whole batch, which is what makes windowed
+    /// catch-up cheap. The [`Self::add`] guards apply to the batch as a whole: the first block must
+    /// extend the current tip by exactly one, and the heights must be consecutive. An empty batch
+    /// is a no-op.
+    pub fn add_batch(&self, blocks: &[CompactBlock]) -> Result<(), CacheError> {
+        let Some(first) = blocks.first() else {
+            return Ok(());
+        };
         let txn = self.db.begin_write()?;
         {
             let mut table = txn.open_table(BLOCKS)?;
             if let Some((tip, _)) = table.last()? {
                 let tip = tip.value();
-                if height != tip + 1 {
+                if first.height != tip + 1 {
                     return Err(CacheError::Corruption {
-                        height,
-                        detail: format!("non-monotonic append: tip is {tip}, got {height}"),
+                        height: first.height,
+                        detail: format!("non-monotonic append: tip is {tip}, got {}", first.height),
                     });
                 }
             }
-            table.insert(height, bytes.as_slice())?;
+            for (expected, block) in (first.height..).zip(blocks) {
+                if block.height != expected {
+                    return Err(CacheError::Corruption {
+                        height: expected,
+                        detail: format!(
+                            "batch is not consecutive: expected {expected}, got {}",
+                            block.height
+                        ),
+                    });
+                }
+                table.insert(block.height, block.encode_to_vec().as_slice())?;
+            }
         }
         txn.commit()?;
         Ok(())
@@ -321,6 +343,55 @@ mod tests {
         }
         cache.truncate_from(0).unwrap();
         assert_eq!(cache.latest_height().unwrap(), None);
+    }
+
+    #[test]
+    fn add_batch_appends_consecutive_blocks_in_one_transaction() {
+        let (_dir, cache) = temp_cache();
+        cache.add(99, &block(99, 0)).unwrap();
+        let batch: Vec<CompactBlock> = (100..=105).map(|h| block(h, h as u8)).collect();
+
+        cache.add_batch(&batch).unwrap();
+
+        assert_eq!(cache.latest_height().unwrap(), Some(105));
+        assert_eq!(cache.get(103).unwrap(), Some(block(103, 103)));
+        assert!(cache.validate_light().is_ok());
+    }
+
+    #[test]
+    fn add_batch_of_empty_slice_is_a_no_op() {
+        let (_dir, cache) = temp_cache();
+        cache.add_batch(&[]).unwrap();
+        assert_eq!(cache.latest_height().unwrap(), None);
+    }
+
+    #[test]
+    fn add_batch_rejects_a_batch_that_does_not_extend_the_tip() {
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &block(100, 1)).unwrap();
+        let batch = vec![block(102, 2), block(103, 3)];
+
+        let result = cache.add_batch(&batch);
+
+        assert!(matches!(
+            result,
+            Err(CacheError::Corruption { height: 102, .. })
+        ));
+        assert_eq!(cache.latest_height().unwrap(), Some(100)); // aborted, nothing written
+    }
+
+    #[test]
+    fn add_batch_rejects_a_non_consecutive_batch_without_partial_writes() {
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &block(100, 1)).unwrap();
+        let batch = vec![block(101, 2), block(103, 3)];
+
+        let result = cache.add_batch(&batch);
+
+        assert!(matches!(result, Err(CacheError::Corruption { .. })));
+        // The aborted transaction must not have committed the valid prefix.
+        assert_eq!(cache.latest_height().unwrap(), Some(100));
+        assert!(cache.validate_light().is_ok());
     }
 
     #[test]

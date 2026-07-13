@@ -15,11 +15,38 @@ use crate::encoding;
 use crate::filter;
 use crate::proto::{BoxStream, CompactTx, GetMempoolTxRequest, RawTransaction};
 
+use super::mempool_monitor::MempoolSnapshot;
 use super::{Streamer, decode_hex};
 
 /// Max exclude-txid suffixes a single `GetMempoolTx` request may submit, bounding the
 /// O(suffixes × mempool entries) exclusion scan per request.
 const MAX_EXCLUDE_TXID_SUFFIXES: usize = 10_000;
+
+/// How often an open `GetMempoolStream` re-checks staleness while idle — i.e. while no new snapshot
+/// has been published, the common case when the node is down and the monitor has stopped publishing
+/// (`tokio::sync::watch::Receiver::changed` only wakes on an actual publish, so a stream waiting on it
+/// alone would never notice time passing). Matches the monitor's own refresh cadence, so a stalled
+/// stream notices staleness about as promptly as a healthy poll would.
+const STALENESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The status served instead of a snapshot older than the staleness cutoff
+/// (`mempool_monitor::MempoolSnapshot::is_stale`), on both `GetMempoolTx` and `GetMempoolStream`.
+/// `Unavailable` is the repo's convention for a node the service cannot get current data from
+/// (docs/decisions/0010-node-error-grpc-mapping.md), which is exactly this condition: the node RPC has
+/// been failing long enough that the last-known-good mempool can no longer be trusted as current.
+fn stale_mempool_status() -> Status {
+    Status::unavailable(
+        "mempool snapshot is stale: the backend node has not refreshed it recently and may be unavailable",
+    )
+}
+
+/// `Err` when `snapshot` is too old to serve; see [`stale_mempool_status`].
+fn check_stale(snapshot: &MempoolSnapshot) -> Result<(), Status> {
+    if snapshot.is_stale() {
+        return Err(stale_mempool_status());
+    }
+    Ok(())
+}
 
 pub(super) async fn get_mempool_tx(
     streamer: &Streamer,
@@ -48,6 +75,7 @@ pub(super) async fn get_mempool_tx(
     };
 
     let snapshot = handle.current();
+    check_stale(&snapshot)?;
     let stream = try_stream! {
         let pools = filter::Pools::from_pool_types(&pool_types);
         let wire_txids: Vec<&[u8]> =
@@ -100,6 +128,7 @@ pub(super) async fn get_mempool_stream(
     let mut receiver = handle.subscribe();
     let stream = try_stream! {
         let mut snapshot = receiver.borrow_and_update().clone();
+        check_stale(&snapshot)?;
         // Baseline tip the stream resyncs against; established from the first non-empty snapshot,
         // since the monitor publishes an empty one (tip "") before its first refresh completes.
         let mut start_tip = String::new();
@@ -122,10 +151,22 @@ pub(super) async fn get_mempool_stream(
                 };
             }
             sent = snapshot.entries.len();
-            if receiver.changed().await.is_err() {
-                break; // monitor gone (shouldn't happen) ⇒ end the stream
+            // Wake on whichever comes first: a new snapshot, or a staleness-poll tick. A plain
+            // `receiver.changed().await` would hang forever once the node goes down, since the
+            // monitor stops publishing on a failed refresh (mempool_monitor::start) — so an already
+            // open stream would keep serving the same increasingly stale snapshot with no signal,
+            // exactly the failure mode the staleness contract closes
+            // (docs/decisions/0021-mempool-staleness-contract.md).
+            tokio::select! {
+                changed = receiver.changed() => {
+                    if changed.is_err() {
+                        break; // monitor gone (shouldn't happen) ⇒ end the stream
+                    }
+                    snapshot = receiver.borrow_and_update().clone();
+                }
+                _ = tokio::time::sleep(STALENESS_POLL_INTERVAL) => {}
             }
-            snapshot = receiver.borrow_and_update().clone();
+            check_stale(&snapshot)?;
         }
     };
     Ok(Response::new(Box::pin(stream)))
@@ -215,17 +256,24 @@ mod tests {
     use crate::testutil::{FakeNode, shielded_v5_tx, temp_cache};
 
     use super::super::Streamer;
-    use super::super::mempool_monitor::{MempoolEntry, MempoolHandle, MempoolSnapshot};
+    use super::super::mempool_monitor::{
+        MempoolEntry, MempoolHandle, MempoolSnapshot, STALENESS_CUTOFF,
+    };
     use super::MAX_EXCLUDE_TXID_SUFFIXES;
 
-    /// A `Streamer` whose mempool is served from `snapshot`, over a `FakeNode` that panics on any
+    /// A `Streamer` whose mempool is served from `handle`, over a `FakeNode` that panics on any
     /// RPC — so a passing test proves the snapshot path issues zero node calls.
-    fn streamer_with_snapshot(snapshot: MempoolSnapshot) -> (tempfile::TempDir, Streamer) {
+    fn streamer_with_handle(handle: MempoolHandle) -> (tempfile::TempDir, Streamer) {
         let (dir, cache) = temp_cache();
         let node = Arc::new(FakeNode::default());
         let streamer = Streamer::new(node, Arc::new(cache), "main".to_string(), None)
-            .with_mempool_monitor(MempoolHandle::fixed(snapshot));
+            .with_mempool_monitor(handle);
         (dir, streamer)
+    }
+
+    /// A `Streamer` whose mempool is served from a fixed, always-fresh `snapshot`.
+    fn streamer_with_snapshot(snapshot: MempoolSnapshot) -> (tempfile::TempDir, Streamer) {
+        streamer_with_handle(MempoolHandle::fixed(snapshot))
     }
 
     fn entry_from(raw: &[u8]) -> MempoolEntry {
@@ -240,11 +288,10 @@ mod tests {
         }
     }
 
+    /// A snapshot fresh as of now, so it serves normally regardless of paused time — until a test
+    /// explicitly advances the clock past `STALENESS_CUTOFF`.
     fn snapshot_of(entries: Vec<MempoolEntry>) -> MempoolSnapshot {
-        MempoolSnapshot {
-            tip_hash: "aa".to_string(),
-            entries,
-        }
+        MempoolSnapshot::fresh("aa".to_string(), entries)
     }
 
     async fn mempool_txs(streamer: &Streamer, request: GetMempoolTxRequest) -> Vec<CompactTx> {
@@ -379,6 +426,99 @@ mod tests {
 
         assert_eq!(txs.len(), 1);
         assert!(txs[0].spends.is_empty() && txs[0].outputs.is_empty() && txs[0].actions.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_mempool_tx_returns_unavailable_once_the_snapshot_is_older_than_the_cutoff() {
+        let (raw, _, _) = shielded_v5_tx();
+        let entry = entry_from(&raw);
+        let (_dir, streamer) = streamer_with_snapshot(snapshot_of(vec![entry]));
+
+        // Still fresh: served normally.
+        assert!(
+            !mempool_txs(&streamer, GetMempoolTxRequest::default())
+                .await
+                .is_empty()
+        );
+
+        tokio::time::advance(STALENESS_CUTOFF + std::time::Duration::from_secs(1)).await;
+
+        let status = streamer
+            .get_mempool_tx(Request::new(GetMempoolTxRequest::default()))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status.code(), Code::Unavailable);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_mempool_stream_returns_unavailable_when_the_initial_snapshot_is_already_stale() {
+        let (raw, _, _) = shielded_v5_tx();
+        let entry = entry_from(&raw);
+        let (_dir, streamer) = streamer_with_snapshot(snapshot_of(vec![entry]));
+
+        tokio::time::advance(STALENESS_CUTOFF + std::time::Duration::from_secs(1)).await;
+
+        let mut stream = streamer
+            .get_mempool_stream(Request::new(crate::proto::Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let status = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(status.code(), Code::Unavailable);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_mempool_stream_terminates_with_unavailable_when_it_goes_stale_mid_stream() {
+        let (raw, _, _) = shielded_v5_tx();
+        let entry = entry_from(&raw);
+        let (_dir, streamer) = streamer_with_snapshot(snapshot_of(vec![entry]));
+
+        let mut stream = streamer
+            .get_mempool_stream(Request::new(crate::proto::Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // The stream is open and healthy: the one entry is delivered normally.
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.height, 0);
+
+        // No new block, no new tx — the node just stops answering. The monitor never publishes
+        // again, so `watch::Receiver::changed` alone would hang forever; the stream must still notice
+        // via its staleness poll and end with `Unavailable` instead of hanging open silently.
+        let status = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(status.code(), Code::Unavailable);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_mempool_tx_recovers_once_a_fresh_snapshot_is_published() {
+        let (raw, _, _) = shielded_v5_tx();
+        let entry = entry_from(&raw);
+        let handle = MempoolHandle::fixed(snapshot_of(vec![entry.clone()]));
+        let (_dir, streamer) = streamer_with_handle(handle.clone());
+
+        tokio::time::advance(STALENESS_CUTOFF + std::time::Duration::from_secs(1)).await;
+        assert_eq!(
+            streamer
+                .get_mempool_tx(Request::new(GetMempoolTxRequest::default()))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            Code::Unavailable
+        );
+
+        // The node recovers and the monitor's next tick publishes a freshly refreshed snapshot.
+        handle.publish(snapshot_of(vec![entry]));
+
+        let txids: Vec<_> = mempool_txs(&streamer, GetMempoolTxRequest::default())
+            .await
+            .into_iter()
+            .map(|tx| tx.txid)
+            .collect();
+        assert_eq!(txids.len(), 1);
     }
 
     #[test]

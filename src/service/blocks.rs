@@ -101,9 +101,12 @@ pub(super) async fn get_block_range_nullifiers(
     request: Request<BlockRange>,
 ) -> Result<Response<BoxStream<CompactBlock>>, Status> {
     let range = request.into_inner();
-    // Nullifiers-only ignores the requested pools, but an invalid pool type is still rejected up
-    // front, for parity with `get_block_range`.
+    // An invalid pool type is rejected up front, for parity with `get_block_range`. The requested
+    // pools are otherwise honored (transparent is always dropped — see
+    // `filter::filter_block_to_pools_nullifiers_only`): this is not the legacy "ignore pool_types
+    // entirely" behavior.
     filter::validate_pool_types(&range.pool_types)?;
+    let pool_types = range.pool_types;
     let (Some(start), Some(end)) = (range.start, range.end) else {
         return Err(Status::invalid_argument(
             "get_block_range_nullifiers: must specify start and end heights",
@@ -116,7 +119,7 @@ pub(super) async fn get_block_range_nullifiers(
         streamer.node.clone(),
         start,
         end,
-        filter::nullifiers_only,
+        move |block| filter::filter_block_to_pools_nullifiers_only(block, &pool_types),
     );
     Ok(Response::new(stream))
 }

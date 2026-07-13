@@ -58,6 +58,10 @@ pub struct Upgrade {
 pub struct GetBlockVerbose {
     /// Block hash, big-endian hex (display order).
     pub hash: String,
+    /// Txids of the block's transactions, big-endian hex (display order), in block order. Used to
+    /// cross-check the txids we compute locally with librustzcash against the node's view.
+    #[serde(default)]
+    pub tx: Vec<String>,
     /// Note-commitment tree sizes as of this block.
     #[serde(default)]
     pub trees: Trees,

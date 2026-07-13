@@ -403,6 +403,9 @@ impl DarksideState {
         let block = self.block_at(height)?;
         Ok(GetBlockVerbose {
             hash: block.display_hash(),
+            // No txid list: the fetch-time txid cross-check is skipped for darkside blocks, whose
+            // staged transactions are already parsed by the same librustzcash code path.
+            tx: Vec::new(),
             trees: Trees {
                 sapling: TreeSize {
                     size: block.sapling_size,

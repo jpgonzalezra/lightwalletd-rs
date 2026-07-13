@@ -146,6 +146,8 @@ Protocol upgrades:
 
 - [0018](decisions/0018-parse-time-branch-id-hardcoded.md) — the parse-time consensus branch ID stays hardcoded at `Nu5`: it is only consulted for pre-v5 transactions (where it does not affect the legacy txid); v5/v6 read the branch ID from the wire.
 - [0019](decisions/0019-pin-librustzcash-prereleases-nu63.md) — NU6.3 support rides the exact-pinned librustzcash pre-release cohort, re-bumped when the finals are published; the crates move together (`cargo tree -d` must show one `zcash_protocol`/`zcash_address`).
+- [0020](decisions/0020-windowed-ingest-batched-commits.md) — catch-up ingests windows of blocks concurrently (`--ingest-window`/`--ingest-concurrency`) committed in one cache transaction per window, with a fetch-time txid cross-check against the node.
+- [0021](decisions/0021-mempool-staleness-contract.md) — mempool snapshots carry a refresh timestamp; snapshots older than a 60 s cutoff make `GetMempoolTx`/`GetMempoolStream` return `Unavailable` instead of serving last-known-good data during a node outage.
 
 Structure and seams:
 
@@ -399,16 +401,22 @@ The ingestor (`src/ingestor.rs`) runs as a background task. Before it starts, `r
 `connect_with_retry` (`src/lib.rs`): `getblockchaininfo` is retried indefinitely with capped exponential backoff (escalating
 to `error!` logs after several attempts), so the server waits for a slow-to-start node instead of exiting. Each
 step then reads the tip height **and** hash from a single `getblockchaininfo`. If the cache is behind, it
-fetches the next block (verifying the returned block's height matches the request and that its bytes hash
-to the hash from the verbose response), checks that its
-`prevHash` chains onto the cached tip, and appends it or — on a mismatch — rolls back one block. If the cache is
+fetches the next **window** of up to `--ingest-window` consecutive blocks (default 64) with at most
+`--ingest-concurrency` node requests in flight (default 8); each fetched block is verified (returned height
+matches the request, bytes hash to the hash from the verbose response, and locally computed txids match the
+node's verbose txid list when provided — a cross-check against silent parser/node divergence). The results are
+walked in height order: the longest prefix whose `prevHash` links chain onto the cached tip is committed in a
+**single cache transaction** (one fsync per window, not per block — see ADR 0020), and per-height fetch
+failures past a non-empty prefix only shrink the window rather than failing the step. If the *first* block of
+the window does not chain, a reorg replaced our tip: roll back one block. If the cache is
 already at the tip height, it compares the tip *hash*: an equal hash means synced, a differing hash is an
-in-place tip reorg and rolls back one block. If the cache is *ahead* of the node's reported tip (the node
-rolled back), it rolls back one block as well. Every rollback is floored at `--start-height`: since the cache
-only holds heights at or above it, a reorg that would cross the floor is necessarily deeper than the entire
-cache — a sign of a broken or inconsistent node rather than a real reorg — so it is refused
-(`ReorgBelowStartHeight`) and handled as a node-error backoff (slow-poll) instead of draining the cache past
-the floor or hot-looping; the `truncate_from` operator levers above may still empty the cache on purpose. A
+in-place tip reorg and rolls back one block. If the cache is *ahead* of the node's reported tip, the node's
+tip hash is compared with the cached block at that height: an equal hash means the node is merely behind
+(restarted or re-syncing) and the step idles with the cache intact; a differing hash is a genuine reorg onto a
+shorter chain and rolls back one block. Every rollback is floored at `--start-height`: a reorg that would
+cross the floor is deeper than the entire cache, so the cache is **emptied** and re-ingestion resumes from
+`--start-height` on the node's chain (an empty cache chains onto anything) rather than wedging against the
+floor; the `truncate_from` operator levers above may still empty the cache on purpose. A
 cache-corruption error truncates from the corrupt point and
 retries immediately (bounded, so recovery can never spin), while node/transport errors back off. When the cache
 reaches the tip it polls every couple of seconds. The cache persists across restarts, so the ingestor resumes

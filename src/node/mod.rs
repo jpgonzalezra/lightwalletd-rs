@@ -251,11 +251,16 @@ impl NodeRpc for NodeClient {
         start: u64,
         end: u64,
     ) -> Result<Vec<String>, NodeError> {
-        self.request(
-            "getaddresstxids",
-            serde_json::json!([{ "addresses": addresses, "start": start, "end": end }]),
-        )
-        .await
+        // zebrad tolerates `"end": 0`, but zcashd-style backends reject a request with
+        // `start > 0` and `end == 0` (an open-ended range). Match the Go reference
+        // (ZcashdRpcRequestGetaddresstxids's `End uint64 \`json:"end,omitempty"\`) and simply
+        // omit the key when the caller didn't set an upper bound.
+        let mut params = serde_json::json!({ "addresses": addresses, "start": start });
+        if end != 0 {
+            params["end"] = serde_json::json!(end);
+        }
+        self.request("getaddresstxids", serde_json::json!([params]))
+            .await
     }
 
     async fn get_subtrees(
@@ -411,6 +416,63 @@ mod tests {
         let rendered = format!("{client:?}");
         assert!(rendered.contains("***"));
         assert!(!rendered.contains("supersecret"));
+    }
+
+    /// Matches a `getaddresstxids` request body by whether its single params object has an
+    /// `"end"` key, rather than string-matching the raw JSON (which is brittle to key ordering).
+    struct HasEndKey(bool);
+
+    impl wiremock::Match for HasEndKey {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+                return false;
+            };
+            let has_end = body["params"][0]
+                .as_object()
+                .is_some_and(|params| params.contains_key("end"));
+            has_end == self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn get_address_txids_omits_end_when_the_range_is_open_ended() {
+        let server = MockServer::start().await;
+        // Mounted with a matcher that requires the body to lack an "end" key; if the client
+        // still sends the key for an open-ended range (end == 0), the request 404s and the
+        // call below fails.
+        Mock::given(method("POST"))
+            .and(HasEndKey(false))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": [],
+            })))
+            .mount(&server)
+            .await;
+
+        let txids = client_for(&server)
+            .get_address_txids(&["t1abc".to_string()], 100, 0)
+            .await
+            .unwrap();
+        assert!(txids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_address_txids_includes_end_when_nonzero() {
+        let server = MockServer::start().await;
+        // Mounted with a matcher that requires the body to have an "end" key; if the client
+        // omits it for a closed range, the request 404s and the call below fails.
+        Mock::given(method("POST"))
+            .and(HasEndKey(true))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": [],
+            })))
+            .mount(&server)
+            .await;
+
+        let txids = client_for(&server)
+            .get_address_txids(&["t1abc".to_string()], 100, 200)
+            .await
+            .unwrap();
+        assert!(txids.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

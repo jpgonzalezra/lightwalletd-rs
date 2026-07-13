@@ -7,14 +7,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::compact::{self, ParseError};
 use crate::encoding;
 use crate::node::{NodeError, NodeRpc};
 use crate::proto::CompactTx;
 
-/// Minimum delay between two mempool refreshes; also the wallet-visible staleness bound.
+/// Minimum delay between two mempool refreshes; the wallet-visible staleness bound while the node is
+/// healthy.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long a snapshot may go without a successful refresh before it is too stale to serve, per the
+/// fault-path staleness contract (docs/decisions/0021-mempool-staleness-contract.md). Chosen well
+/// above [`REFRESH_INTERVAL`] (2 s) so a single slow tick or a couple of transient retries never trip
+/// it, and well under Zcash's ~75 s block time so a real outage is surfaced to wallets before a whole
+/// block interval passes rather than being confused with "no new block yet".
+pub(crate) const STALENESS_CUTOFF: Duration = Duration::from_secs(60);
 
 /// One mempool transaction, parsed once and shared by both mempool methods.
 #[derive(Clone)]
@@ -35,14 +44,39 @@ pub struct MempoolSnapshot {
     pub tip_hash: String,
     /// The deduplicated mempool entries, in `getrawmempool` order.
     pub entries: Vec<MempoolEntry>,
+    /// When this snapshot was confirmed fresh by a successful node refresh; `None` before the
+    /// monitor's first successful refresh, which [`Self::is_stale`] treats as maximally stale so no
+    /// client is ever served never-fetched data as if it were current.
+    refreshed_at: Option<Instant>,
 }
 
 impl MempoolSnapshot {
-    /// The snapshot published before the first refresh completes: no tip, no entries.
+    /// The snapshot published before the first refresh completes: no tip, no entries, and — since it
+    /// was never actually fetched — already stale.
     fn empty() -> Self {
         Self {
             tip_hash: String::new(),
             entries: Vec::new(),
+            refreshed_at: None,
+        }
+    }
+
+    /// Build a snapshot stamped fresh as of now. Used by a successful [`refresh`] and by tests that
+    /// need a snapshot serving normally regardless of paused time.
+    pub(crate) fn fresh(tip_hash: String, entries: Vec<MempoolEntry>) -> Self {
+        Self {
+            tip_hash,
+            entries,
+            refreshed_at: Some(Instant::now()),
+        }
+    }
+
+    /// Whether this snapshot is older than [`STALENESS_CUTOFF`] (or was never refreshed) and must not
+    /// be served: see docs/decisions/0021-mempool-staleness-contract.md.
+    pub fn is_stale(&self) -> bool {
+        match self.refreshed_at {
+            None => true,
+            Some(refreshed_at) => refreshed_at.elapsed() > STALENESS_CUTOFF,
         }
     }
 }
@@ -71,6 +105,13 @@ impl MempoolHandle {
     pub(crate) fn fixed(snapshot: MempoolSnapshot) -> Self {
         let (sender, _receiver) = watch::channel(Arc::new(snapshot));
         Self { sender }
+    }
+
+    /// Publish a new snapshot on a handle built with [`Self::fixed`], simulating the monitor's next
+    /// successful refresh — for tests exercising recovery after staleness.
+    #[cfg(test)]
+    pub(crate) fn publish(&self, snapshot: MempoolSnapshot) {
+        self.sender.send_replace(Arc::new(snapshot));
     }
 }
 
@@ -143,10 +184,10 @@ async fn refresh(
             compact,
         });
     }
-    Ok(MempoolSnapshot {
-        tip_hash: state.tip_hash.clone(),
-        entries: state.entries.clone(),
-    })
+    Ok(MempoolSnapshot::fresh(
+        state.tip_hash.clone(),
+        state.entries.clone(),
+    ))
 }
 
 /// Start the monitor: publish an empty initial snapshot, spawn the background loop (refresh first,
@@ -489,5 +530,41 @@ mod tests {
         let third = refresh(&node, &mut state).await.unwrap();
         assert_eq!(third.entries.len(), 2);
         assert_eq!(third.tip_hash, "bb");
+    }
+
+    #[test]
+    fn empty_snapshot_is_stale() {
+        // Never refreshed: must not be served as if it were current data.
+        assert!(MempoolSnapshot::empty().is_stale());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fresh_snapshot_is_not_stale_until_the_cutoff_elapses() {
+        let snapshot = MempoolSnapshot::fresh("aa".to_string(), Vec::new());
+        assert!(!snapshot.is_stale());
+
+        tokio::time::advance(STALENESS_CUTOFF - Duration::from_secs(1)).await;
+        assert!(!snapshot.is_stale());
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(snapshot.is_stale());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_successful_refresh_produces_a_snapshot_that_goes_stale_after_the_cutoff() {
+        let (raw, _, _) = crate::testutil::shielded_v5_tx();
+        let txid = compact::txid_display(&raw).unwrap();
+        let node = ScriptedNode::new(
+            vec!["aa"],
+            vec![txid.clone()],
+            vec![(txid.clone(), hex::encode(&raw), 0)],
+        );
+        let mut state = MonitorState::empty();
+
+        let snapshot = refresh(&node, &mut state).await.unwrap();
+        assert!(!snapshot.is_stale());
+
+        tokio::time::advance(STALENESS_CUTOFF + Duration::from_secs(1)).await;
+        assert!(snapshot.is_stale());
     }
 }

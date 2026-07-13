@@ -12,6 +12,10 @@ use zcash_address::unified::Encoding;
 
 /// Default per-connection in-flight request / HTTP-2 stream cap.
 pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 256;
+/// Default blocks fetched and committed per ingest window while catching up to the node tip.
+pub const DEFAULT_INGEST_WINDOW: usize = 64;
+/// Default concurrent block fetches from the node while catching up.
+pub const DEFAULT_INGEST_CONCURRENCY: usize = 8;
 /// Default keepalive ping interval, in seconds, on an idle connection.
 pub const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 60;
 /// Default time, in seconds, to wait for a keepalive ack before dropping a connection.
@@ -135,6 +139,14 @@ pub struct Cli {
     /// Time (seconds) to wait for a keepalive ack before dropping the connection.
     #[arg(long, default_value_t = DEFAULT_KEEPALIVE_TIMEOUT_SECS)]
     pub keepalive_timeout_secs: u64,
+
+    /// Blocks fetched and committed per ingest window while catching up to the node tip.
+    #[arg(long, default_value_t = DEFAULT_INGEST_WINDOW)]
+    pub ingest_window: usize,
+
+    /// Concurrent block fetches from the node while catching up.
+    #[arg(long, default_value_t = DEFAULT_INGEST_CONCURRENCY)]
+    pub ingest_concurrency: usize,
 }
 
 /// Resolved runtime configuration.
@@ -164,6 +176,17 @@ pub struct Config {
     pub donation_address: Option<String>,
     /// gRPC server resource limits / hardening.
     pub limits: ServerLimits,
+    /// Ingestor catch-up tuning.
+    pub ingest: IngestConfig,
+}
+
+/// Ingestor catch-up tuning: how aggressively the cache is filled while behind the node tip.
+#[derive(Debug, Clone)]
+pub struct IngestConfig {
+    /// Blocks fetched and committed per window (one cache transaction per window).
+    pub window: usize,
+    /// Concurrent block fetches from the node within a window.
+    pub concurrency: usize,
 }
 
 /// gRPC server resource limits applied to the shared tonic `Server` builder.
@@ -270,6 +293,9 @@ impl Cli {
                 "--keepalive-interval-secs and --keepalive-timeout-secs must be greater than 0"
             );
         }
+        if self.ingest_window == 0 || self.ingest_concurrency == 0 {
+            anyhow::bail!("--ingest-window and --ingest-concurrency must be greater than 0");
+        }
 
         Ok(Config {
             grpc_bind: self.grpc_bind,
@@ -292,6 +318,10 @@ impl Cli {
                 keepalive_interval: Duration::from_secs(self.keepalive_interval_secs),
                 keepalive_timeout: Duration::from_secs(self.keepalive_timeout_secs),
             },
+            ingest: IngestConfig {
+                window: self.ingest_window,
+                concurrency: self.ingest_concurrency,
+            },
         })
     }
 }
@@ -305,10 +335,36 @@ struct ZcashConf {
     rpcport: Option<u16>,
 }
 
+/// An actionable error explaining that `--zcash-conf` expects an ini-style `zcash.conf`, not a
+/// zebrad TOML config, and pointing the operator at the flags that work directly with zebrad.
+fn not_ini_style_error(path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "--zcash-conf {} looks like a zebrad TOML config, not an ini-style zcash.conf \
+         (rpcuser/rpcpassword/rpcbind/rpcport key=value pairs); parsing it would silently \
+         yield no credentials and fall back to 127.0.0.1:8232 with no auth. For zebrad, drop \
+         --zcash-conf and set --rpc-url (or --rpc-host/--rpc-port) and, if zebrad's RPC has \
+         auth enabled, --rpc-user/--rpc-password instead.",
+        path.display()
+    )
+}
+
 /// Parse the `key=value` lines of a `zcash.conf`, ignoring comments and blank lines.
+///
+/// Fails fast, instead of silently extracting nothing, when the file is evidently a zebrad TOML
+/// config rather than an ini-style `zcash.conf`: either its extension is `.toml`, or its content
+/// has a `[section]` header (TOML syntax that an ini `key=value` parser would just skip over).
 fn parse_zcash_conf(path: &Path) -> Result<ZcashConf> {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
+        return Err(not_ini_style_error(path));
+    }
+
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading zcash.conf at {}", path.display()))?;
+
+    if looks_like_toml(&text) {
+        return Err(not_ini_style_error(path));
+    }
+
     let mut conf = ZcashConf::default();
     for line in text.lines() {
         let line = line.trim();
@@ -338,6 +394,21 @@ fn parse_zcash_conf(path: &Path) -> Result<ZcashConf> {
     Ok(conf)
 }
 
+/// Whether `text` contains a TOML `[section]` (or `[[array-of-tables]]`) header — evidence the
+/// file is a zebrad TOML config rather than an ini-style `zcash.conf`, whose `key=value` lines
+/// never start with `[`.
+fn looks_like_toml(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        if !(line.starts_with('[') && line.ends_with(']')) {
+            return false;
+        }
+        // A bracketed section header, e.g. `[rpc]` or `[[servers]]`; not e.g. a bare
+        // `key=[1, 2, 3]` TOML array assignment, which contains an `=` before the `[`.
+        !line.contains('=')
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +434,65 @@ mod tests {
                 rpcport: Some(18232),
             }
         );
+    }
+
+    #[test]
+    fn parse_zcash_conf_rejects_a_toml_extension_file() {
+        let f = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
+        std::fs::write(f.path(), "cache_dir = \"/var/cache/zebra\"\n").unwrap();
+
+        let error = parse_zcash_conf(f.path()).unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("--rpc-url"));
+        assert!(message.contains("--rpc-user"));
+        assert!(message.contains("--rpc-password"));
+        assert!(message.contains("--rpc-host"));
+        assert!(message.contains("--rpc-port"));
+    }
+
+    #[test]
+    fn parse_zcash_conf_rejects_a_file_with_toml_section_headers() {
+        // A zebrad.toml with no recognizable extension (e.g. renamed, or piped in some other
+        // way) is still caught by its `[rpc]` section header, which an ini `key=value` parser
+        // would otherwise just skip over silently.
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            f,
+            "[rpc]\nlisten_addr = \"127.0.0.1:8232\"\n\n[state]\ncache_dir = \"/var/cache\"\n"
+        )
+        .unwrap();
+
+        let error = parse_zcash_conf(f.path()).unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("--rpc-url"));
+        assert!(message.contains("zebrad"));
+    }
+
+    #[test]
+    fn parse_zcash_conf_accepts_a_normal_ini_style_file() {
+        // A plain zcash.conf, with no TOML section headers, still parses normally.
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "rpcuser=alice\nrpcpassword=s3cret\nrpcport=8232\n").unwrap();
+
+        let conf = parse_zcash_conf(f.path()).unwrap();
+
+        assert_eq!(conf.rpcuser, Some("alice".to_string()));
+        assert_eq!(conf.rpcpassword, Some("s3cret".to_string()));
+        assert_eq!(conf.rpcport, Some(8232));
+    }
+
+    #[test]
+    fn resolve_surfaces_the_toml_rejection_error() {
+        let f = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
+        std::fs::write(f.path(), "[rpc]\nlisten_addr = \"127.0.0.1:8232\"\n").unwrap();
+
+        let error = cli_with(None, None, None, None, None, Some(f.path().to_path_buf()))
+            .resolve()
+            .unwrap_err();
+
+        assert!(error.to_string().contains("--rpc-url"));
     }
 
     fn cli_with(
@@ -395,6 +525,8 @@ mod tests {
             max_concurrent_streams: DEFAULT_MAX_CONCURRENT_STREAMS,
             keepalive_interval_secs: DEFAULT_KEEPALIVE_INTERVAL_SECS,
             keepalive_timeout_secs: DEFAULT_KEEPALIVE_TIMEOUT_SECS,
+            ingest_window: DEFAULT_INGEST_WINDOW,
+            ingest_concurrency: DEFAULT_INGEST_CONCURRENCY,
         }
     }
 
@@ -515,6 +647,26 @@ mod tests {
     fn resolve_rejects_zero_max_concurrent_streams() {
         let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.max_concurrent_streams = 0;
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn resolve_uses_default_ingest_tuning() {
+        let config = cli_with(None, None, Some("http://node"), None, None, None)
+            .resolve()
+            .unwrap();
+        assert_eq!(config.ingest.window, DEFAULT_INGEST_WINDOW);
+        assert_eq!(config.ingest.concurrency, DEFAULT_INGEST_CONCURRENCY);
+    }
+
+    #[test]
+    fn resolve_rejects_zero_ingest_tuning() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.ingest_window = 0;
+        assert!(cli.resolve().is_err());
+
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.ingest_concurrency = 0;
         assert!(cli.resolve().is_err());
     }
 

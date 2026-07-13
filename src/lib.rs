@@ -134,7 +134,12 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             "lightwalletd-rs starting"
         );
 
-        tokio::spawn(ingestor::run(node.clone(), cache.clone(), start_height));
+        tokio::spawn(ingestor::run(
+            node.clone(),
+            cache.clone(),
+            start_height,
+            config.ingest.clone(),
+        ));
 
         // One shared mempool monitor fans the mempool out to all clients, so node load stays
         // independent of the number of connected wallets.

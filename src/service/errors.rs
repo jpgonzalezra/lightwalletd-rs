@@ -44,6 +44,12 @@ impl From<FetchError> for Status {
             } => Status::unavailable(format!(
                 "node returned bytes hashing to {computed}, expected {requested}"
             )),
+            // A txid/tx-count divergence between our parser and the node is an integrity failure on
+            // our side of the trust boundary, not a transient node condition: not retryable.
+            err @ (FetchError::TxidMismatch { .. } | FetchError::TxCountMismatch { .. }) => {
+                Status::internal(err.to_string())
+            }
+            FetchError::ParseTask(e) => Status::internal(e.to_string()),
         }
     }
 }

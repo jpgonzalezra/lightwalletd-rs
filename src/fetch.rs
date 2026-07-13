@@ -32,6 +32,32 @@ pub enum FetchError {
         /// Display-order hash computed from the returned bytes.
         computed: String,
     },
+    /// A locally computed txid disagrees with the node's txid list for the block. Either would
+    /// silently corrupt wallet spend detection if served, so the block is rejected instead.
+    #[error("txid mismatch at height {height} tx {index}: node says {node}, computed {computed}")]
+    TxidMismatch {
+        /// Height of the block.
+        height: u64,
+        /// Index of the transaction within the block.
+        index: usize,
+        /// Display-order txid from the node's verbose `getblock`.
+        node: String,
+        /// Display-order txid computed locally.
+        computed: String,
+    },
+    /// The parsed block has a different transaction count than the node's verbose txid list.
+    #[error("tx count mismatch at height {height}: node lists {node}, parsed {computed}")]
+    TxCountMismatch {
+        /// Height of the block.
+        height: u64,
+        /// Number of txids in the node's verbose `getblock`.
+        node: usize,
+        /// Number of transactions in the locally parsed block.
+        computed: usize,
+    },
+    /// The blocking parse task did not complete (runtime shutdown or a parser panic).
+    #[error("block parse task failed: {0}")]
+    ParseTask(#[from] tokio::task::JoinError),
 }
 
 /// Fetch the block at `height` and build its `CompactBlock`, including the note-commitment tree sizes.
@@ -41,7 +67,9 @@ pub enum FetchError {
 pub async fn compact_block(node: &dyn NodeRpc, height: u64) -> Result<CompactBlock, FetchError> {
     let verbose = node.get_block_verbose(height).await?;
     let raw = node.get_block_raw(&verbose.hash).await?;
-    let mut block = compact::to_compact_block(&raw)?;
+    // Parsing runs librustzcash deserialization and txid hashing over the whole block — CPU work
+    // that would otherwise stall the async runtime during a full-speed catch-up.
+    let mut block = tokio::task::spawn_blocking(move || compact::to_compact_block(&raw)).await??;
     // A wrong-height block stays on the node/transport backoff instead of being mislabeled as cache
     // corruption and fed into the recovery path.
     if block.height != height {
@@ -58,6 +86,29 @@ pub async fn compact_block(node: &dyn NodeRpc, height: u64) -> Result<CompactBlo
             requested: verbose.hash,
             computed: computed_hash,
         });
+    }
+    // Cross-check the locally computed txids against the node's list (when the node provides one):
+    // a silent divergence — e.g. a consensus rule librustzcash and the node disagree on — must fail
+    // loudly here rather than corrupt wallet spend detection downstream.
+    if !verbose.tx.is_empty() {
+        if verbose.tx.len() != block.vtx.len() {
+            return Err(FetchError::TxCountMismatch {
+                height,
+                node: verbose.tx.len(),
+                computed: block.vtx.len(),
+            });
+        }
+        for (index, (tx, node_txid)) in block.vtx.iter().zip(&verbose.tx).enumerate() {
+            let computed = encoding::wire_to_display_hex(&tx.txid);
+            if computed != *node_txid {
+                return Err(FetchError::TxidMismatch {
+                    height,
+                    index,
+                    node: node_txid.clone(),
+                    computed,
+                });
+            }
+        }
     }
     if let Some(meta) = block.chain_metadata.as_mut() {
         meta.sapling_commitment_tree_size = verbose.trees.sapling.size;
@@ -136,6 +187,99 @@ mod tests {
         let meta = block.chain_metadata.unwrap();
 
         assert_eq!(meta.ironwood_commitment_tree_size, 0);
+    }
+
+    #[tokio::test]
+    async fn compact_block_accepts_a_matching_node_txid_list() {
+        let raw = fixture_raw();
+        let parsed = compact::to_compact_block(&raw).unwrap();
+        let height = parsed.height;
+        let hash = encoding::wire_to_display_hex(&parsed.hash);
+        let txids: Vec<String> = parsed
+            .vtx
+            .iter()
+            .map(|tx| encoding::wire_to_display_hex(&tx.txid))
+            .collect();
+
+        let fake = FakeNode {
+            block_verbose: Some(
+                serde_json::from_value(json!({
+                    "hash": hash,
+                    "tx": txids,
+                    "trees": { "sapling": { "size": 0 }, "orchard": { "size": 0 } },
+                }))
+                .unwrap(),
+            ),
+            block_raw: Some(raw),
+            ..Default::default()
+        };
+
+        assert!(compact_block(&fake, height).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn compact_block_rejects_a_txid_that_disagrees_with_the_node() {
+        let raw = fixture_raw();
+        let parsed = compact::to_compact_block(&raw).unwrap();
+        let height = parsed.height;
+        let hash = encoding::wire_to_display_hex(&parsed.hash);
+        let mut txids: Vec<String> = parsed
+            .vtx
+            .iter()
+            .map(|tx| encoding::wire_to_display_hex(&tx.txid))
+            .collect();
+        txids[0] = "ff".repeat(32);
+
+        let fake = FakeNode {
+            block_verbose: Some(
+                serde_json::from_value(json!({
+                    "hash": hash,
+                    "tx": txids,
+                    "trees": { "sapling": { "size": 0 }, "orchard": { "size": 0 } },
+                }))
+                .unwrap(),
+            ),
+            block_raw: Some(raw),
+            ..Default::default()
+        };
+
+        let error = compact_block(&fake, height).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            FetchError::TxidMismatch { height: h, index: 0, .. } if h == height
+        ));
+    }
+
+    #[tokio::test]
+    async fn compact_block_rejects_a_tx_count_that_disagrees_with_the_node() {
+        let raw = fixture_raw();
+        let parsed = compact::to_compact_block(&raw).unwrap();
+        let height = parsed.height;
+        let hash = encoding::wire_to_display_hex(&parsed.hash);
+        let mut txids: Vec<String> = parsed
+            .vtx
+            .iter()
+            .map(|tx| encoding::wire_to_display_hex(&tx.txid))
+            .collect();
+        txids.push("aa".repeat(32));
+
+        let fake = FakeNode {
+            block_verbose: Some(
+                serde_json::from_value(json!({
+                    "hash": hash,
+                    "tx": txids,
+                    "trees": { "sapling": { "size": 0 }, "orchard": { "size": 0 } },
+                }))
+                .unwrap(),
+            ),
+            block_raw: Some(raw),
+            ..Default::default()
+        };
+
+        let error = compact_block(&fake, height).await.unwrap_err();
+
+        assert!(matches!(error, FetchError::TxCountMismatch { .. }));
     }
 
     #[tokio::test]
