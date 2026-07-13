@@ -16,9 +16,12 @@ subscriber wants the current mempool, not a replay of every past change.
 ## Consequences
 
 - Node load is independent of the number of connected wallets; each mempool transaction is fetched and
-  parsed once per refresh, and wallets see at most ~2 s of staleness.
+  parsed once per refresh, and wallets see at most ~2 s of staleness while the node is healthy.
 - The refresh tolerates partial node failures: a transaction that disappears between the
   `getrawmempool` listing and its `getrawtransaction` fetch is logged and skipped, and a failed
-  listing retains the last good snapshot until the node recovers.
+  listing retains the last good snapshot until the node recovers — but only up to a point: past a
+  60 s cutoff the snapshot is no longer served as if current, and both RPCs return `Unavailable`
+  instead. See [0021](0021-mempool-staleness-contract.md) for that bound and why "retains the last
+  good snapshot" needed one.
 - Darkside keeps the per-request path (`Streamer.mempool == None`), where a staged transaction must
   appear and drain synchronously.

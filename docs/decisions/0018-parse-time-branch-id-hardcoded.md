@@ -26,3 +26,8 @@ height would add a height-to-branch table (or a per-block node consult) that cha
   serves, this decision must be revisited; the module doc points here.
 - The value reads as "current network upgrade" but means "ignored for everything we serve" — the
   module doc states this explicitly to prevent the next reader from "fixing" it.
+- Should this decision ever be wrong in a way that produces a diverging txid (a future format
+  consulting the branch ID after all, or a mistaken revisit), `fetch`'s cross-check against the node's
+  verbose `getblock` txid list ([0020](0020-windowed-ingest-batched-commits.md)) turns that divergence
+  into a loud, rejected block rather than a silently wrong txid served to a wallet. That check is a
+  safety net for this decision being wrong, not a substitute for verifying it is right.

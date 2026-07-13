@@ -57,3 +57,11 @@ The harness lives in [`contrib/bench/`](../../contrib/bench) and fixes the metho
   poll fails, keeps running). Second, both proxies' `GetBlockRange` rendered stream
   (decoded to JSON, so this is content identity, not a wire-byte claim) over the
   full range must hash identically, so the comparison is only ever like for like.
+- Cold-sync / ingestion throughput remains an explicit non-goal of *this* harness
+  (see "Hot read-path only" above), but it is no longer a side concern now that
+  [0020](0020-windowed-ingest-batched-commits.md) made catch-up ingest windowed and
+  concurrent rather than one block per node round-trip: initial-sync throughput is
+  now a tunable, measurable property (`--ingest-window`/`--ingest-concurrency`).
+  A separate ingest-throughput benchmark, with its own dataset and fidelity checks,
+  is expected as a follow-up; this ADR's method and results are not yet extended to
+  cover it.
