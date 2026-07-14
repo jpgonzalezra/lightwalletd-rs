@@ -2,16 +2,18 @@
 <text x="360" y="22" text-anchor="middle" font-size="15" fill="#888888">light — GetBlockRange throughput</text>
 <line x1="66" y1="334.0" x2="624" y2="334.0" stroke="#888888" stroke-opacity="0.2"/>
 <text x="58" y="338.0" text-anchor="end" fill="#888888">0</text>
-<line x1="66" y1="275.2" x2="624" y2="275.2" stroke="#888888" stroke-opacity="0.2"/>
-<text x="58" y="279.2" text-anchor="end" fill="#888888">20k</text>
-<line x1="66" y1="216.4" x2="624" y2="216.4" stroke="#888888" stroke-opacity="0.2"/>
-<text x="58" y="220.4" text-anchor="end" fill="#888888">40k</text>
-<line x1="66" y1="157.6" x2="624" y2="157.6" stroke="#888888" stroke-opacity="0.2"/>
-<text x="58" y="161.6" text-anchor="end" fill="#888888">60k</text>
-<line x1="66" y1="98.8" x2="624" y2="98.8" stroke="#888888" stroke-opacity="0.2"/>
-<text x="58" y="102.8" text-anchor="end" fill="#888888">80k</text>
+<line x1="66" y1="285.0" x2="624" y2="285.0" stroke="#888888" stroke-opacity="0.2"/>
+<text x="58" y="289.0" text-anchor="end" fill="#888888">20k</text>
+<line x1="66" y1="236.0" x2="624" y2="236.0" stroke="#888888" stroke-opacity="0.2"/>
+<text x="58" y="240.0" text-anchor="end" fill="#888888">40k</text>
+<line x1="66" y1="187.0" x2="624" y2="187.0" stroke="#888888" stroke-opacity="0.2"/>
+<text x="58" y="191.0" text-anchor="end" fill="#888888">60k</text>
+<line x1="66" y1="138.0" x2="624" y2="138.0" stroke="#888888" stroke-opacity="0.2"/>
+<text x="58" y="142.0" text-anchor="end" fill="#888888">80k</text>
+<line x1="66" y1="89.0" x2="624" y2="89.0" stroke="#888888" stroke-opacity="0.2"/>
+<text x="58" y="93.0" text-anchor="end" fill="#888888">100k</text>
 <line x1="66" y1="40.0" x2="624" y2="40.0" stroke="#888888" stroke-opacity="0.2"/>
-<text x="58" y="44.0" text-anchor="end" fill="#888888">100k</text>
+<text x="58" y="44.0" text-anchor="end" fill="#888888">120k</text>
 <text x="66.0" y="352" text-anchor="middle" fill="#888888">1</text>
 <text x="159.0" y="352" text-anchor="middle" fill="#888888">2</text>
 <text x="252.0" y="352" text-anchor="middle" fill="#888888">4</text>
@@ -23,24 +25,24 @@
 <line x1="66" y1="334" x2="624" y2="334" stroke="#888888"/>
 <text x="345" y="372" text-anchor="middle" fill="#888888">concurrency (clients)</text>
 <text transform="translate(16,187) rotate(-90)" text-anchor="middle" fill="#888888">blocks/s (W=1000)</text>
-<polyline points="66.0,226.0 159.0,208.4 252.0,105.9 345.0,103.2 438.0,104.7 531.0,97.3 624.0,84.9" fill="none" stroke="#e43717" stroke-width="2.5"/>
-<circle cx="66.0" cy="226.0" r="3.5" fill="#e43717"/>
-<circle cx="159.0" cy="208.4" r="3.5" fill="#e43717"/>
-<circle cx="252.0" cy="105.9" r="3.5" fill="#e43717"/>
-<circle cx="345.0" cy="103.2" r="3.5" fill="#e43717"/>
-<circle cx="438.0" cy="104.7" r="3.5" fill="#e43717"/>
-<circle cx="531.0" cy="97.3" r="3.5" fill="#e43717"/>
-<circle cx="624.0" cy="84.9" r="3.5" fill="#e43717"/>
+<polyline points="66.0,231.5 159.0,183.0 252.0,64.2 345.0,59.6 438.0,61.8 531.0,56.3 624.0,44.5" fill="none" stroke="#e43717" stroke-width="2.5"/>
+<circle cx="66.0" cy="231.5" r="3.5" fill="#e43717"/>
+<circle cx="159.0" cy="183.0" r="3.5" fill="#e43717"/>
+<circle cx="252.0" cy="64.2" r="3.5" fill="#e43717"/>
+<circle cx="345.0" cy="59.6" r="3.5" fill="#e43717"/>
+<circle cx="438.0" cy="61.8" r="3.5" fill="#e43717"/>
+<circle cx="531.0" cy="56.3" r="3.5" fill="#e43717"/>
+<circle cx="624.0" cy="44.5" r="3.5" fill="#e43717"/>
 <line x1="638" y1="50" x2="654" y2="50" stroke="#e43717" stroke-width="2.5"/>
 <text x="658" y="54" fill="#e43717">rust</text>
-<polyline points="66.0,291.7 159.0,268.6 252.0,267.5 345.0,274.1 438.0,272.3 531.0,268.6 624.0,262.6" fill="none" stroke="#00add8" stroke-width="2.5"/>
-<circle cx="66.0" cy="291.7" r="3.5" fill="#00add8"/>
-<circle cx="159.0" cy="268.6" r="3.5" fill="#00add8"/>
-<circle cx="252.0" cy="267.5" r="3.5" fill="#00add8"/>
-<circle cx="345.0" cy="274.1" r="3.5" fill="#00add8"/>
-<circle cx="438.0" cy="272.3" r="3.5" fill="#00add8"/>
-<circle cx="531.0" cy="268.6" r="3.5" fill="#00add8"/>
-<circle cx="624.0" cy="262.6" r="3.5" fill="#00add8"/>
+<polyline points="66.0,315.9 159.0,314.7 252.0,301.2 345.0,300.9 438.0,295.1 531.0,285.3 624.0,273.3" fill="none" stroke="#00add8" stroke-width="2.5"/>
+<circle cx="66.0" cy="315.9" r="3.5" fill="#00add8"/>
+<circle cx="159.0" cy="314.7" r="3.5" fill="#00add8"/>
+<circle cx="252.0" cy="301.2" r="3.5" fill="#00add8"/>
+<circle cx="345.0" cy="300.9" r="3.5" fill="#00add8"/>
+<circle cx="438.0" cy="295.1" r="3.5" fill="#00add8"/>
+<circle cx="531.0" cy="285.3" r="3.5" fill="#00add8"/>
+<circle cx="624.0" cy="273.3" r="3.5" fill="#00add8"/>
 <line x1="638" y1="70" x2="654" y2="70" stroke="#00add8" stroke-width="2.5"/>
 <text x="658" y="74" fill="#00add8">go</text>
 </svg>

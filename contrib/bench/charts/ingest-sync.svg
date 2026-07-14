@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 568" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="13">
+<text x="360" y="22" text-anchor="middle" font-size="15" fill="#888888">ingest throughput — NEW Rust vs OLD Rust vs Go (mainnet, 2026-07)</text>
+<rect x="118" y="30" width="14" height="14" rx="3" fill="#e43717"/>
+<text x="138" y="41" fill="#888888" font-size="12">NEW Rust</text>
+<rect x="268" y="30" width="14" height="14" rx="3" fill="#eda100"/>
+<text x="288" y="41" fill="#888888" font-size="12">OLD Rust</text>
+<rect x="418" y="30" width="14" height="14" rx="3" fill="#00add8"/>
+<text x="438" y="41" fill="#888888" font-size="12">Go</text>
+<text x="118" y="72" fill="#888888" font-size="13">R1 modern pre-spam (start 1,500,000)</text>
+<rect x="118" y="82" width="451.8" height="14" rx="4" fill="#e43717"/>
+<text x="110" y="93.0" text-anchor="end" fill="#888888" font-size="12">NEW</text>
+<text x="575.8" y="93.0" fill="#888888" font-size="12">497.7 b/s</text>
+<rect x="118" y="104" width="49.9" height="14" rx="4" fill="#eda100"/>
+<text x="110" y="115.0" text-anchor="end" fill="#888888" font-size="12">OLD</text>
+<text x="173.9" y="115.0" fill="#888888" font-size="12">55.0 b/s</text>
+<rect x="118" y="126" width="319.6" height="14" rx="4" fill="#00add8"/>
+<text x="110" y="137.0" text-anchor="end" fill="#888888" font-size="12">Go</text>
+<text x="443.6" y="137.0" fill="#888888" font-size="12">352.1 b/s</text>
+<text x="118" y="174" fill="#888888" font-size="13">R2 sandblasting (start 1,780,000)</text>
+<rect x="118" y="184" width="451.8" height="14" rx="4" fill="#e43717"/>
+<text x="110" y="195.0" text-anchor="end" fill="#888888" font-size="12">NEW</text>
+<text x="575.8" y="195.0" fill="#888888" font-size="12">37.2 b/s</text>
+<rect x="118" y="206" width="68.0" height="14" rx="4" fill="#eda100"/>
+<text x="110" y="217.0" text-anchor="end" fill="#888888" font-size="12">OLD</text>
+<text x="192.0" y="217.0" fill="#888888" font-size="12">5.6 b/s</text>
+<rect x="118" y="228" width="80.2" height="14" rx="4" fill="#00add8"/>
+<text x="110" y="239.0" text-anchor="end" fill="#888888" font-size="12">Go</text>
+<text x="204.2" y="239.0" fill="#888888" font-size="12">6.6 b/s</text>
+<text x="118" y="276" fill="#888888" font-size="13">R3 recent (start 3,300,000)</text>
+<rect x="118" y="286" width="451.8" height="14" rx="4" fill="#e43717"/>
+<text x="110" y="297.0" text-anchor="end" fill="#888888" font-size="12">NEW</text>
+<text x="575.8" y="297.0" fill="#888888" font-size="12">232.0 b/s*</text>
+<rect x="118" y="308" width="108.3" height="14" rx="4" fill="#eda100"/>
+<text x="110" y="319.0" text-anchor="end" fill="#888888" font-size="12">OLD</text>
+<text x="232.3" y="319.0" fill="#888888" font-size="12">55.6 b/s</text>
+<rect x="118" y="330" width="451.8" height="14" rx="4" fill="#00add8"/>
+<text x="110" y="341.0" text-anchor="end" fill="#888888" font-size="12">Go</text>
+<text x="575.8" y="341.0" fill="#888888" font-size="12">232.0 b/s*</text>
+<text x="118" y="376" fill="#888888" font-size="11">* tip-capped: ingestor caught up to the live chain tip mid-window and idled</text>
+<text x="118" y="391" fill="#888888" font-size="11">(effective catch-up ≈281-297 blocks/s — see results docs)</text>
+<line x1="118" y1="413" x2="664" y2="413" stroke="#888888" stroke-opacity="0.25"/>
+<text x="118" y="447" fill="#888888" font-size="13">full sync: genesis → tip (wall-clock)</text>
+<line x1="118.0" y1="459" x2="118.0" y2="503" stroke="#888888" stroke-opacity="0.15"/>
+<text x="118.0" y="517" text-anchor="middle" fill="#888888" font-size="11">0h</text>
+<line x1="213.5" y1="459" x2="213.5" y2="503" stroke="#888888" stroke-opacity="0.15"/>
+<text x="213.5" y="517" text-anchor="middle" fill="#888888" font-size="11">2h</text>
+<line x1="308.9" y1="459" x2="308.9" y2="503" stroke="#888888" stroke-opacity="0.15"/>
+<text x="308.9" y="517" text-anchor="middle" fill="#888888" font-size="11">4h</text>
+<line x1="404.4" y1="459" x2="404.4" y2="503" stroke="#888888" stroke-opacity="0.15"/>
+<text x="404.4" y="517" text-anchor="middle" fill="#888888" font-size="11">6h</text>
+<line x1="499.9" y1="459" x2="499.9" y2="503" stroke="#888888" stroke-opacity="0.15"/>
+<text x="499.9" y="517" text-anchor="middle" fill="#888888" font-size="11">8h</text>
+<line x1="595.4" y1="459" x2="595.4" y2="503" stroke="#888888" stroke-opacity="0.15"/>
+<text x="595.4" y="517" text-anchor="middle" fill="#888888" font-size="11">10h</text>
+<rect x="118" y="459" width="65.6" height="14" rx="4" fill="#e43717"/>
+<text x="110" y="470.0" text-anchor="end" fill="#888888" font-size="12">NEW Rust</text>
+<text x="189.6" y="470.0" fill="#888888" font-size="12">1h 22m</text>
+<rect x="118" y="481" width="382.0" height="14" rx="4" fill="#00add8"/>
+<rect x="500.0" y="481" width="95.4" height="14" rx="4" fill="none" stroke="#00add8" stroke-width="1.5" stroke-dasharray="3,3"/>
+<text x="110" y="492.0" text-anchor="end" fill="#888888" font-size="12">Go</text>
+<text x="601.4" y="492.0" fill="#888888" font-size="12">≈9.5–10h</text>
+<text x="118" y="521" fill="#888888" font-size="11">NEW Rust: measured. Go: solid = measured to the 8h cap (59.9% of chain);</text>
+<text x="118" y="536" fill="#888888" font-size="11">dashed = extrapolated total from measured post-spam rates (see results docs).</text>
+</svg>
