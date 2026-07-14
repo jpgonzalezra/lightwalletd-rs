@@ -4,12 +4,14 @@
 //! [`NodeClient`] implements it over a generic [`NodeClient::raw_request`]. The transport is plain HTTP
 //! `POST` with HTTP Basic auth.
 
+#[cfg(feature = "readstate")]
+pub mod readstate;
 mod types;
 
 pub use types::{
     AddressUtxo, Consensus, GetAddressBalance, GetBlockVerbose, GetBlockchainInfo, GetInfo,
-    GetRawTransaction, GetSubtrees, GetTreeState, TreeCommitments, TreePool, TreeSize, Trees,
-    Upgrade,
+    GetRawTransaction, GetSubtrees, GetTreeState, Subtree, TreeCommitments, TreePool, TreeSize,
+    Trees, Upgrade,
 };
 
 use std::time::Duration;
@@ -47,6 +49,10 @@ pub enum NodeError {
     /// The response had neither a `result` nor an `error`.
     #[error("RPC response had no result")]
     EmptyResult,
+    /// The in-process read state service failed (`readstate` backend, ADR 0023). Maps to
+    /// `Unavailable` by the default error mapping, like a node transport failure.
+    #[error("read state error: {0}")]
+    State(String),
 }
 
 /// A client for the zebrad JSON-RPC endpoint.
