@@ -149,6 +149,7 @@ Protocol upgrades:
 - [0020](decisions/0020-windowed-ingest-batched-commits.md) — catch-up ingests windows of blocks concurrently (`--ingest-window`/`--ingest-concurrency`) committed in one cache transaction per window, with a fetch-time txid cross-check against the node.
 - [0021](decisions/0021-mempool-staleness-contract.md) — mempool snapshots carry a refresh timestamp; snapshots older than a 60 s cutoff make `GetMempoolTx`/`GetMempoolStream` return `Unavailable` instead of serving last-known-good data during a node outage.
 - [0022](decisions/0022-ops-surface-parity.md) — operational-surface parity with the Go reference: gRPC reflection always on, Prometheus metrics on by default at `127.0.0.1:9068`, `--log-level`/`--log-file` (JSON to file), `--gen-cert-very-insecure`, a darkside auto-shutdown timeout, and `--nocache`; the `./lightwalletd-rs-data` default data dir is kept as a deliberate divergence from Go's root-owned `/var/lib/lightwalletd`.
+- [0023](decisions/0023-zebra-readstate-backend.md) — reads come from an in-process zebra `ReadStateService` (read-only secondary + `TrustedChainSync` over the indexer gRPC) behind `--backend readstate`; writes/mempool stay on JSON-RPC.
 
 Structure and seams:
 

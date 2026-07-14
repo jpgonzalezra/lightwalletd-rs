@@ -29,3 +29,4 @@ choice stays discoverable after the fact. The living overview is
 | [0020](0020-windowed-ingest-batched-commits.md) | Windowed concurrent ingest with batched cache commits |
 | [0021](0021-mempool-staleness-contract.md) | Mempool staleness contract: stale snapshots become `Unavailable` |
 | [0022](0022-ops-surface-parity.md) | Close the operational-surface gap with the Go reference: reflection, default-on metrics, log flags, `--gen-cert-very-insecure`, darkside auto-shutdown, `--nocache` |
+| [0023](0023-zebra-readstate-backend.md) | Hybrid Zebra ReadStateService backend behind the NodeRpc seam |
