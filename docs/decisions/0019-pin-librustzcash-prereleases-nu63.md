@@ -26,6 +26,8 @@ cohort-consistency check.
   re-check both crates' CHANGELOGs. The finals are also expected to set the NU6.3 mainnet activation
   height, which the pre-releases leave unset.
 - Tracked follow-up: re-bump when `zcash_primitives 0.29.0` / `zcash_protocol 0.10.0` finalize.
+- Re-bumped to the finals on 2026-07-14; cohort check passed (`zcash_protocol 0.10.0` sets the NU6.3
+  mainnet activation height, 3,428,143; no source changes were required).
 - The pre-release cohort is exactly the kind of dependency this ADR is least certain about (no semver
   guarantee, both a pre-mainnet and a re-bump risk of silent divergence from the node's own consensus
   rules). `fetch`'s cross-check of locally computed txids against the node's verbose `getblock` list

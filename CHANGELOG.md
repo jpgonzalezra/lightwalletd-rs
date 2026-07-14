@@ -67,6 +67,13 @@ All notable changes to this project are documented here. The format is loosely b
 - The `./lightwalletd-rs-data` default data directory is kept as a deliberate divergence from Go's
   `/var/lib/lightwalletd` default, which requires root on a stock system.
 
+### Dependencies
+- Re-bumped the NU6.3 librustzcash cohort from the pre-release pins to the published finals
+  (ADR 0019): `zcash_address 0.13.0`, `zcash_primitives 0.29.0`, `zcash_protocol 0.10.0` (still
+  exact-pinned). `zcash_protocol 0.10.0` sets the NU6.3 mainnet activation height (3,428,143); the
+  pre-release left it unset. `cargo tree -d` confirms a single version of `zcash_protocol` and
+  `zcash_address` post-bump; no source changes were required.
+
 ## [0.1.0] — beta
 
 First public release. A caching proxy in front of a `zebrad` node that implements all 20
