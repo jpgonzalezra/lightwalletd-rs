@@ -169,6 +169,25 @@ fn unexpected(response: &ReadResponse) -> NodeError {
     NodeError::State(format!("unexpected read response: {response:?}"))
 }
 
+/// The branded upgrade name zebrad reports (`"NU6.3"`, not the Rust identifier `Nu6_3`): zebra
+/// keeps that branding in `NetworkUpgrade`'s serde rename table, so round-trip through serde
+/// rather than `Display` (which is the debug form). Verified by the live parity sweep.
+fn upgrade_name(upgrade: NetworkUpgrade) -> String {
+    serde_json::to_value(upgrade)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{upgrade}"))
+}
+
+/// Whether `upgrade` is active at `height` — gates which pools `get_treestate` includes, matching
+/// zebrad's `z_gettreestate` (which omits a pool entirely before its activation instead of
+/// serializing an empty frontier). Verified by the live parity sweep.
+fn pool_active(network: &Network, upgrade: NetworkUpgrade, height: block::Height) -> bool {
+    upgrade
+        .activation_height(network)
+        .is_some_and(|activation| height >= activation)
+}
+
 /// The chain name zcashd/zebrad report for `network` (`main`/`test`/`regtest`).
 fn chain_name(network: &Network) -> String {
     match network {
@@ -207,7 +226,7 @@ where
             upgrades.insert(
                 branch_id.encode_hex::<String>(),
                 Upgrade {
-                    name: format!("{upgrade}"),
+                    name: upgrade_name(upgrade),
                     activationheight: height.0 as u64,
                     status: if blocks >= height.0 as u64 {
                         "active".to_string()
@@ -308,29 +327,39 @@ where
             other => return Err(unexpected(&other)),
         };
 
+        // zebrad's `z_gettreestate` omits a pool entirely before its activation upgrade rather
+        // than serializing an empty frontier ("000000"), and the rpc backend inherits that; gate
+        // each pool the same way so both backends are wire-identical at every height.
+        let sapling = pool_active(&self.network, NetworkUpgrade::Sapling, height)
+            .then(|| sapling.map(|tree| hex::encode(tree.to_rpc_bytes())))
+            .flatten()
+            .unwrap_or_default();
+        let orchard = pool_active(&self.network, NetworkUpgrade::Nu5, height)
+            .then(|| orchard.map(|tree| hex::encode(tree.to_rpc_bytes())))
+            .flatten()
+            .unwrap_or_default();
+        let ironwood = pool_active(&self.network, NetworkUpgrade::Nu6_3, height)
+            .then(|| ironwood.map(|tree| hex::encode(tree.to_rpc_bytes())))
+            .flatten()
+            .unwrap_or_default();
+
         Ok(GetTreeState {
             hash: hash.to_string(),
             height: height.0 as u64,
             time: block.header.time.timestamp() as u32,
             sapling: TreePool {
                 commitments: TreeCommitments {
-                    final_state: sapling
-                        .map(|tree| hex::encode(tree.to_rpc_bytes()))
-                        .unwrap_or_default(),
+                    final_state: sapling,
                 },
             },
             orchard: TreePool {
                 commitments: TreeCommitments {
-                    final_state: orchard
-                        .map(|tree| hex::encode(tree.to_rpc_bytes()))
-                        .unwrap_or_default(),
+                    final_state: orchard,
                 },
             },
             ironwood: TreePool {
                 commitments: TreeCommitments {
-                    final_state: ironwood
-                        .map(|tree| hex::encode(tree.to_rpc_bytes()))
-                        .unwrap_or_default(),
+                    final_state: ironwood,
                 },
             },
         })
@@ -835,5 +864,45 @@ mod tests {
             }
             other => panic!("expected NodeError::Rpc, got {other:?}"),
         }
+    }
+}
+
+/// Regression tests for the two wire differences the 2026-07 live parity sweep found
+/// (contrib/bench/results/rss-parity-2026-07.md): upgrade-name branding and inactive-pool
+/// treestate gating.
+#[cfg(test)]
+mod parity_regression_tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_names_match_zebrads_branding_not_the_rust_identifiers() {
+        assert_eq!(upgrade_name(NetworkUpgrade::Nu5), "NU5");
+        assert_eq!(upgrade_name(NetworkUpgrade::Nu6_3), "NU6.3");
+        assert_eq!(upgrade_name(NetworkUpgrade::Sapling), "Sapling");
+    }
+
+    #[test]
+    fn pool_active_gates_on_the_mainnet_activation_heights() {
+        let network = Network::Mainnet;
+        let sapling_activation = NetworkUpgrade::Sapling
+            .activation_height(&network)
+            .expect("sapling activates on mainnet");
+        assert!(!pool_active(
+            &network,
+            NetworkUpgrade::Sapling,
+            block::Height(sapling_activation.0 - 1)
+        ));
+        assert!(pool_active(
+            &network,
+            NetworkUpgrade::Sapling,
+            sapling_activation
+        ));
+        // NU6.3 (ironwood) is pending at today's tip heights: pre-activation treestates must
+        // omit the pool (empty string), not serialize an empty frontier.
+        assert!(!pool_active(
+            &network,
+            NetworkUpgrade::Nu6_3,
+            block::Height(3_400_000)
+        ));
     }
 }
