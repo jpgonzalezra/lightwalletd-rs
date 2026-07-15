@@ -44,3 +44,14 @@ non-default cargo feature `readstate`:
   the non-default feature; the default build and CI lane stay lean (ADR 0012 intact).
 - The NodeRpc seam (ADR 0007) absorbs the whole change: service layer, ingestor (ADR 0020), cache,
   mempool monitor (ADR 0005/0021), and darkside are untouched.
+- **Measured trade-off (2026-07 mainnet benchmarks, `contrib/bench/results/rss-bench-2026-07.md`):**
+  the read surfaces win decisively (`GetTreeState` 4.1×, `GetTaddressTxids` up to 7.3×, time-to-tip
+  on light recent blocks 25% faster), but parse-bound ingest loses: sandblasting-era blocks ingest
+  ~38% slower and a full genesis→tip sync is ~19% slower overall (1 h 38 m vs 1 h 22 m), because the
+  in-process path pays zebra's structured-`Block` deserialize plus our re-serialize plus the parse
+  on one process's cores, where the JSON-RPC path pipelines block serialization into zebrad's
+  process. Operator guidance: `readstate` is the better steady-state/serving backend; for the
+  fastest possible cold sync, sync once with `--backend rpc` and restart with `readstate` (the
+  cache is byte-identical between backends). Future work: map zebra's structured `Block` directly
+  to `CompactBlock` (skipping serialize+parse entirely), which needs its own golden-fixture parity
+  treatment before it can replace the byte-path.
