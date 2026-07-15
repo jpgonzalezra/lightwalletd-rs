@@ -33,6 +33,22 @@ The gRPC contract is the standard Zcash light-client `.proto` set, so real walle
 The backend is **`zebrad`**. The connection is plain HTTP `POST` JSON-RPC (no TLS) with HTTP Basic auth, reading
 `rpcuser`/`rpcpassword` from flags or a `zcash.conf` file. Default ports: 8232 (mainnet), 18232 (testnet/regtest).
 
+`--backend` selects between two `NodeRpc` implementations. The default, `rpc`, is `NodeClient` above — every
+call, read or write, goes over JSON-RPC. `readstate` (ADR [0023](decisions/0023-zebra-readstate-backend.md),
+non-default `readstate` cargo feature) is a hybrid: `ZebraStateNode` (`src/node/readstate.rs`) serves reads —
+blocks, tree states, subtrees, the transparent-address index, mined transactions, tip/chain info — from an
+in-process `zebra_state::ReadStateService` attached as a read-only secondary to a co-located zebrad's RocksDB
+state, while writes and node-only surfaces (`sendrawtransaction`, the mempool, `getinfo`) still go through an
+inner `NodeClient` over JSON-RPC. Because zebra's finalized state alone lags the best tip by up to
+`MAX_BLOCK_REORG_HEIGHT` (1000 blocks), the backend wires the secondary through
+`zebra_rpc::sync::init_read_state_with_syncer`, which pairs it with `TrustedChainSync`: a task that subscribes
+to the primary zebrad's indexer gRPC (`chain_tip_change`/`non_finalized_state_change`) and feeds non-finalized
+blocks into the read state, so `readstate` serves the true tip rather than a stale finalized view. Raw block
+bytes are produced by re-serializing the state's `Block` and handed to the same golden-fixture-verified parser
+used by the `rpc` path, so wire output is byte-identical between backends by construction. See the
+[design doc](design/zebra-readstate-backend.md) for the full mapping table, requirements, and the measured
+performance envelope.
+
 ## Crate structure
 
 The crate builds as both a library and a binary. `src/lib.rs` is the library root: it declares the modules and
@@ -53,6 +69,7 @@ the `CompactTxStreamerClient` and `DarksideStreamerClient` stubs alongside the s
 | `proto/` + `build.rs` + `src/proto.rs` | The `.proto` contract and the `tonic`/`prost` generated code (server and client). |
 | `src/config.rs` | Configuration: CLI flags + `zcash.conf` parsing. |
 | `src/node/` | JSON-RPC client to `zebrad`: the `NodeRpc` trait (typed RPC surface, with a generic `request` helper) and its `NodeClient` implementation. |
+| `src/node/readstate.rs` | `readstate` backend (ADR 0023, feature-gated): `ZebraStateNode`, a second `NodeRpc` implementation that maps reads onto an in-process `zebra_state::ReadStateService` and delegates writes/mempool/`getinfo` to an inner `NodeClient`. |
 | `src/service/` | Implementation of the `CompactTxStreamer` gRPC service, split by method family (`chain`, `blocks`, `transactions`, `address`, `mempool`, `treestate`, `subtrees`, `ping`); `mod.rs` holds the `Streamer` and a thin trait impl that dispatches each method to its submodule. |
 | `src/service/errors.rs` | Translates a backend JSON-RPC error into the per-method gRPC `Status` a wallet expects. |
 | `src/service/mempool_monitor.rs` | Live-mode shared mempool monitor: one background task refreshes the mempool and fans a parsed-once snapshot out via `watch`. |

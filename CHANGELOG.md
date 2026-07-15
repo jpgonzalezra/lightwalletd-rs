@@ -67,6 +67,35 @@ All notable changes to this project are documented here. The format is loosely b
 - The `./lightwalletd-rs-data` default data directory is kept as a deliberate divergence from Go's
   `/var/lib/lightwalletd` default, which requires root on a stock system.
 
+### Backends
+- **`--backend readstate`** (ADR [0023](docs/decisions/0023-zebra-readstate-backend.md), non-default
+  `readstate` cargo feature): a second `NodeRpc` implementation that serves reads — blocks, tree
+  states, subtrees, the transparent-address index, mined transactions, tip/chain info — from an
+  in-process `zebra_state::ReadStateService` attached to a co-located zebrad's state, paired with
+  `zebra_rpc::sync::TrustedChainSync` over the node's indexer gRPC for true-tip fidelity. Writes and
+  node-only surfaces (`sendrawtransaction`, the mempool, `getinfo`) stay on JSON-RPC — a hybrid, by
+  design. `rpc` remains the default and the only supported backend for remote nodes. New flags:
+  `--backend {rpc,readstate}`, `--zebra-state-dir`, `--zebra-indexer-url` (required with
+  `--backend readstate`); a state-format mismatch against the running zebrad fails fast at startup.
+- **Wire parity verified against a live mainnet node**: 5,997 compact blocks byte-identical across
+  three windows and both pool-type modes, plus clean passes on subtrees, the full address surface,
+  `GetTransaction`, and error mapping (80/80 checks after fixes). Two real wire differences were found
+  and fixed: an empty (not-yet-active) commitment tree serialized as `""` (rpc) vs `"000000"`
+  (readstate), and `GetLightdInfo.upgradeName` rendered as `"NU6.3"` (rpc) vs `"Nu6_3"` (readstate).
+- **Measured performance envelope** (2026-07 mainnet benchmarks,
+  `contrib/bench/results/rss-bench-2026-07.md`): read surfaces win decisively — `GetTreeState` 4.1x
+  faster, `GetTaddressTxids` up to 7.3x faster, time-to-tip on light recent blocks ~25% faster — but
+  ingest is parse-bound and loses on heavy historical blocks: sandblasting-era ingest is ~38% slower,
+  and a full genesis→tip sync is ~19% slower overall (1h 38m vs 1h 22m), because the in-process path
+  pays zebra's structured-`Block` deserialize plus a re-serialize plus the compact-block parse on one
+  process's cores. Operator guidance: `readstate` for steady-state serving; sync once with
+  `--backend rpc` then restart with `--backend readstate` for the fastest cold sync (the on-disk cache
+  is byte-identical between backends, so no re-sync is needed).
+- Fixed a shutdown-path panic found by the benchmark run: a window fetch task cancelled by runtime
+  shutdown (or a panicked fetch) previously took the ingestor down via `.expect(...)` on
+  `JoinError::Cancelled`; it now logs and skips the missing height, letting the chained prefix end
+  cleanly instead of panicking.
+
 ### Dependencies
 - Re-bumped the NU6.3 librustzcash cohort from the pre-release pins to the published finals
   (ADR 0019): `zcash_address 0.13.0`, `zcash_primitives 0.29.0`, `zcash_protocol 0.10.0` (still

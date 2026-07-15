@@ -98,11 +98,58 @@ over the file.
 | `--metrics-bind` | `127.0.0.1:9068` | address to serve Prometheus `/metrics` on (disable with `--no-metrics`) |
 | `--log-level` | `info` | tracing filter (an explicit `RUST_LOG` env var always wins) |
 | `--log-file` | — | write JSON lines here instead of human-readable stderr output |
+| `--backend` | `rpc` | which backend serves chain data: `rpc` or `readstate` (see [Backends](#backends)) |
+| `--zebra-state-dir` | zebra's default cache dir | zebrad cache directory to read from (`readstate` backend only) |
+| `--zebra-indexer-url` | — | zebrad indexer gRPC `host:port`, required with `--backend readstate` |
 
 Run `lightwalletd-rs --help` for the full list, including cache resync (`--sync-from-height`,
 `--redownload`, `--nocache`) and per-connection resource limits (`--max-concurrent-streams`, `--keepalive-*`).
 `--ingest-window`/`--ingest-concurrency` and `--log-level`/`--log-file` also read from
 `LWD_INGEST_WINDOW`/`LWD_INGEST_CONCURRENCY`/`LWD_LOG_LEVEL`/`LWD_LOG_FILE` when the flag is absent.
+
+## Backends
+
+`--backend` selects how lightwalletd-rs reaches chain data:
+
+- **`rpc`** (default) — every read and write goes over `zebrad`'s JSON-RPC. Works with any reachable
+  node, local or remote, and is the only supported choice for a remote node.
+- **`readstate`** — reads (blocks, tree states, subtrees, the transparent-address index, mined
+  transactions, tip/chain info) are served in-process from a co-located `zebrad`'s state via
+  `zebra_state::ReadStateService`, paired with `zebra_rpc::sync::TrustedChainSync` over the node's
+  indexer gRPC for true-tip fidelity. Writes and node-only surfaces (`sendrawtransaction`, the
+  mempool, `getinfo`) still go over JSON-RPC — a hybrid, by design. See
+  [ADR 0023](docs/decisions/0023-zebra-readstate-backend.md) and the
+  [design doc](docs/design/zebra-readstate-backend.md) for the full rationale.
+
+**Requirements for `readstate`:**
+
+- A **same-host** `zebrad 6.x` (state format major v28) with `indexer_listen_addr` set in
+  `zebrad.toml` (the indexer gRPC ships in default release binaries; only the listen address needs
+  configuring).
+- Built with the non-default `readstate` cargo feature: `cargo build --release --features readstate`
+  (pulls in RocksDB and the zebra crate tree, so the default build stays lean — ADR 0012).
+- `--zebra-indexer-url <host:port>` pointing at that indexer gRPC (required with
+  `--backend readstate`); `--zebra-state-dir` only if the cache directory isn't zebra's own default.
+- A state-format mismatch against the running zebrad fails fast at startup with a message pointing
+  at `--backend rpc`.
+
+**Measured envelope** (2026-07 mainnet benchmarks,
+[`contrib/bench/results/rss-bench-2026-07.md`](contrib/bench/results/rss-bench-2026-07.md); wire
+parity in [`rss-parity-2026-07.md`](contrib/bench/results/rss-parity-2026-07.md)): `readstate` wins
+decisively on read surfaces — `GetTreeState` 4.1x faster, `GetTaddressTxids` up to 7.3x, time-to-tip
+on light recent blocks ~25% faster — but ingest is parse-bound and loses on heavy historical blocks:
+sandblasting-era ingest is ~38% slower, and a full genesis→tip sync is ~19% slower overall (1h 38m vs
+1h 22m), because the in-process path pays zebra's structured-`Block` deserialize plus a re-serialize
+plus the compact-block parse on one process's cores, where the JSON-RPC path pipelines block
+serialization into zebrad's own process instead. Wire output between the two backends is
+byte-identical by construction (5,997 blocks byte-compared, plus treestates/subtrees/addresses/
+transactions/errors — see the parity report for the two wire differences found and fixed).
+
+**Recipe:** `rpc` remains the default and the recommended choice for most deployments. For the
+fastest possible cold sync followed by the fastest steady-state serving, sync once with
+`--backend rpc`, then restart against the same `--data-dir` with `--backend readstate` — the
+on-disk compact-block cache is byte-identical between backends, so switching does not require a
+re-sync.
 
 ## TLS
 

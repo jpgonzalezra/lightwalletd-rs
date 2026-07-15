@@ -1,7 +1,11 @@
 # Design: Zebra ReadStateService backend
 
-**Status:** accepted (ADR [0023](../decisions/0023-zebra-readstate-backend.md)) · **Date:** 2026-07-14
-**Research base:** zebra v6.0.0 source (`zebra-state 10.1.0`, `zebra-rpc 11.1.0`), lightwalletd-rs @ `0f75316`.
+**Status:** delivered (ADR [0023](../decisions/0023-zebra-readstate-backend.md)) · **Date:** 2026-07-14
+**Research base:** zebra v6.0.0 source (`zebra-state 10.1.0`, `zebra-rpc 11.1.0`), lightwalletd-rs @ `ed38ac2`.
+**Delivery:** phases P0-P3 (below) are complete — pin bump, backend + unit tests, live-mainnet parity
+verification, and benchmarks. See [Measured results (2026-07)](#measured-results-2026-07) for the
+headline numbers; full reports in `contrib/bench/results/rss-parity-2026-07.md` and
+`rss-bench-2026-07.md`. P4 (this doc, README, ARCHITECTURE, ADR 0023) closes the delivery.
 
 ## Problem
 
@@ -133,5 +137,41 @@ resource caps, and the RPC backend itself.
    responses between backends against the live mainnet node over sampled ranges (incl. sandblasting).
 4. **P3** — benchmarks: full sync and range ingests rpc vs readstate; treestate/subtree/address
    latency; serving-under-sync. Results into `contrib/bench/results/`.
+
+## Measured results (2026-07)
+
+P2 and P3 both ran against a live, fully-synced mainnet `zebrad 6.0.0`. Full reports:
+[`contrib/bench/results/rss-parity-2026-07.md`](../../contrib/bench/results/rss-parity-2026-07.md) (P2)
+and [`contrib/bench/results/rss-bench-2026-07.md`](../../contrib/bench/results/rss-bench-2026-07.md)
+(P3).
+
+**Parity (P2).** Compact blocks are byte-identical: **5,997 blocks fetched across three windows and
+both pool-type modes, 100% byte-for-byte match**, plus clean passes on subtrees, the full address
+surface (balance/txids/utxos, including the 10k-cap and set-order checks), `GetTransaction`, and error
+parity. The initial sweep found two real, reproducible wire differences — an empty (not-yet-active)
+commitment tree serialized as `""` (rpc) vs `"000000"` (readstate), and `upgradeName` rendered as
+`"NU6.3"` (rpc) vs the Rust-enum-spelled `"Nu6_3"` (readstate) — both fixed (commit `3b51c6b`) and
+re-verified: **80/80 individual checks pass** (63/80 on the first sweep, the remaining 17 confirmed
+fixed on re-check).
+
+**Benchmarks (P3).** Read surfaces win decisively: `GetTreeState` p50 **4.1x faster** (2.89ms → 0.71ms),
+`GetTaddressTxids` up to **7.3x faster** on a full unbounded stream, time-to-tip on light recent blocks
+**~25% faster**. Ingest is parse-bound and the picture inverts on heavy historical blocks: sandblasting-
+era ingest is **~38% slower** than rpc, and a full genesis→tip sync lands **~19% slower overall**
+(1h 38m06s vs rpc's 1h 22m30s) even though readstate wins 6 of 7 500k-height segments individually
+(often 1.5-3.6x) — the one segment it loses (1.5M-2.0M sandblasting) dominates total wall time. Root
+cause: the in-process path pays zebra's structured-`Block` deserialize plus a re-serialize plus the
+compact-block parse on this process's cores, where the JSON-RPC path pipelines that work into zebrad's
+own process. `GetSubtreeRoots` is the one read surface where readstate is slower (~40%), tracing to a
+pre-existing N+1 fetch-per-entry pattern in `src/service/subtrees.rs` that is backend-independent and
+is a separate, real latency bug worth fixing regardless of backend choice. Under full-speed concurrent
+ingest, cached-read latency for readstate stays in the same band as the rpc/Go reference (p99 ~1.5ms) —
+serving does not degrade while the ingestor runs flat out. One rare shutdown-path panic
+(`JoinError::Cancelled` on a fetch task cancelled by SIGTERM teardown) was found and fixed in
+`src/ingestor.rs` (commit `18cac7e`).
+
+Operator guidance (unchanged from ADR 0023): `readstate` is the better steady-state/serving backend;
+for the fastest cold sync, sync once with `--backend rpc` and restart with `--backend readstate` (the
+on-disk cache is byte-identical between backends, so no re-sync is needed).
 5. **P4** — docs (README, ARCHITECTURE, ADR 0023) and the PR (separate from, stacked on,
    `feat/ingest-performance-and-compliance`).
