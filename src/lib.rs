@@ -109,12 +109,15 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         // need the RPC reachable — readstate keeps it for tx submission and the mempool.
         let chain_info = connect_with_retry(&rpc_client).await;
 
-        let node: Arc<dyn NodeRpc> = match config.backend {
-            config::Backend::Rpc => Arc::new(rpc_client),
+        let node: Arc<dyn NodeRpc> = match &config.backend {
+            config::BackendConfig::Rpc => Arc::new(rpc_client),
             #[cfg(feature = "readstate")]
-            config::Backend::Readstate => readstate_node(&config, rpc_client, &chain_info).await?,
+            config::BackendConfig::Readstate {
+                state_dir,
+                indexer_url,
+            } => readstate_node(state_dir.clone(), *indexer_url, rpc_client, &chain_info).await?,
             #[cfg(not(feature = "readstate"))]
-            config::Backend::Readstate => anyhow::bail!(
+            config::BackendConfig::Readstate { .. } => anyhow::bail!(
                 "--backend readstate requires a build with the `readstate` cargo feature \
                  (cargo build --release --features readstate)"
             ),
@@ -245,7 +248,8 @@ pub fn reflection_service() -> anyhow::Result<
 /// missing or written by an incompatible zebra version.
 #[cfg(feature = "readstate")]
 async fn readstate_node(
-    config: &Config,
+    state_dir: Option<std::path::PathBuf>,
+    indexer: std::net::SocketAddr,
     rpc: node::NodeClient,
     chain_info: &GetBlockchainInfo,
 ) -> anyhow::Result<Arc<dyn NodeRpc>> {
@@ -257,12 +261,9 @@ async fn readstate_node(
         other => anyhow::bail!("readstate backend does not support chain {other:?}"),
     };
     let mut state_config = zebra_state::Config::default();
-    if let Some(dir) = &config.zebra_state_dir {
-        state_config.cache_dir = dir.clone();
+    if let Some(dir) = state_dir {
+        state_config.cache_dir = dir;
     }
-    let indexer = config
-        .zebra_indexer_url
-        .expect("validated in Cli::resolve: readstate requires --zebra-indexer-url");
 
     let (read_state, latest_tip, _chain_tip_change, _sync_task) =
         zebra_rpc::sync::init_read_state_with_syncer(state_config.clone(), &network, indexer)

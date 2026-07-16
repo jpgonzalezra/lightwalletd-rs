@@ -208,13 +208,29 @@ pub struct Cli {
     pub zebra_indexer_url: Option<SocketAddr>,
 }
 
-/// Which backend serves chain data (see `--backend`).
+/// Which backend serves chain data (see `--backend`). CLI-side selector only; [`Cli::resolve`]
+/// pairs it with the settings each backend needs into a [`BackendConfig`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Backend {
     /// Every call goes to the node over JSON-RPC (works with any reachable zebrad).
     Rpc,
     /// Reads come from the zebrad state in-process; JSON-RPC keeps the node-only surfaces.
     Readstate,
+}
+
+/// The resolved backend selection, carrying the settings the chosen backend needs — so a
+/// `readstate` backend without an indexer address is unrepresentable past [`Cli::resolve`].
+#[derive(Debug, Clone)]
+pub enum BackendConfig {
+    /// Every call goes to the node over JSON-RPC (works with any reachable zebrad).
+    Rpc,
+    /// Reads come from the zebrad state in-process; JSON-RPC keeps the node-only surfaces.
+    Readstate {
+        /// zebrad cache directory holding the state to read (zebra's own default when `None`).
+        state_dir: Option<PathBuf>,
+        /// zebrad indexer gRPC address, used to follow the non-finalized chain to the true tip.
+        indexer_url: SocketAddr,
+    },
 }
 
 /// Resolved runtime configuration.
@@ -252,12 +268,8 @@ pub struct Config {
     pub limits: ServerLimits,
     /// Ingestor catch-up tuning.
     pub ingest: IngestConfig,
-    /// Which backend serves chain data.
-    pub backend: Backend,
-    /// zebrad cache directory for the `readstate` backend (zebra's default when `None`).
-    pub zebra_state_dir: Option<PathBuf>,
-    /// zebrad indexer gRPC address for the `readstate` backend.
-    pub zebra_indexer_url: Option<SocketAddr>,
+    /// Which backend serves chain data, with the settings it needs.
+    pub backend: BackendConfig,
 }
 
 /// Ingestor catch-up tuning: how aggressively the cache is filled while behind the node tip.
@@ -430,17 +442,21 @@ impl Cli {
         if self.ingest_window == 0 || self.ingest_concurrency == 0 {
             anyhow::bail!("--ingest-window and --ingest-concurrency must be greater than 0");
         }
-        if self.backend == Backend::Readstate {
-            if self.zebra_indexer_url.is_none() {
-                anyhow::bail!(
-                    "--backend readstate requires --zebra-indexer-url (the zebrad \
-                     indexer_listen_addr; enable it in zebrad.toml under [rpc])"
-                );
+        let backend = match self.backend {
+            Backend::Rpc => BackendConfig::Rpc,
+            Backend::Readstate => {
+                if self.darkside {
+                    anyhow::bail!("--backend readstate cannot be combined with darkside mode");
+                }
+                BackendConfig::Readstate {
+                    state_dir: self.zebra_state_dir,
+                    indexer_url: self.zebra_indexer_url.context(
+                        "--backend readstate requires --zebra-indexer-url (the zebrad \
+                         indexer_listen_addr; enable it in zebrad.toml under [rpc])",
+                    )?,
+                }
             }
-            if self.darkside {
-                anyhow::bail!("--backend readstate cannot be combined with darkside mode");
-            }
-        }
+        };
 
         Ok(Config {
             grpc_bind: self.grpc_bind,
@@ -469,9 +485,7 @@ impl Cli {
                 window: self.ingest_window,
                 concurrency: self.ingest_concurrency,
             },
-            backend: self.backend,
-            zebra_state_dir: self.zebra_state_dir,
-            zebra_indexer_url: self.zebra_indexer_url,
+            backend,
         })
     }
 }
@@ -695,7 +709,7 @@ mod tests {
         let config = cli_with(None, None, Some("http://node"), None, None, None)
             .resolve()
             .unwrap();
-        assert_eq!(config.backend, Backend::Rpc);
+        assert!(matches!(config.backend, BackendConfig::Rpc));
     }
 
     #[test]
@@ -722,11 +736,16 @@ mod tests {
         cli.zebra_indexer_url = Some("127.0.0.1:8231".parse().unwrap());
         cli.zebra_state_dir = Some(PathBuf::from("/var/cache/zebra"));
         let config = cli.resolve().unwrap();
-        assert_eq!(config.backend, Backend::Readstate);
-        assert_eq!(
-            config.zebra_indexer_url,
-            Some("127.0.0.1:8231".parse().unwrap())
-        );
+        match config.backend {
+            BackendConfig::Readstate {
+                state_dir,
+                indexer_url,
+            } => {
+                assert_eq!(state_dir, Some(PathBuf::from("/var/cache/zebra")));
+                assert_eq!(indexer_url, "127.0.0.1:8231".parse().unwrap());
+            }
+            other => panic!("expected BackendConfig::Readstate, got {other:?}"),
+        }
     }
 
     #[test]
