@@ -130,6 +130,10 @@ lightwalletd-rs ... --metrics-bind 127.0.0.1:9100
 lightwalletd-rs ... --no-metrics
 ```
 
+Because metrics are on by default, two instances on the same host collide on `:9068`: the second
+instance logs an `error` for the failed bind and keeps serving **without metrics** rather than
+exiting. Give each instance its own `--metrics-bind` address (or `--no-metrics`).
+
 See [`docs/ARCHITECTURE.md#metrics`](docs/ARCHITECTURE.md#metrics).
 
 gRPC Server Reflection is always registered, so `grpcurl -plaintext <addr> list` (and `describe`) work
