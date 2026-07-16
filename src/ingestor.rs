@@ -171,7 +171,15 @@ async fn step(
     let mut prev_hash = cache.latest_hash()?;
     let mut batch: Vec<CompactBlock> = Vec::with_capacity(results.len());
     let mut failure: Option<StepError> = None;
-    for (height, result) in results {
+    for (expected_height, (height, result)) in (next..).zip(results) {
+        // A gap below `height` means that task died (panic or cancellation) without leaving a
+        // per-height result: the chained prefix ends here. Without this check, a dead task at
+        // the window's first height would make the next result fail the prev-hash test below and
+        // be misread as a reorg — rolling back a good block and dropping the panic before the
+        // accounting after this loop ever sees it.
+        if height != expected_height {
+            break;
+        }
         let block = match result {
             Ok(block) => block,
             Err(error) => {
@@ -703,6 +711,117 @@ mod tests {
             error,
             StepError::Fetch(FetchError::UnexpectedHeight { .. })
         ));
+    }
+
+    /// A node that panics on `get_block_verbose` for one specific height and delegates everything
+    /// else — a deterministic stand-in for a fetch task dying mid-window.
+    struct PanicAtHeight {
+        inner: FakeNode,
+        panic_height: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl NodeRpc for PanicAtHeight {
+        async fn get_blockchain_info(
+            &self,
+        ) -> Result<crate::node::GetBlockchainInfo, crate::node::NodeError> {
+            self.inner.get_blockchain_info().await
+        }
+        async fn get_block_verbose(
+            &self,
+            height: u64,
+        ) -> Result<GetBlockVerbose, crate::node::NodeError> {
+            if height == self.panic_height {
+                panic!("scripted fetch panic at height {height}");
+            }
+            self.inner.get_block_verbose(height).await
+        }
+        async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, crate::node::NodeError> {
+            self.inner.get_block_raw(hash).await
+        }
+        async fn get_info(&self) -> Result<crate::node::GetInfo, crate::node::NodeError> {
+            self.inner.get_info().await
+        }
+        async fn get_block_count(&self) -> Result<u64, crate::node::NodeError> {
+            self.inner.get_block_count().await
+        }
+        async fn get_raw_transaction(
+            &self,
+            txid: &str,
+        ) -> Result<crate::node::GetRawTransaction, crate::node::NodeError> {
+            self.inner.get_raw_transaction(txid).await
+        }
+        async fn send_raw_transaction(&self, hex: &str) -> Result<String, crate::node::NodeError> {
+            self.inner.send_raw_transaction(hex).await
+        }
+        async fn get_treestate(
+            &self,
+            id: &str,
+        ) -> Result<crate::node::GetTreeState, crate::node::NodeError> {
+            self.inner.get_treestate(id).await
+        }
+        async fn get_address_balance(
+            &self,
+            addresses: &[String],
+        ) -> Result<crate::node::GetAddressBalance, crate::node::NodeError> {
+            self.inner.get_address_balance(addresses).await
+        }
+        async fn get_address_utxos(
+            &self,
+            addresses: &[String],
+        ) -> Result<Vec<crate::node::AddressUtxo>, crate::node::NodeError> {
+            self.inner.get_address_utxos(addresses).await
+        }
+        async fn get_address_txids(
+            &self,
+            addresses: &[String],
+            start: u64,
+            end: u64,
+        ) -> Result<Vec<String>, crate::node::NodeError> {
+            self.inner.get_address_txids(addresses, start, end).await
+        }
+        async fn get_subtrees(
+            &self,
+            protocol: &str,
+            start_index: u32,
+            max_entries: u32,
+        ) -> Result<crate::node::GetSubtrees, crate::node::NodeError> {
+            self.inner
+                .get_subtrees(protocol, start_index, max_entries)
+                .await
+        }
+        async fn get_raw_mempool(&self) -> Result<Vec<String>, crate::node::NodeError> {
+            self.inner.get_raw_mempool().await
+        }
+    }
+
+    #[tokio::test]
+    async fn step_with_a_dead_first_fetch_surfaces_the_error_instead_of_rolling_back() {
+        // Four consecutive real blocks: the cache holds the first, the window is the remaining
+        // three, and the fetch for the window's *first* height dies. The later heights still
+        // arrive, but their prev-hashes cannot chain onto the cached tip across the gap — that
+        // must be read as "the prefix ends at the gap", never as a reorg. A misread here rolls
+        // back (here: empties) a perfectly good cache and drops the panic, oscillating
+        // rollback/advance at full speed instead of reaching the error backoff.
+        let raws = testdata_blocks();
+        let first_block = crate::compact::to_compact_block(&raws[0]).unwrap();
+        let first_height = first_block.height;
+        let tip = first_height + raws.len() as u64 - 1;
+        let (_dir, cache) = temp_cache();
+        cache.add(first_height, &first_block).unwrap();
+
+        let node = PanicAtHeight {
+            inner: fake_serving_chain(raws.into_iter().skip(1).collect(), tip),
+            panic_height: first_height + 1,
+        };
+        let node: Arc<dyn NodeRpc> = Arc::new(node);
+        let error = step(&node, &cache, first_height, &config())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StepError::FetchTask(_)));
+        // The cache must be untouched: the gap is a dead task, not a reorg.
+        assert_eq!(cache.latest_height().unwrap(), Some(first_height));
     }
 
     #[tokio::test]
