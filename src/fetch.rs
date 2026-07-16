@@ -58,6 +58,11 @@ pub enum FetchError {
     /// The blocking parse task did not complete (runtime shutdown or a parser panic).
     #[error("block parse task failed: {0}")]
     ParseTask(#[from] tokio::task::JoinError),
+    /// The ingest window's concurrency semaphore was closed before this fetch ran. Nothing closes
+    /// it today, so this is unreachable in practice; mapped to an error (not a panic) per the
+    /// no-`expect`-outside-tests rule.
+    #[error("ingest window closed before the fetch ran: {0}")]
+    WindowClosed(#[from] tokio::sync::AcquireError),
 }
 
 /// Fetch the block at `height` and build its `CompactBlock`, including the note-commitment tree sizes.

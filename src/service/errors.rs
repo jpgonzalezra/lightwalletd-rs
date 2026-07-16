@@ -50,6 +50,7 @@ impl From<FetchError> for Status {
                 Status::internal(err.to_string())
             }
             FetchError::ParseTask(e) => Status::internal(e.to_string()),
+            FetchError::WindowClosed(e) => Status::internal(e.to_string()),
         }
     }
 }

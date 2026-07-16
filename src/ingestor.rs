@@ -166,7 +166,7 @@ async fn step(
     // Fetch the window concurrently, then keep the longest prefix that chains onto the cached tip.
     let last = tip_height.min(next.saturating_add(config.window.saturating_sub(1) as u64));
     let started = Instant::now();
-    let results = fetch_window(node, next..=last, config.concurrency).await;
+    let (results, panicked) = fetch_window(node, next..=last, config.concurrency).await;
 
     let mut prev_hash = cache.latest_hash()?;
     let mut batch: Vec<CompactBlock> = Vec::with_capacity(results.len());
@@ -217,6 +217,9 @@ async fn step(
         );
     }
 
+    // A panicked fetch task counts as a window failure too (unless a per-height error already
+    // ended the window): it must never be quietly absorbed as a shorter prefix.
+    let failure = failure.or_else(|| panicked.map(StepError::FetchTask));
     match failure {
         // Nothing usable arrived: surface the error so the run loop backs off.
         Some(error) if batch.is_empty() => Err(error),
@@ -230,32 +233,54 @@ async fn step(
 }
 
 /// Fetch `heights` from the node with at most `concurrency` requests in flight, returning each
-/// height's result in ascending order. Failures are per-height; the caller decides how much of the
-/// window to keep.
+/// height's result in ascending order plus, separately, the first fetch task that panicked (its
+/// height is lost with the panic, so it cannot be a per-height entry). Failures are per-height;
+/// the caller decides how much of the window to keep.
 async fn fetch_window(
     node: &Arc<dyn NodeRpc>,
     heights: std::ops::RangeInclusive<u64>,
     concurrency: usize,
-) -> BTreeMap<u64, Result<CompactBlock, FetchError>> {
+) -> (
+    BTreeMap<u64, Result<CompactBlock, FetchError>>,
+    Option<tokio::task::JoinError>,
+) {
     let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
     let mut tasks = JoinSet::new();
     for height in heights {
         let node = Arc::clone(node);
         let semaphore = Arc::clone(&semaphore);
         tasks.spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .expect("ingest semaphore is never closed");
-            (height, fetch::compact_block(node.as_ref(), height).await)
+            // `acquire_owned` only fails if the semaphore were closed, which nothing here does;
+            // treat it as this height's fetch failing rather than panicking the task.
+            match semaphore.acquire_owned().await {
+                Ok(_permit) => (height, fetch::compact_block(node.as_ref(), height).await),
+                Err(closed) => (height, Err(closed.into())),
+            }
         });
     }
     let mut results = BTreeMap::new();
+    let mut panicked = None;
     while let Some(joined) = tasks.join_next().await {
-        let (height, result) = joined.expect("fetch task neither panics nor is aborted");
-        results.insert(height, result);
+        match joined {
+            Ok((height, result)) => {
+                results.insert(height, result);
+            }
+            // A panicked fetch is a bug, but the ingestor task's handle is detached (lib.rs), so
+            // resuming the unwind would kill ingestion silently while the server keeps serving a
+            // frozen cache. Surface it loudly instead and let the step fail so the run loop backs
+            // off — a deterministic panic then shows up as a repeating error, not a hang.
+            Err(join_error) if join_error.is_panic() => {
+                tracing::error!(%join_error, "ingest fetch task panicked");
+                panicked.get_or_insert(join_error);
+            }
+            // Cancelled (runtime shutdown mid-window): the missing height simply ends the chained
+            // prefix, and the next step — if any — refetches from there.
+            Err(join_error) => {
+                tracing::warn!(%join_error, "ingest fetch task cancelled; skipping");
+            }
+        }
     }
-    results
+    (results, panicked)
 }
 
 /// Roll the cache back to `target` (keeping `target` itself). A rollback that would cross the
@@ -291,6 +316,8 @@ enum StepError {
     Cache(#[from] CacheError),
     #[error("decoding tip hash: {0}")]
     Encoding(#[from] hex::FromHexError),
+    #[error("ingest fetch task panicked: {0}")]
+    FetchTask(tokio::task::JoinError),
 }
 
 impl StepError {
@@ -676,6 +703,24 @@ mod tests {
             error,
             StepError::Fetch(FetchError::UnexpectedHeight { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn step_surfaces_a_panicked_fetch_task_as_a_step_error() {
+        let (_dir, cache) = temp_cache();
+
+        // Only `get_blockchain_info` is configured, so the window's fetch task panics inside the
+        // fake ("get_block_verbose not configured"). The panic must come back as a step failure —
+        // driving the run loop's backoff — rather than unwinding into (and silently killing) the
+        // detached ingestor task, and rather than being absorbed as an empty window.
+        let fake = FakeNode {
+            blockchain_info: Some(blockchain_info(100, &"00".repeat(32))),
+            ..Default::default()
+        };
+        let error = run_step(fake, &cache, 100).await.unwrap_err();
+
+        assert!(matches!(error, StepError::FetchTask(_)));
+        assert!(!error.is_corruption());
     }
 
     #[test]
