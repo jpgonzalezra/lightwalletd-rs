@@ -265,7 +265,7 @@ async fn readstate_node(
         state_config.cache_dir = dir;
     }
 
-    let (read_state, latest_tip, _chain_tip_change, _sync_task) =
+    let (read_state, latest_tip, _chain_tip_change, sync_task) =
         zebra_rpc::sync::init_read_state_with_syncer(state_config.clone(), &network, indexer)
             .await
             .map_err(|error| anyhow::anyhow!("read state init task failed: {error}"))?
@@ -277,6 +277,18 @@ async fn readstate_node(
                     state_config.cache_dir.display()
                 )
             })?;
+    // `TrustedChainSync` retries a lost indexer connection internally (its sync loop re-subscribes
+    // forever), so the task only completes if it panics or the runtime shuts down. Supervise it
+    // anyway: if it ever does die, the tip would freeze while the server keeps serving increasingly
+    // stale data — that must be an `error` in the logs, not silence.
+    tokio::spawn(async move {
+        let result = sync_task.await;
+        tracing::error!(
+            ?result,
+            "zebra state sync task exited; the readstate tip will no longer advance — restart the \
+             server (or switch to --backend rpc)"
+        );
+    });
     tracing::info!(
         state_dir = %state_config.cache_dir.display(),
         indexer = %indexer,
