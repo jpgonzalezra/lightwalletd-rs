@@ -25,9 +25,9 @@ const MAX_EXCLUDE_TXID_SUFFIXES: usize = 10_000;
 /// How often an open `GetMempoolStream` re-checks staleness while idle — i.e. while no new snapshot
 /// has been published, the common case when the node is down and the monitor has stopped publishing
 /// (`tokio::sync::watch::Receiver::changed` only wakes on an actual publish, so a stream waiting on it
-/// alone would never notice time passing). Matches the monitor's own refresh cadence, so a stalled
-/// stream notices staleness about as promptly as a healthy poll would.
-const STALENESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// alone would never notice time passing). Aliases the monitor's own refresh cadence, so a stalled
+/// stream notices staleness about as promptly as a healthy poll would — and the two can never drift.
+const STALENESS_POLL_INTERVAL: Duration = super::mempool_monitor::REFRESH_INTERVAL;
 
 /// The status served instead of a snapshot older than the staleness cutoff
 /// (`mempool_monitor::MempoolSnapshot::is_stale`), on both `GetMempoolTx` and `GetMempoolStream`.
@@ -162,10 +162,13 @@ pub(super) async fn get_mempool_stream(
                     if changed.is_err() {
                         break; // monitor gone (shouldn't happen) ⇒ end the stream
                     }
-                    snapshot = receiver.borrow_and_update().clone();
                 }
                 _ = tokio::time::sleep(STALENESS_POLL_INTERVAL) => {}
             }
+            // Whichever branch woke us, serve the newest published snapshot: a staleness-poll tick
+            // that raced a publish must pick up the fresh value instead of erroring on the old one.
+            // (An unchanged borrow just re-clones the same `Arc`, which the resume index absorbs.)
+            snapshot = receiver.borrow_and_update().clone();
             check_stale(&snapshot)?;
         }
     };
@@ -490,6 +493,34 @@ mod tests {
         // via its staleness poll and end with `Unavailable` instead of hanging open silently.
         let status = stream.next().await.unwrap().unwrap_err();
         assert_eq!(status.code(), Code::Unavailable);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_mempool_stream_serves_a_fresh_snapshot_that_raced_the_staleness_poll() {
+        let txs = crate::testutil::shielded_v5_txs();
+        let (raw_a, _, _) = txs[0].clone();
+        let (raw_b, _, _) = txs[1].clone();
+        let first_entry = entry_from(&raw_a);
+        let second_entry = entry_from(&raw_b);
+        let expected = second_entry.raw.clone();
+        let handle = MempoolHandle::fixed(snapshot_of(vec![first_entry.clone()]));
+        let (_dir, streamer) = streamer_with_handle(handle.clone());
+
+        let mut stream = streamer
+            .get_mempool_stream(Request::new(crate::proto::Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(stream.next().await.unwrap().unwrap().data, first_entry.raw);
+
+        // The old snapshot ages past the cutoff, but a fresh one lands before the stream's next
+        // wake-up. Whichever select branch wins the race, the stream must pick up the fresh
+        // snapshot and keep serving rather than terminating with Unavailable on the old one.
+        tokio::time::advance(STALENESS_CUTOFF + std::time::Duration::from_secs(1)).await;
+        handle.publish(snapshot_of(vec![first_entry, second_entry]));
+
+        let next = stream.next().await.unwrap().unwrap();
+        assert_eq!(next.data, expected);
     }
 
     #[tokio::test(start_paused = true)]

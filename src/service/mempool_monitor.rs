@@ -15,8 +15,9 @@ use crate::node::{NodeError, NodeRpc};
 use crate::proto::CompactTx;
 
 /// Minimum delay between two mempool refreshes; the wallet-visible staleness bound while the node is
-/// healthy.
-const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+/// healthy. Also the cadence at which an idle `GetMempoolStream` re-checks staleness
+/// (`mempool::STALENESS_POLL_INTERVAL` aliases this constant so the two can never drift).
+pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How long a snapshot may go without a successful refresh before it is too stale to serve, per the
 /// fault-path staleness contract (docs/decisions/0021-mempool-staleness-contract.md). Chosen well
