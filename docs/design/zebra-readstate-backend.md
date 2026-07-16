@@ -83,6 +83,13 @@ The mapping layer is generic over `S: tower::Service<ReadRequest, Response = Rea
 tests drive it with a scripted service (R7); `ZebraStateNode<ReadStateService>` is the production
 instantiation.
 
+One deliberate divergence in `get_blockchain_info`: the readstate backend reports
+`estimatedheight = blocks` (its own tip), while zebrad's RPC estimates ahead of its tip during
+initial sync. `GetLightdInfo.estimatedHeight` — which wallets use for sync progress — therefore
+tracks the local state's tip instead of zebrad's network estimate while the node is still syncing.
+In steady state (the only supported deployment for this backend: a synced, co-located zebrad) the
+two are identical.
+
 ### Configuration
 
 - `--backend {rpc,readstate}` (default `rpc`).
