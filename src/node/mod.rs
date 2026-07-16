@@ -49,10 +49,12 @@ pub enum NodeError {
     /// The response had neither a `result` nor an `error`.
     #[error("RPC response had no result")]
     EmptyResult,
-    /// The in-process read state service failed (`readstate` backend, ADR 0023). Maps to
-    /// `Unavailable` by the default error mapping, like a node transport failure.
+    /// The in-process read state service failed (`readstate` backend, ADR 0023). Holds the
+    /// underlying error as a boxed source (`zebra_state::BoxError` is an alias of exactly this
+    /// type), preserving the cause chain for server-side logging; the client-facing gRPC mapping
+    /// replaces it with a generic message, since RocksDB errors routinely embed local paths.
     #[error("read state error: {0}")]
-    State(String),
+    State(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 /// A client for the zebrad JSON-RPC endpoint.
@@ -112,7 +114,8 @@ pub trait NodeRpc: Send + Sync {
         end: u64,
     ) -> Result<Vec<String>, NodeError>;
     /// Call `z_getsubtreesbyindex` for note-commitment subtrees of a shielded `protocol`
-    /// (`"sapling"` or `"orchard"`), starting at `start_index` (`max_entries == 0` means no limit).
+    /// (`"sapling"`, `"orchard"`, or `"ironwood"`), starting at `start_index` (`max_entries == 0`
+    /// means no limit).
     async fn get_subtrees(
         &self,
         protocol: &str,

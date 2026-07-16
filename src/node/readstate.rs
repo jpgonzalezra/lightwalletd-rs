@@ -45,8 +45,9 @@ pub trait TipSource: Send + Sync {
 impl TipSource for zebra_state::LatestChainTip {
     fn best_tip(&self) -> Option<(u64, String)> {
         use zebra_chain::chain_tip::ChainTip;
-        let height = self.best_tip_height()?;
-        let hash = self.best_tip_hash()?;
+        // One atomic read: two separate height/hash reads could straddle a tip advance and pair
+        // height N with the hash of N+1 — wallet-visible via GetLatestBlock.
+        let (height, hash) = self.best_tip_height_and_hash()?;
         Some((height.0 as u64, hash.to_string()))
     }
 }
@@ -85,17 +86,17 @@ where
             .clone()
             .ready()
             .await
-            .map_err(|error| NodeError::State(error.to_string()))?
+            .map_err(NodeError::State)?
             .call(request)
             .await
-            .map_err(|error| NodeError::State(error.to_string()))
+            .map_err(NodeError::State)
     }
 
     /// The best tip, or a synthesized "not ready" error before the state has one.
     fn best_tip(&self) -> Result<(u64, String), NodeError> {
         self.tip
             .best_tip()
-            .ok_or_else(|| NodeError::State("read state has no chain tip yet".to_string()))
+            .ok_or_else(|| NodeError::State("read state has no chain tip yet".into()))
     }
 
     /// Fetch the block at `hash_or_height`, or the zebrad-compatible `-8` error when absent.
@@ -166,7 +167,17 @@ where
 
 /// A response variant the request cannot produce — a bug in the mapping, not a node condition.
 fn unexpected(response: &ReadResponse) -> NodeError {
-    NodeError::State(format!("unexpected read response: {response:?}"))
+    NodeError::State(format!("unexpected read response: {response:?}").into())
+}
+
+/// A wire height (u64) in zebra's height domain, or `None` when it exceeds
+/// [`block::Height::MAX`] and therefore cannot exist in the state — callers must not let such a
+/// height wrap around an `as u32` cast into some other block's height.
+fn state_height(height: u64) -> Option<block::Height> {
+    u32::try_from(height)
+        .ok()
+        .map(block::Height)
+        .filter(|height| *height <= block::Height::MAX)
 }
 
 /// The branded upgrade name zebrad reports (`"NU6.3"`, not the Rust identifier `Nu6_3`): zebra
@@ -236,7 +247,8 @@ where
                 },
             );
         }
-        let chaintip = NetworkUpgrade::current(&self.network, block::Height(blocks as u32))
+        let tip_height = state_height(blocks).unwrap_or(block::Height::MAX);
+        let chaintip = NetworkUpgrade::current(&self.network, tip_height)
             .branch_id()
             .map(|id| id.encode_hex::<String>())
             .unwrap_or_default();
@@ -252,7 +264,12 @@ where
     }
 
     async fn get_block_verbose(&self, height: u64) -> Result<GetBlockVerbose, NodeError> {
-        let id = HashOrHeight::Height(block::Height(height as u32));
+        // A height past the representable range cannot exist: same -8 as an absent block.
+        let height = state_height(height).ok_or_else(|| NodeError::Rpc {
+            code: RPC_BLOCK_NOT_FOUND,
+            message: "Block not found".to_string(),
+        })?;
+        let id = HashOrHeight::Height(height);
         let block = self.block(id).await?;
         let hash = block.hash().to_string();
 
@@ -277,7 +294,7 @@ where
         let block = self.block(id).await?;
         block
             .zcash_serialize_to_vec()
-            .map_err(|error| NodeError::State(format!("serializing block: {error}")))
+            .map_err(|error| NodeError::State(format!("serializing block: {error}").into()))
     }
 
     async fn get_raw_transaction(&self, txid: &str) -> Result<GetRawTransaction, NodeError> {
@@ -290,7 +307,7 @@ where
                 let hex = mined
                     .tx
                     .zcash_serialize_to_vec()
-                    .map_err(|error| NodeError::State(format!("serializing tx: {error}")))?;
+                    .map_err(|error| NodeError::State(format!("serializing tx: {error}").into()))?;
                 Ok(GetRawTransaction {
                     hex: hex::encode(hex),
                     height: mined.height.0 as i64,
@@ -311,7 +328,7 @@ where
         let block = self.block(id).await?;
         let height = block
             .coinbase_height()
-            .ok_or_else(|| NodeError::State("block has no coinbase height".to_string()))?;
+            .ok_or_else(|| NodeError::State("block has no coinbase height".into()))?;
         let hash = block.hash();
 
         let sapling = match self.read(ReadRequest::SaplingTree(id)).await? {
@@ -404,9 +421,10 @@ where
     ) -> Result<Vec<String>, NodeError> {
         let parsed = self.parse_addresses(addresses)?;
         let (tip, _) = self.best_tip()?;
-        // Match the JSON-RPC contract: start/end of 0 mean an open bound.
-        let start = block::Height(start.max(1) as u32);
-        let end = block::Height(if end == 0 { tip as u32 } else { end as u32 });
+        // Match the JSON-RPC contract: start/end of 0 mean an open bound. Out-of-range bounds
+        // clamp to Height::MAX (an empty tail) instead of wrapping into some other height.
+        let start = state_height(start.max(1)).unwrap_or(block::Height::MAX);
+        let end = state_height(if end == 0 { tip } else { end }).unwrap_or(block::Height::MAX);
         match self
             .read(ReadRequest::TransactionIdsByAddresses {
                 addresses: parsed,
@@ -427,8 +445,20 @@ where
         start_index: u32,
         max_entries: u32,
     ) -> Result<GetSubtrees, NodeError> {
-        let start_index = NoteCommitmentSubtreeIndex(start_index as u16);
-        let limit = (max_entries > 0).then_some(NoteCommitmentSubtreeIndex(max_entries as u16));
+        // Subtree indexes are u16 in zebra's state, so a start past u16::MAX cannot match any
+        // stored subtree: answer with the empty set instead of silently wrapping around and
+        // serving the wrong subtrees.
+        let Ok(start_index) = u16::try_from(start_index) else {
+            return Ok(GetSubtrees {
+                subtrees: Vec::new(),
+            });
+        };
+        let start_index = NoteCommitmentSubtreeIndex(start_index);
+        // Likewise a max_entries beyond u16::MAX cannot bound a u16-indexed range: clamp instead
+        // of truncating (65536 must not become a limit of 0 == an empty response).
+        let limit = (max_entries > 0)
+            .then(|| u16::try_from(max_entries).unwrap_or(u16::MAX))
+            .map(NoteCommitmentSubtreeIndex);
         let subtrees = match protocol {
             "sapling" => match self
                 .read(ReadRequest::SaplingSubtrees { start_index, limit })
@@ -711,80 +741,93 @@ mod tests {
         ));
     }
 
+    /// Mainnet activation height of `upgrade`, looked up from the zebra_chain API (not
+    /// hardcoded), so tests track whatever the pinned zebra-chain version actually activates
+    /// instead of silently drifting from it.
+    fn mainnet_activation_height(upgrade: NetworkUpgrade) -> u64 {
+        Network::Mainnet
+            .full_activation_list()
+            .into_iter()
+            .find(|(_, entry)| *entry == upgrade)
+            .map(|(height, _)| height.0 as u64)
+            .unwrap_or_else(|| panic!("{upgrade:?} must be activated on mainnet"))
+    }
+
+    /// The hex branch id `get_blockchain_info` keys its upgrade map by.
+    fn branch_id_hex(upgrade: NetworkUpgrade) -> String {
+        upgrade
+            .branch_id()
+            .unwrap_or_else(|| panic!("{upgrade:?} must have a branch id"))
+            .encode_hex()
+    }
+
     #[tokio::test]
-    async fn get_blockchain_info_reports_chain_upgrades_and_chaintip() {
-        let network = Network::Mainnet;
+    async fn get_blockchain_info_reports_the_pinned_tip() {
+        let (node, _) = node_with(vec![], Some((1_000_000, "ab".repeat(32))));
 
-        // Looked up from the zebra_chain API (not hardcoded), so the test tracks whatever the
-        // pinned zebra-chain version actually activates instead of silently drifting from it.
-        let activation_height = |target: NetworkUpgrade| -> u64 {
-            network
-                .full_activation_list()
-                .into_iter()
-                .find(|(_, upgrade)| *upgrade == target)
-                .map(|(height, _)| height.0 as u64)
-                .unwrap_or_else(|| panic!("{target:?} must be activated on mainnet"))
-        };
-        let nu5_height = activation_height(NetworkUpgrade::Nu5);
-        let nu5_branch_id = NetworkUpgrade::Nu5
-            .branch_id()
-            .unwrap()
-            .encode_hex::<String>();
-        let nu6_3_height = activation_height(NetworkUpgrade::Nu6_3);
-        let nu6_2_branch_id = NetworkUpgrade::Nu6_2
-            .branch_id()
-            .unwrap()
-            .encode_hex::<String>();
-        let nu6_3_branch_id = NetworkUpgrade::Nu6_3
-            .branch_id()
-            .unwrap()
-            .encode_hex::<String>();
-
-        // Pre-NU6.3 tip: the chaintip branch id is still NU6.2's.
-        let (node, _) = node_with(vec![], Some((nu6_3_height - 1, "ab".repeat(32))));
         let info = node.get_blockchain_info().await.unwrap();
+
         assert_eq!(info.chain, "main");
-        assert_eq!(info.blocks, nu6_3_height - 1);
+        assert_eq!(info.blocks, 1_000_000);
         assert_eq!(info.bestblockhash, "ab".repeat(32));
+    }
+
+    #[tokio::test]
+    async fn get_blockchain_info_keys_upgrades_by_branch_id() {
+        let nu5_height = mainnet_activation_height(NetworkUpgrade::Nu5);
+        let (node, _) = node_with(vec![], Some((nu5_height, "ab".repeat(32))));
+
+        let info = node.get_blockchain_info().await.unwrap();
+
         let nu5 = info
             .upgrades
-            .get(&nu5_branch_id)
+            .get(&branch_id_hex(NetworkUpgrade::Nu5))
             .expect("NU5 entry present, keyed by its branch id");
         assert_eq!(nu5.activationheight, nu5_height);
         assert_eq!(nu5.status, "active");
-        assert_eq!(info.consensus.chaintip, nu6_2_branch_id);
+    }
 
-        // Post-NU6.3 tip: the chaintip branch id flips to NU6.3's, and NU6.3's own upgrade entry
-        // (if present) reports itself active.
-        let (node, _) = node_with(vec![], Some((nu6_3_height, "cd".repeat(32))));
+    #[tokio::test]
+    async fn get_blockchain_info_reports_nu6_2_chaintip_before_nu6_3_activation() {
+        let nu6_3_height = mainnet_activation_height(NetworkUpgrade::Nu6_3);
+        let (node, _) = node_with(vec![], Some((nu6_3_height - 1, "ab".repeat(32))));
+
         let info = node.get_blockchain_info().await.unwrap();
-        assert_eq!(info.consensus.chaintip, nu6_3_branch_id);
-        if let Some(nu6_3) = info.upgrades.get(&nu6_3_branch_id) {
-            assert_eq!(nu6_3.status, "active");
-        }
+
+        assert_eq!(
+            info.consensus.chaintip,
+            branch_id_hex(NetworkUpgrade::Nu6_2)
+        );
+    }
+
+    #[tokio::test]
+    async fn get_blockchain_info_flips_chaintip_to_nu6_3_at_activation() {
+        let nu6_3_height = mainnet_activation_height(NetworkUpgrade::Nu6_3);
+        let (node, _) = node_with(vec![], Some((nu6_3_height, "cd".repeat(32))));
+
+        let info = node.get_blockchain_info().await.unwrap();
+
+        assert_eq!(
+            info.consensus.chaintip,
+            branch_id_hex(NetworkUpgrade::Nu6_3)
+        );
+        let nu6_3 = info
+            .upgrades
+            .get(&branch_id_hex(NetworkUpgrade::Nu6_3))
+            .expect("NU6.3 entry present");
+        assert_eq!(nu6_3.status, "active");
     }
 
     #[tokio::test]
     async fn get_blockchain_info_reports_a_pending_upgrade_before_its_activation() {
-        let network = Network::Mainnet;
-        let nu6_3_height = network
-            .full_activation_list()
-            .into_iter()
-            .find(|(_, upgrade)| *upgrade == NetworkUpgrade::Nu6_3)
-            .map(|(height, _)| height.0 as u64)
-            .expect("NU6.3 must be activated on mainnet");
-        let nu6_3_branch_id = NetworkUpgrade::Nu6_3
-            .branch_id()
-            .unwrap()
-            .encode_hex::<String>();
-
+        let nu6_3_height = mainnet_activation_height(NetworkUpgrade::Nu6_3);
         let (node, _) = node_with(vec![], Some((nu6_3_height - 1, "00".repeat(32))));
 
         let info = node.get_blockchain_info().await.unwrap();
 
         let nu6_3 = info
             .upgrades
-            .get(&nu6_3_branch_id)
+            .get(&branch_id_hex(NetworkUpgrade::Nu6_3))
             .expect("NU6.3 entry present");
         assert_eq!(nu6_3.status, "pending");
     }
@@ -848,6 +891,155 @@ mod tests {
                 assert_eq!(*height_range, block::Height(100)..=block::Height(500));
             }
             other => panic!("expected TransactionIdsByAddresses, got {other:?}"),
+        }
+    }
+
+    /// A regtest network where Sapling and NU5 activate at height 1 and NU6.3 never does, so the
+    /// testdata block's height (380640) has sapling+orchard active and ironwood inactive.
+    fn regtest_with_sapling_and_nu5() -> Network {
+        use zebra_chain::parameters::testnet::{ConfiguredActivationHeights, RegtestParameters};
+        Network::new_regtest(RegtestParameters {
+            activation_heights: ConfiguredActivationHeights {
+                sapling: Some(1),
+                nu5: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn get_treestate_omits_every_pool_inactive_at_the_blocks_height() {
+        // On mainnet the testdata block (380640) predates Sapling activation: all three pools
+        // must be omitted (empty final_state) even though the state has trees to serve —
+        // matching zebrad, which omits a pool rather than serializing an empty frontier.
+        let (_raw, block) = first_testdata_block();
+        let (node, _) = node_with(
+            vec![
+                ReadResponse::Block(Some(Arc::new(block))),
+                ReadResponse::SaplingTree(Some(Arc::new(SaplingTree::default()))),
+                ReadResponse::OrchardTree(Some(Arc::new(OrchardTree::default()))),
+                ReadResponse::IronwoodTree(Some(Arc::new(OrchardTree::default()))),
+            ],
+            None,
+        );
+
+        let treestate = node.get_treestate("380640").await.unwrap();
+
+        assert_eq!(treestate.height, 380_640);
+        assert_eq!(treestate.sapling.commitments.final_state, "");
+        assert_eq!(treestate.orchard.commitments.final_state, "");
+        assert_eq!(treestate.ironwood.commitments.final_state, "");
+    }
+
+    #[tokio::test]
+    async fn get_treestate_serializes_only_the_pools_active_at_the_blocks_height() {
+        // The same block on a regtest where Sapling and NU5 are active from height 1 (and NU6.3
+        // never activates): sapling and orchard serialize their trees through `to_rpc_bytes`,
+        // ironwood stays omitted — the activation boundary in one response.
+        let (_raw, block) = first_testdata_block();
+        let expected_hash = block.hash().to_string();
+        let sapling_tree = SaplingTree::default();
+        let orchard_tree = OrchardTree::default();
+        let expected_sapling = hex::encode(sapling_tree.to_rpc_bytes());
+        let expected_orchard = hex::encode(orchard_tree.to_rpc_bytes());
+        let read_state = ScriptedReadState::new(vec![
+            ReadResponse::Block(Some(Arc::new(block))),
+            ReadResponse::SaplingTree(Some(Arc::new(sapling_tree))),
+            ReadResponse::OrchardTree(Some(Arc::new(orchard_tree))),
+            ReadResponse::IronwoodTree(None),
+        ]);
+        let node = ZebraStateNode::new(
+            read_state,
+            FixedTip(None),
+            unreachable_rpc(),
+            regtest_with_sapling_and_nu5(),
+        );
+
+        let treestate = node.get_treestate("380640").await.unwrap();
+
+        assert_eq!(treestate.hash, expected_hash);
+        assert!(!expected_sapling.is_empty());
+        assert_eq!(treestate.sapling.commitments.final_state, expected_sapling);
+        assert_eq!(treestate.orchard.commitments.final_state, expected_orchard);
+        assert_eq!(treestate.ironwood.commitments.final_state, "");
+    }
+
+    #[tokio::test]
+    async fn get_address_balance_maps_the_state_balance() {
+        let addresses = vec![crate::testutil::example_taddress()];
+        let (node, _) = node_with(
+            vec![ReadResponse::AddressBalance {
+                balance: zebra_chain::amount::Amount::try_from(123_456)
+                    .expect("valid nonnegative amount"),
+                received: 200_000,
+            }],
+            None,
+        );
+
+        let balance = node.get_address_balance(&addresses).await.unwrap();
+
+        assert_eq!(balance.balance, 123_456);
+    }
+
+    #[tokio::test]
+    async fn get_subtrees_maps_orchard_subtree_roots_and_heights() {
+        let root = zebra_chain::orchard::tree::Node::try_from([0u8; 32])
+            .expect("zero is a canonical pallas base encoding");
+        let mut subtrees = std::collections::BTreeMap::new();
+        subtrees.insert(
+            NoteCommitmentSubtreeIndex(5),
+            zebra_chain::subtree::NoteCommitmentSubtreeData::new(block::Height(1_000), root),
+        );
+        let (node, read_state) = node_with(vec![ReadResponse::OrchardSubtrees(subtrees)], None);
+
+        let result = node.get_subtrees("orchard", 5, 1).await.unwrap();
+
+        assert_eq!(result.subtrees.len(), 1);
+        assert_eq!(result.subtrees[0].root, "00".repeat(32));
+        assert_eq!(result.subtrees[0].end_height, 1_000);
+        match &read_state.requests()[0] {
+            ReadRequest::OrchardSubtrees { start_index, limit } => {
+                assert_eq!(*start_index, NoteCommitmentSubtreeIndex(5));
+                assert_eq!(*limit, Some(NoteCommitmentSubtreeIndex(1)));
+            }
+            other => panic!("expected OrchardSubtrees, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_subtrees_start_index_past_u16_max_returns_empty_without_a_state_read() {
+        // Subtree indexes are u16 in zebra's state: a start past u16::MAX must be the empty set,
+        // not a wrapped-around read of some other subtree.
+        let (node, read_state) = node_with(vec![], None);
+
+        let result = node
+            .get_subtrees("sapling", u32::from(u16::MAX) + 1, 0)
+            .await
+            .unwrap();
+
+        assert!(result.subtrees.is_empty());
+        assert!(read_state.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_subtrees_clamps_an_oversized_max_entries_instead_of_truncating() {
+        // 65536 as u16 would truncate to a limit of 0 — an empty response where the rpc backend
+        // returns data. It must clamp to u16::MAX instead.
+        let (node, read_state) = node_with(
+            vec![ReadResponse::SaplingSubtrees(Default::default())],
+            None,
+        );
+
+        node.get_subtrees("sapling", 0, u32::from(u16::MAX) + 1)
+            .await
+            .unwrap();
+
+        match &read_state.requests()[0] {
+            ReadRequest::SaplingSubtrees { limit, .. } => {
+                assert_eq!(*limit, Some(NoteCommitmentSubtreeIndex(u16::MAX)));
+            }
+            other => panic!("expected SaplingSubtrees, got {other:?}"),
         }
     }
 
