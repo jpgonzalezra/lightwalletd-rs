@@ -886,34 +886,67 @@ mod tests {
         assert!(!config.nocache);
     }
 
-    /// Serializes tests that mutate process-global environment variables, so they cannot
+    /// Serializes tests that read or mutate process-global environment variables, so they cannot
     /// interleave and observe each other's values.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    #[test]
-    fn cli_parsing_reads_ingest_tuning_from_env_when_flags_are_absent() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK; no other thread reads/writes these vars concurrently.
-        unsafe {
-            std::env::set_var("LWD_INGEST_WINDOW", "128");
-            std::env::set_var("LWD_INGEST_CONCURRENCY", "4");
+    /// Take [`ENV_LOCK`], tolerating poison: [`EnvVarGuard`] restores the environment even when a
+    /// test body panics, so the shared state behind the lock is always clean and one failed test
+    /// must not cascade into confusing secondary failures in every sibling env test.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Sets environment variables and removes them again on drop — even when an assertion between
+    /// set and cleanup panics — so a failed test cannot leak its vars into sibling tests.
+    struct EnvVarGuard {
+        keys: Vec<&'static str>,
+    }
+
+    impl EnvVarGuard {
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            // SAFETY: callers hold ENV_LOCK, serializing all access to these process-global vars.
+            unsafe {
+                for (key, value) in vars {
+                    std::env::set_var(key, value);
+                }
+            }
+            Self {
+                keys: vars.iter().map(|(key, _)| *key).collect(),
+            }
         }
-        let cli = Cli::try_parse_from(["lightwalletd-rs", "--no-tls-very-insecure"]).unwrap();
-        assert_eq!(cli.ingest_window, 128);
-        assert_eq!(cli.ingest_concurrency, 4);
-        unsafe {
-            std::env::remove_var("LWD_INGEST_WINDOW");
-            std::env::remove_var("LWD_INGEST_CONCURRENCY");
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: still under the caller's ENV_LOCK (locals drop in reverse declaration order,
+            // so this runs before the lock guard is released).
+            unsafe {
+                for key in &self.keys {
+                    std::env::remove_var(key);
+                }
+            }
         }
     }
 
     #[test]
+    fn cli_parsing_reads_ingest_tuning_from_env_when_flags_are_absent() {
+        let _lock = env_lock();
+        let _vars = EnvVarGuard::set(&[
+            ("LWD_INGEST_WINDOW", "128"),
+            ("LWD_INGEST_CONCURRENCY", "4"),
+        ]);
+        let cli = Cli::try_parse_from(["lightwalletd-rs", "--no-tls-very-insecure"]).unwrap();
+        assert_eq!(cli.ingest_window, 128);
+        assert_eq!(cli.ingest_concurrency, 4);
+    }
+
+    #[test]
     fn cli_parsing_flag_overrides_env_for_ingest_tuning() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK; no other thread reads/writes this var concurrently.
-        unsafe {
-            std::env::set_var("LWD_INGEST_WINDOW", "128");
-        }
+        let _lock = env_lock();
+        let _vars = EnvVarGuard::set(&[("LWD_INGEST_WINDOW", "128")]);
         let cli = Cli::try_parse_from([
             "lightwalletd-rs",
             "--no-tls-very-insecure",
@@ -922,30 +955,25 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(cli.ingest_window, 16);
-        unsafe {
-            std::env::remove_var("LWD_INGEST_WINDOW");
-        }
     }
 
     #[test]
     fn cli_parsing_reads_log_flags_from_env_when_flags_are_absent() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK; no other thread reads/writes these vars concurrently.
-        unsafe {
-            std::env::set_var("LWD_LOG_LEVEL", "debug");
-            std::env::set_var("LWD_LOG_FILE", "/tmp/lwd-test.log");
-        }
+        let _lock = env_lock();
+        let _vars = EnvVarGuard::set(&[
+            ("LWD_LOG_LEVEL", "debug"),
+            ("LWD_LOG_FILE", "/tmp/lwd-test.log"),
+        ]);
         let cli = Cli::try_parse_from(["lightwalletd-rs", "--no-tls-very-insecure"]).unwrap();
         assert_eq!(cli.log_level, "debug");
         assert_eq!(cli.log_file, Some(PathBuf::from("/tmp/lwd-test.log")));
-        unsafe {
-            std::env::remove_var("LWD_LOG_LEVEL");
-            std::env::remove_var("LWD_LOG_FILE");
-        }
     }
 
     #[test]
     fn cli_parsing_defaults_log_level_to_info_with_no_log_file() {
+        // Parsing reads the LWD_* env vars, so this must hold the lock too: without it, a sibling
+        // test's LWD_LOG_LEVEL could interleave and flip the "info" assertion sporadically.
+        let _lock = env_lock();
         let cli = Cli::try_parse_from(["lightwalletd-rs", "--no-tls-very-insecure"]).unwrap();
         assert_eq!(cli.log_level, "info");
         assert_eq!(cli.log_file, None);
