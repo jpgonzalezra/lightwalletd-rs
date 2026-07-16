@@ -41,7 +41,7 @@ contrib/bench/
   scripts/{extract-dataset.sh,populate.sh,run-bench.sh,aggregate.py,plot.py}
   charts/                    # SVG charts committed for the README
   data/                      # extracted dataset artifacts (git-ignored)
-  results/                   # per-run outputs (git-ignored)
+  results/                   # per-run outputs (git-ignored); mainnet-*.md summary docs ARE committed
 ```
 
 ## Profiles
@@ -87,6 +87,37 @@ docker compose -f docker-compose.bench.yml --env-file profiles/dense.env <cmd>
    scripts/aggregate.py results/     # Markdown tables
    scripts/plot.py                   # SVG charts -> charts/
    ```
+
+## Charts
+
+`scripts/plot.py` is stdlib-only (no `matplotlib`/plotting deps) and reads raw per-request `ghz` JSON
+from `results/<profile>/<impl>/<request>-c<C>-r<rep>.json`. Regenerate the four read-path charts
+deterministically with:
+
+```
+python3 scripts/plot.py results/ charts/
+```
+
+(equivalently, run with no arguments from `contrib/bench/`, since `results/` and `charts/` are the
+defaults). This writes `charts/{dense,light}-{throughput,latency}.svg`, plus a fifth chart,
+`charts/ingest-sync.svg` (ingest throughput and full-sync wall-clock, NEW Rust vs OLD Rust vs Go),
+written unconditionally on every run.
+
+Unlike the other four, `ingest-sync.svg` is not derived from `results/`: there is no raw per-request
+JSON for a multi-hour ingest/sync run, so its data is a hardcoded table inside `plot.py` itself
+(clearly marked, with a comment pointing at the source docs). Update that block by hand if the results
+docs (named just below) are revised.
+
+**The `results/` directories referenced by the committed summary docs are git-ignored** — only the
+summary markdown (`results/mainnet-2026-07-summary.md`, `results/mainnet-2026-07-phase2.md`) and the
+rendered `charts/*.svg` are committed; the raw `ghz` JSON, sidecar CPU samples, and per-run logs
+underneath `results/{dense,light}/{rust,go}/` are not. To reproduce the read-path charts from scratch,
+run the full **Flow** above (`extract-dataset.sh` → `populate.sh` → `run-bench.sh` → `plot.py`) against
+your own `zebrad`; to regenerate only the charts from an existing `results/` tree (e.g. one you already
+populated locally), the `python3 scripts/plot.py results/ charts/` command above is sufficient on its
+own. The ingest/full-sync numbers in `ingest-sync.svg` can only be reproduced by re-running the
+multi-hour A/B/C and B4 procedures described in the results docs against a live mainnet node; there is
+no shortcut script for those.
 
 ## How the node is neutralized
 

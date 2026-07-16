@@ -146,6 +146,9 @@ Protocol upgrades:
 
 - [0018](decisions/0018-parse-time-branch-id-hardcoded.md) — the parse-time consensus branch ID stays hardcoded at `Nu5`: it is only consulted for pre-v5 transactions (where it does not affect the legacy txid); v5/v6 read the branch ID from the wire.
 - [0019](decisions/0019-pin-librustzcash-prereleases-nu63.md) — NU6.3 support rides the exact-pinned librustzcash pre-release cohort, re-bumped when the finals are published; the crates move together (`cargo tree -d` must show one `zcash_protocol`/`zcash_address`).
+- [0020](decisions/0020-windowed-ingest-batched-commits.md) — catch-up ingests windows of blocks concurrently (`--ingest-window`/`--ingest-concurrency`) committed in one cache transaction per window, with a fetch-time txid cross-check against the node.
+- [0021](decisions/0021-mempool-staleness-contract.md) — mempool snapshots carry a refresh timestamp; snapshots older than a 60 s cutoff make `GetMempoolTx`/`GetMempoolStream` return `Unavailable` instead of serving last-known-good data during a node outage.
+- [0022](decisions/0022-ops-surface-parity.md) — operational-surface parity with the Go reference: gRPC reflection always on, Prometheus metrics on by default at `127.0.0.1:9068`, `--log-level`/`--log-file` (JSON to file), `--gen-cert-very-insecure`, a darkside auto-shutdown timeout, and `--nocache`; the `./lightwalletd-rs-data` default data dir is kept as a deliberate divergence from Go's root-owned `/var/lib/lightwalletd`.
 
 Structure and seams:
 
@@ -219,17 +222,16 @@ cargo run -- --rpc-url http://127.0.0.1:8232 --start-height 3375600 --data-dir /
   --no-tls-very-insecure
 ```
 
-Probe it with `grpcurl`. The server does not expose gRPC reflection, so load the schema from the local
-`.proto` set with `-import-path proto -proto service.proto` (run from the repo root; plaintext, since the
-server above uses `--no-tls-very-insecure`):
+Probe it with `grpcurl`. The server always registers gRPC Server Reflection ([ADR 0022](decisions/0022-ops-surface-parity.md)),
+so `grpcurl` can discover the schema straight from the running server — no local `.proto` checkout needed
+(plaintext, since the server above uses `--no-tls-very-insecure`):
 
 ```sh
-grpcurl -plaintext -import-path proto -proto service.proto \
-  127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
-grpcurl -plaintext -import-path proto -proto service.proto -d '{"height": 419200}' \
+grpcurl -plaintext 127.0.0.1:9067 list
+grpcurl -plaintext 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
+grpcurl -plaintext -d '{"height": 419200}' \
   127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlock
-grpcurl -plaintext -import-path proto -proto service.proto \
-  -d '{"start":{"height":3375690},"end":{"height":3375695}}' \
+grpcurl -plaintext -d '{"start":{"height":3375690},"end":{"height":3375695}}' \
   127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlockRange
 ```
 
@@ -241,12 +243,10 @@ The gRPC server runs over **TLS by default** and requires a PEM certificate and 
 cargo run -- --rpc-url http://127.0.0.1:8232 --tls-cert cert.pem --tls-key key.pem
 ```
 
-Probe it over TLS with `grpcurl` (`-cacert` to trust the certificate; `-proto` because the server does not
-expose reflection):
+Probe it over TLS with `grpcurl` (`-cacert` to trust the certificate; reflection means no `-proto` is needed):
 
 ```sh
-grpcurl -cacert cert.pem -import-path proto -proto service.proto \
-  127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
+grpcurl -cacert cert.pem 127.0.0.1:9067 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
 ```
 
 For local development only, `--no-tls-very-insecure` runs the server in plaintext (so `grpcurl -plaintext`
@@ -254,31 +254,59 @@ works) and logs a warning on startup. **This flag must never be used in producti
 wallet↔server traffic is unencrypted and the server is not authenticated, which leaks query metadata and
 allows impersonation. The `-very-insecure` suffix follows the upstream convention for dangerous flags.
 
+As a middle ground, `--gen-cert-very-insecure` generates an in-memory self-signed certificate for
+`"localhost"` at startup (via `rcgen`) instead of reading `--tls-cert`/`--tls-key` from disk — still
+insecure (the certificate is trusted by nothing) but lets `grpcurl -insecure` exercise the TLS code path
+without hand-rolling a cert first. Mutually exclusive with `--tls-cert`/`--tls-key` and
+`--no-tls-very-insecure` ([ADR 0022](decisions/0022-ops-surface-parity.md)).
+
 This TLS protects the **wallet ↔ server** hop. The **server ↔ node** (`zebrad`) connection is plain HTTP on
 purpose — it is local and never crosses the open network.
 
 ## Metrics
 
 A `tower` layer on the gRPC server records per-method request counts, a latency histogram, and an in-flight
-gauge automatically (no per-handler instrumentation). With `--metrics-bind <addr>` set, the metrics are served
-in the Prometheus text format at `/metrics` on that address (a separate HTTP port from gRPC); without the flag,
-metrics are off.
+gauge automatically (no per-handler instrumentation), served in the Prometheus text format at `/metrics`.
+Metrics are served **by default** at `127.0.0.1:9068` — matching the Go reference, which always serves
+Prometheus on that port — configurable with `--metrics-bind <addr>` and disabled entirely with
+`--no-metrics` ([ADR 0022](decisions/0022-ops-surface-parity.md)).
 
 ```sh
+cargo run -- --rpc-url http://127.0.0.1:8232 --no-tls-very-insecure
+curl http://127.0.0.1:9068/metrics
+# or on a different address:
 cargo run -- --rpc-url http://127.0.0.1:8232 --no-tls-very-insecure --metrics-bind 127.0.0.1:9100
-curl http://127.0.0.1:9100/metrics
 ```
 
 Notable series: `grpc_server_handled_total{grpc_service,grpc_method,grpc_code}` (request count by method and
 gRPC status) and `grpc_server_handling_seconds` (latency histogram). The registry is empty until the first gRPC
 request, so `/metrics` returns nothing until there has been some traffic.
 
+## Logging
+
+`--log-level` (default `info`) sets a `tracing_subscriber::EnvFilter`; an explicit `RUST_LOG` environment
+variable always takes precedence, the usual `tracing-subscriber` convention. By default output is
+human-readable text on stderr; `--log-file <path>` switches it to JSON lines appended to that file instead
+— matching the Go reference's `--log-file`, which switches its logrus output to JSON
+([ADR 0022](decisions/0022-ops-surface-parity.md)). `--log-level`/`--log-file` also read from
+`LWD_LOG_LEVEL`/`LWD_LOG_FILE` when the flag is not given, and `--ingest-window`/`--ingest-concurrency`
+similarly read `LWD_INGEST_WINDOW`/`LWD_INGEST_CONCURRENCY` — an explicit flag always beats the
+environment variable, which in turn beats the default.
+
+```sh
+cargo run -- --rpc-url http://127.0.0.1:8232 --no-tls-very-insecure --log-level debug --log-file /var/log/lightwalletd-rs.log
+tail -f /var/log/lightwalletd-rs.log   # JSON lines
+```
+
 ## Darkside mode
 
 Darkside mode replaces the real node with a controllable, in-memory mock chain, so wallet behaviour can be
 exercised deterministically — reorgs, confirmations, and edge cases are scripted by the test rather than
 waited for on a live chain. It is enabled with `--darkside-very-insecure` and must never be used in
-production. Two gRPC services are served on the same port:
+production. To keep a forgotten or leaked darkside process (e.g. a stuck CI job) from serving forever, it
+auto-shuts-down after `--darkside-timeout-minutes` (default 30, matching the Go reference's fixed default
+and, like Go, with no way to disable it — see [ADR 0022](decisions/0022-ops-surface-parity.md)). Two gRPC
+services are served on the same port:
 
 - `CompactTxStreamer` — the normal wallet-facing service, unchanged. The wallet does not know its data is mock.
 - `DarksideStreamer` — a control plane the test drives to fabricate the chain.
@@ -399,16 +427,22 @@ The ingestor (`src/ingestor.rs`) runs as a background task. Before it starts, `r
 `connect_with_retry` (`src/lib.rs`): `getblockchaininfo` is retried indefinitely with capped exponential backoff (escalating
 to `error!` logs after several attempts), so the server waits for a slow-to-start node instead of exiting. Each
 step then reads the tip height **and** hash from a single `getblockchaininfo`. If the cache is behind, it
-fetches the next block (verifying the returned block's height matches the request and that its bytes hash
-to the hash from the verbose response), checks that its
-`prevHash` chains onto the cached tip, and appends it or — on a mismatch — rolls back one block. If the cache is
+fetches the next **window** of up to `--ingest-window` consecutive blocks (default 64) with at most
+`--ingest-concurrency` node requests in flight (default 8); each fetched block is verified (returned height
+matches the request, bytes hash to the hash from the verbose response, and locally computed txids match the
+node's verbose txid list when provided — a cross-check against silent parser/node divergence). The results are
+walked in height order: the longest prefix whose `prevHash` links chain onto the cached tip is committed in a
+**single cache transaction** (one fsync per window, not per block — see ADR 0020), and per-height fetch
+failures past a non-empty prefix only shrink the window rather than failing the step. If the *first* block of
+the window does not chain, a reorg replaced our tip: roll back one block. If the cache is
 already at the tip height, it compares the tip *hash*: an equal hash means synced, a differing hash is an
-in-place tip reorg and rolls back one block. If the cache is *ahead* of the node's reported tip (the node
-rolled back), it rolls back one block as well. Every rollback is floored at `--start-height`: since the cache
-only holds heights at or above it, a reorg that would cross the floor is necessarily deeper than the entire
-cache — a sign of a broken or inconsistent node rather than a real reorg — so it is refused
-(`ReorgBelowStartHeight`) and handled as a node-error backoff (slow-poll) instead of draining the cache past
-the floor or hot-looping; the `truncate_from` operator levers above may still empty the cache on purpose. A
+in-place tip reorg and rolls back one block. If the cache is *ahead* of the node's reported tip, the node's
+tip hash is compared with the cached block at that height: an equal hash means the node is merely behind
+(restarted or re-syncing) and the step idles with the cache intact; a differing hash is a genuine reorg onto a
+shorter chain and rolls back one block. Every rollback is floored at `--start-height`: a reorg that would
+cross the floor is deeper than the entire cache, so the cache is **emptied** and re-ingestion resumes from
+`--start-height` on the node's chain (an empty cache chains onto anything) rather than wedging against the
+floor; the `truncate_from` operator levers above may still empty the cache on purpose. A
 cache-corruption error truncates from the corrupt point and
 retries immediately (bounded, so recovery can never spin), while node/transport errors back off. When the cache
 reaches the tip it polls every couple of seconds. The cache persists across restarts, so the ingestor resumes
@@ -418,6 +452,10 @@ from where it left off.
 the range (ascending if `start <= end`, otherwise descending) and prunes each block to the requested
 `poolTypes` — an empty list means the legacy default of shielded-only data (Sapling, Orchard, and Ironwood;
 transparent inputs/outputs stripped).
+
+`--nocache` bypasses all of the above: the ingestor is not spawned and the cache is opened in a throwaway
+`tempfile::tempdir()` instead of `--data-dir`, so it starts (and stays) empty and every read falls through
+to the node. Debugging only — matches Go's `--nocache` (see [ADR 0022](decisions/0022-ops-surface-parity.md)).
 
 ## Testing
 

@@ -2,9 +2,16 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = std::env::var("OUT_DIR")?;
+    let descriptor_path = Path::new(&out_dir).join("file_descriptor_set.bin");
+
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
+        // Emitted so `src/proto.rs` can embed it and register it with `tonic-reflection` at
+        // startup (`grpcurl list` / `describe` work against a running server with no local
+        // `.proto` files needed).
+        .file_descriptor_set_path(&descriptor_path)
         .compile_protos(&["proto/service.proto", "proto/darkside.proto"], &["proto"])?;
 
     emit_git_commit();

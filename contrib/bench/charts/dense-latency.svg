@@ -19,24 +19,24 @@
 <line x1="66" y1="334" x2="624" y2="334" stroke="#888888"/>
 <text x="345" y="372" text-anchor="middle" fill="#888888">concurrency (clients)</text>
 <text transform="translate(16,187) rotate(-90)" text-anchor="middle" fill="#888888">µs (log scale)</text>
-<polyline points="66.0,299.6 159.0,282.0 252.0,270.4 345.0,235.2 438.0,221.1 531.0,206.3 624.0,183.0" fill="none" stroke="#e43717" stroke-width="2.5"/>
-<circle cx="66.0" cy="299.6" r="3.5" fill="#e43717"/>
-<circle cx="159.0" cy="282.0" r="3.5" fill="#e43717"/>
-<circle cx="252.0" cy="270.4" r="3.5" fill="#e43717"/>
-<circle cx="345.0" cy="235.2" r="3.5" fill="#e43717"/>
-<circle cx="438.0" cy="221.1" r="3.5" fill="#e43717"/>
-<circle cx="531.0" cy="206.3" r="3.5" fill="#e43717"/>
-<circle cx="624.0" cy="183.0" r="3.5" fill="#e43717"/>
+<polyline points="66.0,277.5 159.0,280.2 252.0,297.5 345.0,286.4 438.0,253.4 531.0,225.4 624.0,194.4" fill="none" stroke="#e43717" stroke-width="2.5"/>
+<circle cx="66.0" cy="277.5" r="3.5" fill="#e43717"/>
+<circle cx="159.0" cy="280.2" r="3.5" fill="#e43717"/>
+<circle cx="252.0" cy="297.5" r="3.5" fill="#e43717"/>
+<circle cx="345.0" cy="286.4" r="3.5" fill="#e43717"/>
+<circle cx="438.0" cy="253.4" r="3.5" fill="#e43717"/>
+<circle cx="531.0" cy="225.4" r="3.5" fill="#e43717"/>
+<circle cx="624.0" cy="194.4" r="3.5" fill="#e43717"/>
 <line x1="638" y1="50" x2="654" y2="50" stroke="#e43717" stroke-width="2.5"/>
 <text x="658" y="54" fill="#e43717">rust</text>
-<polyline points="66.0,292.5 159.0,254.7 252.0,217.8 345.0,203.1 438.0,182.6 531.0,115.3 624.0,96.0" fill="none" stroke="#00add8" stroke-width="2.5"/>
-<circle cx="66.0" cy="292.5" r="3.5" fill="#00add8"/>
-<circle cx="159.0" cy="254.7" r="3.5" fill="#00add8"/>
-<circle cx="252.0" cy="217.8" r="3.5" fill="#00add8"/>
-<circle cx="345.0" cy="203.1" r="3.5" fill="#00add8"/>
-<circle cx="438.0" cy="182.6" r="3.5" fill="#00add8"/>
-<circle cx="531.0" cy="115.3" r="3.5" fill="#00add8"/>
-<circle cx="624.0" cy="96.0" r="3.5" fill="#00add8"/>
+<polyline points="66.0,269.6 159.0,290.2 252.0,281.2 345.0,246.7 438.0,160.5 531.0,65.0 624.0,66.8" fill="none" stroke="#00add8" stroke-width="2.5"/>
+<circle cx="66.0" cy="269.6" r="3.5" fill="#00add8"/>
+<circle cx="159.0" cy="290.2" r="3.5" fill="#00add8"/>
+<circle cx="252.0" cy="281.2" r="3.5" fill="#00add8"/>
+<circle cx="345.0" cy="246.7" r="3.5" fill="#00add8"/>
+<circle cx="438.0" cy="160.5" r="3.5" fill="#00add8"/>
+<circle cx="531.0" cy="65.0" r="3.5" fill="#00add8"/>
+<circle cx="624.0" cy="66.8" r="3.5" fill="#00add8"/>
 <line x1="638" y1="70" x2="654" y2="70" stroke="#00add8" stroke-width="2.5"/>
 <text x="658" y="74" fill="#00add8">go</text>
 </svg>

@@ -37,9 +37,17 @@ RPC_USER="${RPC_USER:-}"
 RPC_PASSWORD="${RPC_PASSWORD:-}"
 : "${BASE:?profile must define BASE}" "${SPAN:?profile must define SPAN}"
 
-for tool in curl jq xxd; do
+for tool in curl jq; do
   command -v "$tool" >/dev/null || { echo "$tool not found" >&2; exit 1; }
 done
+# Portability: xxd (used to decode the hex-encoded raw block) ships with vim on
+# macOS/most distros, but is absent on this Debian host and there is no root to
+# install it. Fall back to perl (pack "H*"), which is present everywhere.
+if command -v xxd >/dev/null; then
+  hex2bin() { xxd -r -p; }
+else
+  hex2bin() { perl -0777 -ne 'print pack("H*", $_)' 2>/dev/null; }
+fi
 
 OUT_DIR="$BENCH_DIR/data/$PROFILE"
 mkdir -p "$OUT_DIR"
@@ -112,7 +120,7 @@ for ((h = start_h; h <= END; h++)); do
 
   raw_hex="$(rpc getblock "[\"$hash\", 0]" | jq -r '.')"
   raw_len=$(( ${#raw_hex} / 2 ))
-  printf '%s' "$raw_hex" | xxd -r -p >> "$RAW_BIN"
+  printf '%s' "$raw_hex" | hex2bin >> "$RAW_BIN"
 
   jq -cn \
     --argjson height "$h" --arg hash "$hash" --argjson txids "$txids" \

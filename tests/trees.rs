@@ -99,23 +99,50 @@ async fn tree_state_looked_up_by_height() {
     assert_eq!(by_height, tree_state);
 }
 
+/// Reverse a display-order (big-endian) hex hash into wire-order (little-endian) bytes, as they
+/// appear in `BlockID.hash` on the gRPC wire.
+fn wire_order_hash(display_hex: &str) -> Vec<u8> {
+    let mut bytes = hex::decode(display_hex).unwrap();
+    bytes.reverse();
+    bytes
+}
+
 #[tokio::test]
-async fn tree_state_lookup_by_hash_is_unimplemented() {
+async fn tree_state_looked_up_by_hash() {
     let mut server = TestServer::start().await;
     server.reset(663150, "bad", "x").await;
+
+    let tree_state = staged_tree_state();
     server
         .darkside
-        .add_tree_state(staged_tree_state())
+        .add_tree_state(tree_state.clone())
         .await
         .unwrap();
 
-    // The service does not yet support GetTreeState by hash, even though darkside can resolve it.
     let by_hash = server
         .compact
         .get_tree_state(BlockId {
             height: 0,
-            hash: vec![0xab; 32],
+            hash: wire_order_hash(&tree_state.hash),
         })
-        .await;
-    assert_eq!(by_hash.unwrap_err().code(), tonic::Code::Unimplemented);
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(by_hash, tree_state);
+}
+
+#[tokio::test]
+async fn tree_state_lookup_by_wrong_length_hash_is_invalid_argument() {
+    let mut server = TestServer::start().await;
+    server.reset(663150, "bad", "x").await;
+
+    let status = server
+        .compact
+        .get_tree_state(BlockId {
+            height: 0,
+            hash: vec![0xab; 31],
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
 }

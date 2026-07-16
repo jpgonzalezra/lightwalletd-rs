@@ -13,6 +13,7 @@ use lightwalletd_rs::proto::{
     DarksideBlock, DarksideEmptyBlocks, DarksideHeight, DarksideMetaState, RawTransaction,
 };
 use tonic::transport::{Channel, Endpoint, Server};
+use tonic_reflection::pb::v1::server_reflection_client::ServerReflectionClient;
 use zcash_address::{ToAddress, ZcashAddress};
 use zcash_protocol::consensus::NetworkType;
 
@@ -21,6 +22,9 @@ use zcash_protocol::consensus::NetworkType;
 pub struct TestServer {
     pub compact: CompactTxStreamerClient<Channel>,
     pub darkside: DarksideStreamerClient<Channel>,
+    /// gRPC Server Reflection client, connected to the same server — lets tests verify reflection
+    /// is registered (see `tests/reflection.rs`) without spawning a separate real binary.
+    pub reflection: ServerReflectionClient<Channel>,
     server: tokio::task::JoinHandle<()>,
     _cache_dir: tempfile::TempDir,
 }
@@ -41,6 +45,7 @@ impl TestServer {
             Server::builder()
                 .add_service(CompactTxStreamerServer::new(streamer))
                 .add_service(DarksideStreamerServer::new(darkside_service))
+                .add_service(lightwalletd_rs::reflection_service().unwrap())
                 .serve_with_incoming(incoming)
                 .await
                 .unwrap();
@@ -53,7 +58,8 @@ impl TestServer {
 
         Self {
             compact: CompactTxStreamerClient::new(channel.clone()),
-            darkside: DarksideStreamerClient::new(channel),
+            darkside: DarksideStreamerClient::new(channel.clone()),
+            reflection: ServerReflectionClient::new(channel),
             server,
             _cache_dir: cache_dir,
         }

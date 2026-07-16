@@ -26,3 +26,6 @@ choice stays discoverable after the fact. The living overview is
 | [0017](0017-benchmark-methodology.md) | Benchmark the hot read-path against the reference implementation |
 | [0018](0018-parse-time-branch-id-hardcoded.md) | Keep the parse-time consensus branch ID hardcoded at `Nu5` |
 | [0019](0019-pin-librustzcash-prereleases-nu63.md) | Pin the librustzcash pre-release cohort for NU6.3 |
+| [0020](0020-windowed-ingest-batched-commits.md) | Windowed concurrent ingest with batched cache commits |
+| [0021](0021-mempool-staleness-contract.md) | Mempool staleness contract: stale snapshots become `Unavailable` |
+| [0022](0022-ops-surface-parity.md) | Close the operational-surface gap with the Go reference: reflection, default-on metrics, log flags, `--gen-cert-very-insecure`, darkside auto-shutdown, `--nocache` |

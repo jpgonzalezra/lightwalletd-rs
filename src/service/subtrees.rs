@@ -4,9 +4,19 @@ use async_stream::try_stream;
 use tonic::{Request, Response, Status};
 
 use crate::encoding;
+use crate::node::NodeError;
 use crate::proto::{BoxStream, GetSubtreeRootsArg, ShieldedProtocol, SubtreeRoot};
 
 use super::{Streamer, block_at, decode_hex};
+
+/// Substring zebrad's `z_get_subtrees_by_index` puts in its JSON-RPC error message when asked for a
+/// pool it doesn't recognize (`zebra-rpc` `methods.rs`: `"invalid pool name, must be one of: [...]"`).
+/// A pre-NU6.3 node doesn't know the `"ironwood"` pool and answers with exactly this error — that's
+/// not a server failure, the Ironwood subtree literally cannot exist yet on that node — so it is
+/// matched here and turned into a clean empty stream instead of propagating as an RPC error. Matching
+/// on the message (rather than the JSON-RPC error code, which zebrad reports as the generic `Misc`
+/// code shared by many unrelated errors) keeps this narrowly scoped to the unrecognized-pool case.
+const INVALID_POOL_NAME: &str = "invalid pool name";
 
 pub(super) async fn get_subtree_roots(
     streamer: &Streamer,
@@ -30,10 +40,18 @@ pub(super) async fn get_subtree_roots(
         let stream = tokio_stream::iter(roots.into_iter().map(Ok::<_, Status>));
         return Ok(Response::new(Box::pin(stream)));
     }
-    let subtrees = streamer
+    let subtrees = match streamer
         .node
         .get_subtrees(protocol, arg.start_index, arg.max_entries)
-        .await?;
+        .await
+    {
+        Ok(subtrees) => subtrees,
+        Err(NodeError::Rpc { ref message, .. }) if message.contains(INVALID_POOL_NAME) => {
+            return Ok(Response::new(Box::pin(tokio_stream::empty())));
+        }
+        // A genuine node failure (transport, decode, or any other RPC error) still propagates.
+        Err(other) => return Err(other.into()),
+    };
     let node = streamer.node.clone();
     let cache = streamer.cache.clone();
 

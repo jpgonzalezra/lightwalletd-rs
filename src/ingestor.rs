@@ -1,33 +1,58 @@
 //! Background task that polls the node and fills the block cache.
 //!
-//! Each step fetches the next block above the cache tip, verifies it chains onto the cached tip
-//! (`prevHash` matches), and either appends it or, on a mismatch, rolls back one block as a reorg.
+//! Catch-up runs in windows: up to `window` consecutive blocks are fetched concurrently (at most
+//! `concurrency` in-flight node requests) and committed to the cache in a single transaction, so a
+//! long initial sync is bounded by node round-trips, not by per-block commits and fsyncs. At the
+//! tip the window degrades to one block per step. Every appended block is verified to chain onto
+//! the previous one (`prevHash` matches); a mismatch rolls back one block as a reorg.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::cache::{Cache, CacheError};
+use crate::config::IngestConfig;
 use crate::encoding;
 use crate::fetch::{self, FetchError};
 use crate::node::{NodeError, NodeRpc};
+use crate::proto::CompactBlock;
 
 /// After this many consecutive corruption recoveries without a successful normal step, fall back to
 /// the backoff sleep so recovery can never spin at full CPU even if the `fetch` height guard is
 /// somehow defeated.
 const MAX_CONSECUTIVE_RECOVERIES: u32 = 5;
 
+/// How long to wait when the cache is already at the node's tip before polling again.
+const IDLE_POLL: Duration = Duration::from_secs(2);
+
+/// Backoff after a node/transport error (and after corruption past the recovery bound).
+const ERROR_BACKOFF: Duration = Duration::from_secs(8);
+
 /// Poll the node forever, appending new blocks to the cache and rolling back reorgs.
-pub async fn run(node: Arc<dyn NodeRpc>, cache: Arc<Cache>, start_height: u64) {
-    tracing::info!(start_height, "ingestor started");
+pub async fn run(
+    node: Arc<dyn NodeRpc>,
+    cache: Arc<Cache>,
+    start_height: u64,
+    config: IngestConfig,
+) {
+    tracing::info!(
+        start_height,
+        window = config.window,
+        concurrency = config.concurrency,
+        "ingestor started"
+    );
     let mut consecutive_recoveries = 0u32;
     loop {
-        match step(node.as_ref(), &cache, start_height).await {
-            // Advanced one block (or handled a reorg): try the next one immediately.
-            Ok(true) => consecutive_recoveries = 0,
+        match step(&node, &cache, start_height, &config).await {
+            // Advanced (or handled a reorg): go for the next window immediately.
+            Ok(Progress::Advanced) => consecutive_recoveries = 0,
             // Cache is at the node's tip: wait before polling again.
-            Ok(false) => {
+            Ok(Progress::Idle) => {
                 consecutive_recoveries = 0;
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(IDLE_POLL).await;
             }
             // Cache corruption: truncate from the corrupt point and retry immediately, so re-ingestion
             // refills it rather than the loop stalling on the backoff sleep.
@@ -36,7 +61,7 @@ pub async fn run(node: Arc<dyn NodeRpc>, cache: Arc<Cache>, start_height: u64) {
                 tracing::warn!(%error, consecutive_recoveries, "cache corruption during ingest; recovering");
                 if let Err(recover_error) = recover(&cache) {
                     tracing::error!(%recover_error, "cache recovery failed; backing off");
-                    tokio::time::sleep(Duration::from_secs(8)).await;
+                    tokio::time::sleep(ERROR_BACKOFF).await;
                 }
             }
             // Node/transport errors — and corruption past the recovery bound — back off.
@@ -47,10 +72,19 @@ pub async fn run(node: Arc<dyn NodeRpc>, cache: Arc<Cache>, start_height: u64) {
                     tracing::warn!(%error, "ingestor step failed; retrying");
                 }
                 consecutive_recoveries = 0;
-                tokio::time::sleep(Duration::from_secs(8)).await;
+                tokio::time::sleep(ERROR_BACKOFF).await;
             }
         }
     }
+}
+
+/// Outcome of a successful ingestor step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Progress {
+    /// Blocks were appended or a reorg was rolled back; step again immediately.
+    Advanced,
+    /// The cache is at the node's tip (or the node is behind); poll again after a pause.
+    Idle,
 }
 
 /// Whether a failed step should truncate-and-recover (then retry immediately) rather than back off: a
@@ -69,12 +103,17 @@ fn recover(cache: &Cache) -> Result<(), CacheError> {
     Ok(())
 }
 
-/// Try to ingest one block. Returns `Ok(true)` if a block was added or a reorg was rolled back,
-/// `Ok(false)` if the cache is already at the node's tip.
+/// Try to ingest the next window of blocks. Returns [`Progress::Advanced`] if blocks were added or a
+/// reorg was rolled back, [`Progress::Idle`] if the cache is already at the node's tip.
 ///
 /// The tip height **and** hash come from a single `getblockchaininfo`, so a reorg that replaces the
 /// tip block without advancing the height is caught by comparing the hash, not just the height.
-async fn step(node: &dyn NodeRpc, cache: &Cache, start_height: u64) -> Result<bool, StepError> {
+async fn step(
+    node: &Arc<dyn NodeRpc>,
+    cache: &Cache,
+    start_height: u64,
+    config: &IngestConfig,
+) -> Result<Progress, StepError> {
     let info = node.get_blockchain_info().await?;
     let tip_height = info.blocks;
 
@@ -87,69 +126,188 @@ async fn step(node: &dyn NodeRpc, cache: &Cache, start_height: u64) -> Result<bo
                 .latest_hash()?
                 .is_some_and(|latest| latest == tip_hash)
             {
-                return Ok(false);
+                return Ok(Progress::Idle);
             }
             tracing::warn!(
                 height = latest_height,
                 "tip reorg detected; rolling back one block"
             );
             reorg_to_floor(cache, latest_height.saturating_sub(1), start_height)?;
-            return Ok(true);
+            return Ok(Progress::Advanced);
         }
         Some(latest_height) if latest_height > tip_height => {
-            // Node is behind our cache (deep reorg or node rollback): drop our tip block.
-            tracing::warn!(
-                latest_height,
-                tip_height,
-                "node behind cache; rolling back one block"
-            );
-            reorg_to_floor(cache, latest_height.saturating_sub(1), start_height)?;
-            return Ok(true);
+            // Node is behind our cache. Only treat it as a reorg if the node's tip block actually
+            // disagrees with what we cached at that height; a node that is merely re-syncing or was
+            // restarted from an older snapshot must not drain hours of ingested blocks.
+            let tip_hash = encoding::display_hex_to_wire(&info.bestblockhash)?;
+            match cache.get(tip_height)? {
+                // The node is on our chain, just behind: keep serving the cache and wait.
+                Some(cached) if cached.hash == tip_hash => return Ok(Progress::Idle),
+                // The node's (shorter) chain disagrees at its tip: a real reorg.
+                Some(_) => {
+                    tracing::warn!(
+                        latest_height,
+                        tip_height,
+                        "node behind cache on a different chain; rolling back one block"
+                    );
+                    reorg_to_floor(cache, latest_height.saturating_sub(1), start_height)?;
+                    return Ok(Progress::Advanced);
+                }
+                // The node's tip is below our cached range: nothing to compare against; wait.
+                None => return Ok(Progress::Idle),
+            }
         }
         Some(latest_height) => latest_height + 1,
     };
     if next > tip_height {
-        return Ok(false);
+        return Ok(Progress::Idle);
     }
 
-    let block = fetch::compact_block(node, next).await?;
-    let chains = match cache.latest_hash()? {
-        None => true,
-        Some(latest) => latest == block.prev_hash,
-    };
-    if chains {
-        cache.add(next, &block)?;
-        if next % 100 == 0 {
-            tracing::info!(height = next, tip = tip_height, "ingesting");
-        } else {
-            tracing::debug!(height = next, "ingested");
+    // Fetch the window concurrently, then keep the longest prefix that chains onto the cached tip.
+    let last = tip_height.min(next.saturating_add(config.window.saturating_sub(1) as u64));
+    let started = Instant::now();
+    let (results, panicked) = fetch_window(node, next..=last, config.concurrency).await;
+
+    let mut prev_hash = cache.latest_hash()?;
+    let mut batch: Vec<CompactBlock> = Vec::with_capacity(results.len());
+    let mut failure: Option<StepError> = None;
+    for (expected_height, (height, result)) in (next..).zip(results) {
+        // A gap below `height` means that task died (panic or cancellation) without leaving a
+        // per-height result: the chained prefix ends here. Without this check, a dead task at
+        // the window's first height would make the next result fail the prev-hash test below and
+        // be misread as a reorg — rolling back a good block and dropping the panic before the
+        // accounting after this loop ever sees it.
+        if height != expected_height {
+            break;
         }
-    } else {
-        tracing::warn!(
-            height = next.saturating_sub(1),
-            "reorg detected; rolling back one block"
-        );
-        reorg_to_floor(cache, next.saturating_sub(2), start_height)?;
+        let block = match result {
+            Ok(block) => block,
+            Err(error) => {
+                failure = Some(error.into());
+                break;
+            }
+        };
+        if prev_hash
+            .as_ref()
+            .is_some_and(|prev| *prev != block.prev_hash)
+        {
+            if batch.is_empty() {
+                // The first fetched block does not chain onto the cached tip: a reorg replaced it.
+                tracing::warn!(
+                    height = next.saturating_sub(1),
+                    "reorg detected; rolling back one block"
+                );
+                reorg_to_floor(cache, next.saturating_sub(2), start_height)?;
+                return Ok(Progress::Advanced);
+            }
+            // The node reorged while the window was in flight: keep the chained prefix; the next
+            // step re-checks from the new tip.
+            tracing::warn!(
+                height,
+                "mid-window chain mismatch; keeping the chained prefix"
+            );
+            break;
+        }
+        prev_hash = Some(block.hash.clone());
+        batch.push(block);
     }
-    Ok(true)
+
+    if let (Some(first), Some(last_block)) = (batch.first(), batch.last()) {
+        let (from, to) = (first.height, last_block.height);
+        cache.add_batch(&batch)?;
+        let seconds = started.elapsed().as_secs_f64().max(f64::EPSILON);
+        tracing::info!(
+            from,
+            to,
+            tip = tip_height,
+            rate = format_args!("{:.1} blocks/s", batch.len() as f64 / seconds),
+            "ingested"
+        );
+    }
+
+    // A panicked fetch task counts as a window failure too (unless a per-height error already
+    // ended the window): it must never be quietly absorbed as a shorter prefix.
+    let failure = failure.or_else(|| panicked.map(StepError::FetchTask));
+    match failure {
+        // Nothing usable arrived: surface the error so the run loop backs off.
+        Some(error) if batch.is_empty() => Err(error),
+        // Part of the window landed: report progress; the failed remainder is refetched next step.
+        Some(error) => {
+            tracing::warn!(%error, "partial window ingested; the remainder will be retried");
+            Ok(Progress::Advanced)
+        }
+        None => Ok(Progress::Advanced),
+    }
 }
 
-/// Roll the cache back to `target`, refusing to cross the `start_height` floor and refusing a rollback
-/// that would not actually lower the cache tip. A reorg that deep is anomalous (deeper than the whole
-/// cache), so we surface it as an error — the run loop backs off and logs, rather than draining the
-/// cache past the floor. A `target` that does not lower the tip (e.g. at the genesis floor, where
-/// `saturating_sub` clamps the target to the current tip) is refused for the same reason: executing it
-/// as a no-op `reorg` would report `Ok(true)` and hot-loop the run loop with zero cache progress.
-fn reorg_to_floor(cache: &Cache, target: u64, start_height: u64) -> Result<(), StepError> {
+/// Fetch `heights` from the node with at most `concurrency` requests in flight, returning each
+/// height's result in ascending order plus, separately, the first fetch task that panicked (its
+/// height is lost with the panic, so it cannot be a per-height entry). Failures are per-height;
+/// the caller decides how much of the window to keep.
+async fn fetch_window(
+    node: &Arc<dyn NodeRpc>,
+    heights: std::ops::RangeInclusive<u64>,
+    concurrency: usize,
+) -> (
+    BTreeMap<u64, Result<CompactBlock, FetchError>>,
+    Option<tokio::task::JoinError>,
+) {
+    let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
+    let mut tasks = JoinSet::new();
+    for height in heights {
+        let node = Arc::clone(node);
+        let semaphore = Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            // `acquire_owned` only fails if the semaphore were closed, which nothing here does;
+            // treat it as this height's fetch failing rather than panicking the task.
+            match semaphore.acquire_owned().await {
+                Ok(_permit) => (height, fetch::compact_block(node.as_ref(), height).await),
+                Err(closed) => (height, Err(closed.into())),
+            }
+        });
+    }
+    let mut results = BTreeMap::new();
+    let mut panicked = None;
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok((height, result)) => {
+                results.insert(height, result);
+            }
+            // A panicked fetch is a bug, but the ingestor task's handle is detached (lib.rs), so
+            // resuming the unwind would kill ingestion silently while the server keeps serving a
+            // frozen cache. Surface it loudly instead and let the step fail so the run loop backs
+            // off — a deterministic panic then shows up as a repeating error, not a hang.
+            Err(join_error) if join_error.is_panic() => {
+                tracing::error!(%join_error, "ingest fetch task panicked");
+                panicked.get_or_insert(join_error);
+            }
+            // Cancelled (runtime shutdown mid-window): the missing height simply ends the chained
+            // prefix, and the next step — if any — refetches from there.
+            Err(join_error) => {
+                tracing::warn!(%join_error, "ingest fetch task cancelled; skipping");
+            }
+        }
+    }
+    (results, panicked)
+}
+
+/// Roll the cache back to `target` (keeping `target` itself). A rollback that would cross the
+/// `start_height` floor — or that could not lower the tip (the genesis-saturation case) — empties
+/// the cache instead of wedging against the floor: an empty cache chains onto anything, so the next
+/// step resumes ingesting the node's chain from `start_height`.
+fn reorg_to_floor(cache: &Cache, target: u64, start_height: u64) -> Result<(), CacheError> {
     let would_not_lower_tip = match cache.latest_height()? {
         Some(tip) => target >= tip,
         None => true,
     };
     if target < start_height || would_not_lower_tip {
-        return Err(StepError::ReorgBelowStartHeight {
+        tracing::warn!(
             target,
             start_height,
-        });
+            "reorg reaches the cache floor; emptying the cache to resume from the node's chain"
+        );
+        cache.truncate_from(0)?;
+        return Ok(());
     }
     cache.reorg(target)?;
     Ok(())
@@ -166,15 +324,8 @@ enum StepError {
     Cache(#[from] CacheError),
     #[error("decoding tip hash: {0}")]
     Encoding(#[from] hex::FromHexError),
-    /// A reorg would roll the cache back below `start_height`; refused, to cap the blast radius and
-    /// avoid hot-looping at the floor (handled as a slow-poll backoff by the run loop).
-    #[error("reorg would roll back below start height {start_height} (target {target})")]
-    ReorgBelowStartHeight {
-        /// The rollback target that fell below the floor.
-        target: u64,
-        /// The configured start height (the floor).
-        start_height: u64,
-    },
+    #[error("ingest fetch task panicked: {0}")]
+    FetchTask(tokio::task::JoinError),
 }
 
 impl StepError {
@@ -192,10 +343,11 @@ impl StepError {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
 
-    use crate::node::GetBlockchainInfo;
+    use crate::node::{GetBlockVerbose, GetBlockchainInfo};
     use crate::proto::CompactBlock;
-    use crate::testutil::{FakeNode, temp_cache};
+    use crate::testutil::{FakeNode, temp_cache, testdata_blocks};
 
     fn tip_block(height: u64, hash: Vec<u8>) -> CompactBlock {
         CompactBlock {
@@ -206,7 +358,7 @@ mod tests {
     }
 
     /// The raw block and its parsed form for fixture `index` (heights 289460..=289465). The parsed
-    /// height is used so the cache guards (Phase 3) and the fetch height check (Phase 4) hold.
+    /// height is used so the cache guards and the fetch height check hold.
     fn fixture(index: usize) -> (Vec<u8>, CompactBlock) {
         let json = std::fs::read_to_string("testdata/compact_blocks.json").unwrap();
         let fixtures: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
@@ -225,23 +377,66 @@ mod tests {
         .unwrap()
     }
 
-    fn fake_serving(raw: Vec<u8>, tip: u64) -> FakeNode {
-        // The verbose hash must match the raw block's real hash, which the fetch path now verifies.
+    fn verbose_for(raw: &[u8]) -> (String, GetBlockVerbose) {
+        // The verbose hash must match the raw block's real hash, which the fetch path verifies.
         let hash = crate::encoding::wire_to_display_hex(
-            &crate::compact::to_compact_block(&raw).unwrap().hash,
+            &crate::compact::to_compact_block(raw).unwrap().hash,
         );
+        let verbose = serde_json::from_value(json!({
+            "hash": hash,
+            "trees": { "sapling": { "size": 0 }, "orchard": { "size": 0 } },
+        }))
+        .unwrap();
+        (hash, verbose)
+    }
+
+    fn fake_serving(raw: Vec<u8>, tip: u64) -> FakeNode {
+        let (_, verbose) = verbose_for(&raw);
         FakeNode {
             blockchain_info: Some(blockchain_info(tip, "00")),
-            block_verbose: Some(
-                serde_json::from_value(json!({
-                    "hash": hash,
-                    "trees": { "sapling": { "size": 0 }, "orchard": { "size": 0 } },
-                }))
-                .unwrap(),
-            ),
+            block_verbose: Some(verbose),
             block_raw: Some(raw),
             ..Default::default()
         }
+    }
+
+    /// A fake serving a whole chain of raw blocks, each keyed by its real height and hash.
+    fn fake_serving_chain(raws: Vec<Vec<u8>>, tip: u64) -> FakeNode {
+        let mut verbose_by_height = HashMap::new();
+        let mut raw_by_hash = HashMap::new();
+        for raw in raws {
+            let height = crate::compact::to_compact_block(&raw).unwrap().height;
+            let (hash, verbose) = verbose_for(&raw);
+            verbose_by_height.insert(height, verbose);
+            raw_by_hash.insert(hash, raw);
+        }
+        FakeNode {
+            blockchain_info: Some(blockchain_info(tip, "00")),
+            verbose_by_height,
+            raw_by_hash,
+            ..Default::default()
+        }
+    }
+
+    fn config() -> IngestConfig {
+        IngestConfig {
+            window: 64,
+            concurrency: 8,
+        }
+    }
+
+    async fn run_step(fake: FakeNode, cache: &Cache, start: u64) -> Result<Progress, StepError> {
+        run_step_with(fake, cache, start, config()).await
+    }
+
+    async fn run_step_with(
+        fake: FakeNode,
+        cache: &Cache,
+        start: u64,
+        config: IngestConfig,
+    ) -> Result<Progress, StepError> {
+        let node: Arc<dyn NodeRpc> = Arc::new(fake);
+        step(&node, cache, start, &config).await
     }
 
     #[tokio::test]
@@ -253,12 +448,89 @@ mod tests {
             .add(height - 1, &tip_block(height - 1, parsed.prev_hash.clone()))
             .unwrap();
 
-        let advanced = step(&fake_serving(raw, height), &cache, height - 1)
+        let progress = run_step(fake_serving(raw, height), &cache, height - 1)
             .await
             .unwrap();
 
-        assert!(advanced);
+        assert_eq!(progress, Progress::Advanced);
         assert_eq!(cache.latest_height().unwrap(), Some(height));
+    }
+
+    #[tokio::test]
+    async fn step_ingests_a_whole_window_in_one_step() {
+        // Four consecutive real blocks (380640..=380643): an empty cache and a node tip at the last
+        // height must land in a single step, committed as one batch.
+        let raws = testdata_blocks();
+        let first = crate::compact::to_compact_block(&raws[0]).unwrap().height;
+        let last = first + raws.len() as u64 - 1;
+        let (_dir, cache) = temp_cache();
+
+        let progress = run_step(fake_serving_chain(raws, last), &cache, first)
+            .await
+            .unwrap();
+
+        assert_eq!(progress, Progress::Advanced);
+        assert_eq!(cache.latest_height().unwrap(), Some(last));
+        assert!(cache.validate_light().is_ok());
+    }
+
+    #[tokio::test]
+    async fn step_window_is_clamped_by_the_configured_size() {
+        let raws = testdata_blocks();
+        let first = crate::compact::to_compact_block(&raws[0]).unwrap().height;
+        let last = first + raws.len() as u64 - 1;
+        let (_dir, cache) = temp_cache();
+
+        let config = IngestConfig {
+            window: 2,
+            concurrency: 8,
+        };
+        let progress = run_step_with(fake_serving_chain(raws, last), &cache, first, config)
+            .await
+            .unwrap();
+
+        assert_eq!(progress, Progress::Advanced);
+        assert_eq!(cache.latest_height().unwrap(), Some(first + 1));
+    }
+
+    #[tokio::test]
+    async fn step_commits_the_available_prefix_when_a_fetch_fails_mid_window() {
+        // The node serves only the first two blocks of the window; the step must commit those two
+        // and report progress, leaving the remainder for the next step.
+        let raws = testdata_blocks();
+        let first = crate::compact::to_compact_block(&raws[0]).unwrap().height;
+        let tip = first + raws.len() as u64 - 1;
+        let (_dir, cache) = temp_cache();
+
+        let progress = run_step(
+            fake_serving_chain(raws.into_iter().take(2).collect(), tip),
+            &cache,
+            first,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(progress, Progress::Advanced);
+        assert_eq!(cache.latest_height().unwrap(), Some(first + 1));
+    }
+
+    #[tokio::test]
+    async fn step_keeps_the_chained_prefix_on_a_mid_window_chain_mismatch() {
+        // Corrupt the third block's prevHash so it no longer chains onto the second. Its own hash
+        // (recomputed by the fake from the mutated bytes) stays self-consistent, so only the chain
+        // check can reject it — the step must commit the first two blocks and stop there.
+        let mut raws = testdata_blocks();
+        raws[2][4..36].fill(0xee);
+        let first = crate::compact::to_compact_block(&raws[0]).unwrap().height;
+        let tip = first + raws.len() as u64 - 1;
+        let (_dir, cache) = temp_cache();
+
+        let progress = run_step(fake_serving_chain(raws, tip), &cache, first)
+            .await
+            .unwrap();
+
+        assert_eq!(progress, Progress::Advanced);
+        assert_eq!(cache.latest_height().unwrap(), Some(first + 1));
     }
 
     #[tokio::test]
@@ -271,9 +543,9 @@ mod tests {
             blockchain_info: Some(blockchain_info(100, &"00".repeat(32))),
             ..Default::default()
         };
-        let advanced = step(&fake, &cache, 100).await.unwrap();
+        let progress = run_step(fake, &cache, 100).await.unwrap();
 
-        assert!(!advanced);
+        assert_eq!(progress, Progress::Idle);
     }
 
     #[tokio::test]
@@ -287,10 +559,65 @@ mod tests {
             blockchain_info: Some(blockchain_info(101, &"cc".repeat(32))),
             ..Default::default()
         };
-        let advanced = step(&fake, &cache, 100).await.unwrap();
+        let progress = run_step(fake, &cache, 100).await.unwrap();
 
-        assert!(advanced);
+        assert_eq!(progress, Progress::Advanced);
         assert_eq!(cache.latest_height().unwrap(), Some(100));
+    }
+
+    #[tokio::test]
+    async fn step_idles_when_the_node_is_behind_but_on_the_same_chain() {
+        // Cache [100..=102]; the node reports tip 101 with exactly the hash we cached at 101 — a
+        // node that is merely behind (restart, re-sync). The cache must be left intact.
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &tip_block(100, vec![0xaa; 32])).unwrap();
+        cache.add(101, &tip_block(101, vec![0xbb; 32])).unwrap();
+        cache.add(102, &tip_block(102, vec![0xcc; 32])).unwrap();
+
+        let fake = FakeNode {
+            blockchain_info: Some(blockchain_info(101, &"bb".repeat(32))),
+            ..Default::default()
+        };
+        let progress = run_step(fake, &cache, 100).await.unwrap();
+
+        assert_eq!(progress, Progress::Idle);
+        assert_eq!(cache.latest_height().unwrap(), Some(102)); // nothing drained
+    }
+
+    #[tokio::test]
+    async fn step_idles_when_the_node_tip_is_below_the_cached_range() {
+        // The node re-synced from scratch and is still below our cache floor: nothing to compare,
+        // so wait rather than drain.
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &tip_block(100, vec![0xaa; 32])).unwrap();
+
+        let fake = FakeNode {
+            blockchain_info: Some(blockchain_info(50, &"dd".repeat(32))),
+            ..Default::default()
+        };
+        let progress = run_step(fake, &cache, 100).await.unwrap();
+
+        assert_eq!(progress, Progress::Idle);
+        assert_eq!(cache.latest_height().unwrap(), Some(100));
+    }
+
+    #[tokio::test]
+    async fn step_rolls_back_when_the_node_is_behind_on_a_different_chain() {
+        // Cache [100..=102]; the node reports tip 101 with a hash that disagrees with our cached
+        // block 101 — a genuine reorg onto a shorter chain. Roll back one block per detection.
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &tip_block(100, vec![0xaa; 32])).unwrap();
+        cache.add(101, &tip_block(101, vec![0xbb; 32])).unwrap();
+        cache.add(102, &tip_block(102, vec![0xcc; 32])).unwrap();
+
+        let fake = FakeNode {
+            blockchain_info: Some(blockchain_info(101, &"ee".repeat(32))),
+            ..Default::default()
+        };
+        let progress = run_step(fake, &cache, 100).await.unwrap();
+
+        assert_eq!(progress, Progress::Advanced);
+        assert_eq!(cache.latest_height().unwrap(), Some(101));
     }
 
     #[tokio::test]
@@ -307,61 +634,50 @@ mod tests {
             .add(height - 1, &tip_block(height - 1, vec![0xff; 32]))
             .unwrap();
 
-        let advanced = step(&fake_serving(raw, height), &cache, height - 2)
+        let progress = run_step(fake_serving(raw, height), &cache, height - 2)
             .await
             .unwrap();
 
-        assert!(advanced);
+        assert_eq!(progress, Progress::Advanced);
         assert_eq!(cache.latest_height().unwrap(), Some(height - 2));
     }
 
     #[tokio::test]
-    async fn step_reorg_below_start_height_floor_errors_without_draining() {
+    async fn step_reorg_below_start_height_floor_empties_the_cache_and_resumes() {
         let (_dir, cache) = temp_cache();
         // Cache [100], floor = start_height = 100.
         cache.add(100, &tip_block(100, vec![0xaa; 32])).unwrap();
 
         // Node reports the same height with a different tip hash → same-height reorg branch, whose
-        // target 99 falls below the floor.
+        // target 99 falls below the floor. Instead of wedging (error-looping while serving a stale
+        // tip), the cache empties; the next step re-ingests block 100 from the node's chain.
         let fake = FakeNode {
             blockchain_info: Some(blockchain_info(100, &"cc".repeat(32))),
             ..Default::default()
         };
-        let error = step(&fake, &cache, 100).await.unwrap_err();
+        let progress = run_step(fake, &cache, 100).await.unwrap();
 
-        assert!(matches!(
-            error,
-            StepError::ReorgBelowStartHeight {
-                target: 99,
-                start_height: 100
-            }
-        ));
-        assert_eq!(cache.latest_height().unwrap(), Some(100)); // not drained
+        assert_eq!(progress, Progress::Advanced);
+        assert_eq!(cache.latest_height().unwrap(), None); // emptied, ready to re-chain
     }
 
     #[tokio::test]
-    async fn step_genesis_floor_reorg_errors_instead_of_no_op_progress() {
+    async fn step_genesis_floor_reorg_empties_the_cache_instead_of_no_op_progress() {
         let (_dir, cache) = temp_cache();
         // Cache [0], floor = start_height = 0 (empty upgrade list, e.g. regtest).
         cache.add(0, &tip_block(0, vec![0xaa; 32])).unwrap();
 
-        // Node reports the same height 0 with a different tip hash → in-place tip reorg branch, whose
-        // target saturates to 0 — a rollback that would not lower the tip, so it must error (backoff)
-        // rather than run a no-op reorg reported as progress (a sleepless hot loop).
+        // Node reports the same height 0 with a different tip hash → in-place tip reorg branch,
+        // whose target saturates to 0 — a rollback that cannot lower the tip. The cache must empty
+        // (making real progress possible next step) rather than run a no-op reorg in a hot loop.
         let fake = FakeNode {
             blockchain_info: Some(blockchain_info(0, &"cc".repeat(32))),
             ..Default::default()
         };
-        let error = step(&fake, &cache, 0).await.unwrap_err();
+        let progress = run_step(fake, &cache, 0).await.unwrap();
 
-        assert!(matches!(
-            error,
-            StepError::ReorgBelowStartHeight {
-                target: 0,
-                start_height: 0
-            }
-        ));
-        assert_eq!(cache.latest_height().unwrap(), Some(0)); // not drained
+        assert_eq!(progress, Progress::Advanced);
+        assert_eq!(cache.latest_height().unwrap(), None);
     }
 
     #[tokio::test]
@@ -374,7 +690,7 @@ mod tests {
             blockchain_info: Some(blockchain_info(100, &"00".repeat(32))),
             ..Default::default()
         };
-        let error = step(&fake, &cache, 100).await.unwrap_err();
+        let error = run_step(fake, &cache, 100).await.unwrap_err();
 
         assert!(error.is_corruption());
     }
@@ -384,16 +700,146 @@ mod tests {
         let (raw, parsed) = fixture(0);
         let (_dir, cache) = temp_cache();
 
-        // Empty cache, node well ahead: `step` fetches `start_height`, but the node serves a block at
-        // a different height → a `FetchError`, kept on the node backoff (never a cache corruption).
+        // Empty cache, node well ahead: `step` fetches from `start_height`, but the node serves a
+        // block at a different height → a `FetchError`, kept on the node backoff (never a cache
+        // corruption).
         let fake = fake_serving(raw, parsed.height + 10);
-        let error = step(&fake, &cache, parsed.height - 5).await.unwrap_err();
+        let error = run_step(fake, &cache, parsed.height - 5).await.unwrap_err();
 
         assert!(!error.is_corruption());
         assert!(matches!(
             error,
             StepError::Fetch(FetchError::UnexpectedHeight { .. })
         ));
+    }
+
+    /// A node that panics on `get_block_verbose` for one specific height and delegates everything
+    /// else — a deterministic stand-in for a fetch task dying mid-window.
+    struct PanicAtHeight {
+        inner: FakeNode,
+        panic_height: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl NodeRpc for PanicAtHeight {
+        async fn get_blockchain_info(
+            &self,
+        ) -> Result<crate::node::GetBlockchainInfo, crate::node::NodeError> {
+            self.inner.get_blockchain_info().await
+        }
+        async fn get_block_verbose(
+            &self,
+            height: u64,
+        ) -> Result<GetBlockVerbose, crate::node::NodeError> {
+            if height == self.panic_height {
+                panic!("scripted fetch panic at height {height}");
+            }
+            self.inner.get_block_verbose(height).await
+        }
+        async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, crate::node::NodeError> {
+            self.inner.get_block_raw(hash).await
+        }
+        async fn get_info(&self) -> Result<crate::node::GetInfo, crate::node::NodeError> {
+            self.inner.get_info().await
+        }
+        async fn get_block_count(&self) -> Result<u64, crate::node::NodeError> {
+            self.inner.get_block_count().await
+        }
+        async fn get_raw_transaction(
+            &self,
+            txid: &str,
+        ) -> Result<crate::node::GetRawTransaction, crate::node::NodeError> {
+            self.inner.get_raw_transaction(txid).await
+        }
+        async fn send_raw_transaction(&self, hex: &str) -> Result<String, crate::node::NodeError> {
+            self.inner.send_raw_transaction(hex).await
+        }
+        async fn get_treestate(
+            &self,
+            id: &str,
+        ) -> Result<crate::node::GetTreeState, crate::node::NodeError> {
+            self.inner.get_treestate(id).await
+        }
+        async fn get_address_balance(
+            &self,
+            addresses: &[String],
+        ) -> Result<crate::node::GetAddressBalance, crate::node::NodeError> {
+            self.inner.get_address_balance(addresses).await
+        }
+        async fn get_address_utxos(
+            &self,
+            addresses: &[String],
+        ) -> Result<Vec<crate::node::AddressUtxo>, crate::node::NodeError> {
+            self.inner.get_address_utxos(addresses).await
+        }
+        async fn get_address_txids(
+            &self,
+            addresses: &[String],
+            start: u64,
+            end: u64,
+        ) -> Result<Vec<String>, crate::node::NodeError> {
+            self.inner.get_address_txids(addresses, start, end).await
+        }
+        async fn get_subtrees(
+            &self,
+            protocol: &str,
+            start_index: u32,
+            max_entries: u32,
+        ) -> Result<crate::node::GetSubtrees, crate::node::NodeError> {
+            self.inner
+                .get_subtrees(protocol, start_index, max_entries)
+                .await
+        }
+        async fn get_raw_mempool(&self) -> Result<Vec<String>, crate::node::NodeError> {
+            self.inner.get_raw_mempool().await
+        }
+    }
+
+    #[tokio::test]
+    async fn step_with_a_dead_first_fetch_surfaces_the_error_instead_of_rolling_back() {
+        // Four consecutive real blocks: the cache holds the first, the window is the remaining
+        // three, and the fetch for the window's *first* height dies. The later heights still
+        // arrive, but their prev-hashes cannot chain onto the cached tip across the gap — that
+        // must be read as "the prefix ends at the gap", never as a reorg. A misread here rolls
+        // back (here: empties) a perfectly good cache and drops the panic, oscillating
+        // rollback/advance at full speed instead of reaching the error backoff.
+        let raws = testdata_blocks();
+        let first_block = crate::compact::to_compact_block(&raws[0]).unwrap();
+        let first_height = first_block.height;
+        let tip = first_height + raws.len() as u64 - 1;
+        let (_dir, cache) = temp_cache();
+        cache.add(first_height, &first_block).unwrap();
+
+        let node = PanicAtHeight {
+            inner: fake_serving_chain(raws.into_iter().skip(1).collect(), tip),
+            panic_height: first_height + 1,
+        };
+        let node: Arc<dyn NodeRpc> = Arc::new(node);
+        let error = step(&node, &cache, first_height, &config())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StepError::FetchTask(_)));
+        // The cache must be untouched: the gap is a dead task, not a reorg.
+        assert_eq!(cache.latest_height().unwrap(), Some(first_height));
+    }
+
+    #[tokio::test]
+    async fn step_surfaces_a_panicked_fetch_task_as_a_step_error() {
+        let (_dir, cache) = temp_cache();
+
+        // Only `get_blockchain_info` is configured, so the window's fetch task panics inside the
+        // fake ("get_block_verbose not configured"). The panic must come back as a step failure —
+        // driving the run loop's backoff — rather than unwinding into (and silently killing) the
+        // detached ingestor task, and rather than being absorbed as an empty window.
+        let fake = FakeNode {
+            blockchain_info: Some(blockchain_info(100, &"00".repeat(32))),
+            ..Default::default()
+        };
+        let error = run_step(fake, &cache, 100).await.unwrap_err();
+
+        assert!(matches!(error, StepError::FetchTask(_)));
+        assert!(!error.is_corruption());
     }
 
     #[test]

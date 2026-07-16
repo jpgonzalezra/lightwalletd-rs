@@ -1,3 +1,7 @@
 # Per-run outputs (ghz JSON, metrics scrapes, resource samples); never commit.
 *
 !.gitignore
+
+# Curated, committed summaries of the 2026-07 mainnet runs (referenced by the README).
+!mainnet-2026-07-summary.md
+!mainnet-2026-07-phase2.md

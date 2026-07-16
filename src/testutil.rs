@@ -1,5 +1,6 @@
 //! Test-only helpers and fixtures shared across the module unit tests.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -111,6 +112,11 @@ pub struct FakeNode {
     pub block_verbose_err: Option<(i64, String)>,
     pub block_count: Option<u64>,
     pub block_raw: Option<Vec<u8>>,
+    /// Per-height `get_block_verbose` responses; used when non-empty (a missing height then yields
+    /// an RPC error instead of falling back to `block_verbose`). Lets a test serve a whole chain.
+    pub verbose_by_height: HashMap<u64, GetBlockVerbose>,
+    /// Per-hash `get_block_raw` responses; used when non-empty, analogous to `verbose_by_height`.
+    pub raw_by_hash: HashMap<String, Vec<u8>>,
     pub raw_transaction: Option<GetRawTransaction>,
     pub raw_transaction_err: Option<(i64, String)>,
     pub send_ok: Option<String>,
@@ -123,9 +129,14 @@ pub struct FakeNode {
     pub address_txids: Option<Vec<String>>,
     pub address_txids_err: Option<(i64, String)>,
     pub subtrees: Option<GetSubtrees>,
+    pub subtrees_err: Option<(i64, String)>,
     pub raw_mempool: Option<Vec<String>>,
     /// Captures the txid string the service passed to `get_raw_transaction`.
     pub requested_txid: Mutex<Option<String>>,
+    /// Captures the id string (height or display-order hex hash) the service passed to
+    /// `get_treestate`.
+    pub requested_treestate_id: Mutex<Option<String>>,
+    pub treestate_err: Option<(i64, String)>,
 }
 
 #[async_trait]
@@ -151,9 +162,19 @@ impl NodeRpc for FakeNode {
             .expect("FakeNode: get_blockchain_info not configured"))
     }
 
-    async fn get_block_verbose(&self, _height: u64) -> Result<GetBlockVerbose, NodeError> {
+    async fn get_block_verbose(&self, height: u64) -> Result<GetBlockVerbose, NodeError> {
         if let Some((code, message)) = self.block_verbose_err.clone() {
             return Err(NodeError::Rpc { code, message });
+        }
+        if !self.verbose_by_height.is_empty() {
+            return self
+                .verbose_by_height
+                .get(&height)
+                .cloned()
+                .ok_or(NodeError::Rpc {
+                    code: -8,
+                    message: format!("Block not found: {height}"),
+                });
         }
         Ok(self
             .block_verbose
@@ -167,7 +188,13 @@ impl NodeRpc for FakeNode {
             .expect("FakeNode: get_block_count not configured"))
     }
 
-    async fn get_block_raw(&self, _hash: &str) -> Result<Vec<u8>, NodeError> {
+    async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {
+        if !self.raw_by_hash.is_empty() {
+            return self.raw_by_hash.get(hash).cloned().ok_or(NodeError::Rpc {
+                code: -8,
+                message: format!("Block not found: {hash}"),
+            });
+        }
         Ok(self
             .block_raw
             .clone()
@@ -195,7 +222,11 @@ impl NodeRpc for FakeNode {
             .expect("FakeNode: send_raw_transaction not configured"))
     }
 
-    async fn get_treestate(&self, _id: &str) -> Result<GetTreeState, NodeError> {
+    async fn get_treestate(&self, id: &str) -> Result<GetTreeState, NodeError> {
+        *self.requested_treestate_id.lock().unwrap() = Some(id.to_string());
+        if let Some((code, message)) = self.treestate_err.clone() {
+            return Err(NodeError::Rpc { code, message });
+        }
         Ok(self
             .treestate
             .clone()
@@ -249,6 +280,9 @@ impl NodeRpc for FakeNode {
         _start_index: u32,
         _max_entries: u32,
     ) -> Result<GetSubtrees, NodeError> {
+        if let Some((code, message)) = self.subtrees_err.clone() {
+            return Err(NodeError::Rpc { code, message });
+        }
         Ok(self
             .subtrees
             .clone()
