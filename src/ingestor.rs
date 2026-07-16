@@ -79,7 +79,7 @@ pub async fn run(
 }
 
 /// Outcome of a successful ingestor step.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Progress {
     /// Blocks were appended or a reorg was rolled back; step again immediately.
     Advanced,

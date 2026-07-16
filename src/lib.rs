@@ -189,7 +189,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 node.clone(),
                 cache.clone(),
                 start_height,
-                config.ingest.clone(),
+                config.ingest,
             ));
         }
 

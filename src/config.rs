@@ -229,7 +229,7 @@ pub struct Config {
 }
 
 /// Ingestor catch-up tuning: how aggressively the cache is filled while behind the node tip.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct IngestConfig {
     /// Blocks fetched and committed per window (one cache transaction per window).
     pub window: usize,
