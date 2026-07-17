@@ -421,10 +421,23 @@ where
     ) -> Result<Vec<String>, NodeError> {
         let parsed = self.parse_addresses(addresses)?;
         let (tip, _) = self.best_tip()?;
-        // Match the JSON-RPC contract: start/end of 0 mean an open bound. Out-of-range bounds
-        // clamp to Height::MAX (an empty tail) instead of wrapping into some other height.
-        let start = state_height(start.max(1)).unwrap_or(block::Height::MAX);
-        let end = state_height(if end == 0 { tip } else { end }).unwrap_or(block::Height::MAX);
+        // Replicate zebrad's `build_height_range` (zebra-rpc): both bounds clamp to the chain tip
+        // (an `end` of 0 means the tip), and a start past the clamped end is the same error zebrad
+        // returns verbatim — not a silently-empty inverted state read. The `-1` code is zebrad's
+        // wire code for this case (verified against a live node), not the JSON-RPC spec's -32602.
+        let tip = state_height(tip).unwrap_or(block::Height::MAX);
+        let start = state_height(start).map_or(tip, |height| height.min(tip));
+        let end = if end == 0 {
+            tip
+        } else {
+            state_height(end).map_or(tip, |height| height.min(tip))
+        };
+        if start > end {
+            return Err(NodeError::Rpc {
+                code: -1,
+                message: format!("start {start:?} must be less than or equal to end {end:?}"),
+            });
+        }
         match self
             .read(ReadRequest::TransactionIdsByAddresses {
                 addresses: parsed,
@@ -892,6 +905,53 @@ mod tests {
             }
             other => panic!("expected TransactionIdsByAddresses, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn get_address_txids_clamps_a_start_past_the_tip_to_the_tip() {
+        // zebrad's build_height_range clamps a start above the tip down to the tip (querying the
+        // tip alone), not to an empty inverted range.
+        let addresses = vec![crate::testutil::example_taddress()];
+        let (node, read_state) = node_with(
+            vec![ReadResponse::AddressesTransactionIds(Default::default())],
+            Some((500, "0".repeat(64))),
+        );
+
+        node.get_address_txids(&addresses, 100_000, 0)
+            .await
+            .unwrap();
+
+        match &read_state.requests()[0] {
+            ReadRequest::TransactionIdsByAddresses { height_range, .. } => {
+                assert_eq!(*height_range, block::Height(500)..=block::Height(500));
+            }
+            other => panic!("expected TransactionIdsByAddresses, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_address_txids_rejects_an_inverted_range_like_zebrad() {
+        // After clamping both bounds to the tip, a start past the end is the error zebrad returns
+        // verbatim (code and message), not a silently-empty inverted state read.
+        let addresses = vec![crate::testutil::example_taddress()];
+        let (node, read_state) = node_with(vec![], Some((500, "0".repeat(64))));
+
+        let error = node
+            .get_address_txids(&addresses, 400, 200)
+            .await
+            .unwrap_err();
+
+        match error {
+            NodeError::Rpc { code, message } => {
+                assert_eq!(code, -1);
+                assert_eq!(
+                    message,
+                    "start Height(400) must be less than or equal to end Height(200)"
+                );
+            }
+            other => panic!("expected NodeError::Rpc, got {other:?}"),
+        }
+        assert!(read_state.requests().is_empty());
     }
 
     /// A regtest network where Sapling and NU5 activate at height 1 and NU6.3 never does, so the
