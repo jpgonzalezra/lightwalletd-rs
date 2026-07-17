@@ -119,6 +119,16 @@ own. The ingest/full-sync numbers in `ingest-sync.svg` can only be reproduced by
 multi-hour A/B/C and B4 procedures described in the results docs against a live mainnet node; there is
 no shortcut script for those.
 
+`results/rss-parity-2026-07.md` (wire-parity, `rpc` vs `readstate`) and `results/rss-bench-2026-07.md`
+(the readstate-vs-rpc performance envelope) are a separate pair of committed summary docs, referenced
+from the README's [Backends](../../README.md#backends) section and ADR
+[0023](../../docs/decisions/0023-zebra-readstate-backend.md). Unlike the rest of this harness, they were
+not produced by the Docker Compose flow above: both are **live dual-backend runs** — two
+`target/release/lightwalletd-rs` processes (one per `--backend`) built with `--features readstate`,
+pointed at the same live mainnet `zebrad` (JSON-RPC + indexer gRPC), compared directly with `grpcurl`/
+`ghz` against real, unmocked node responses. There is no script to reproduce them; the raw commands and
+harness scripts used are recorded (and their cleanup noted) at the bottom of each report.
+
 ## How the node is neutralized
 
 The dataset is frozen once into each proxy's cache. During measurement the

@@ -26,6 +26,24 @@ jobs:
       - run: make lint
       - run: make fmt
 
+  # The readstate backend (non-default feature) pulls the zebra crate tree; without this lane a
+  # change to the shared types (NodeRpc, NodeError, the RPC structs) could silently break the
+  # feature build until the next manual run. Kept separate from `test` so the default lane stays
+  # lean and both populate their own rust-cache.
+  test-readstate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch head, 2026-07-02
+        with:
+          components: clippy
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo clippy --features readstate --all-targets -- -D warnings
+      - run: cargo test --features readstate
+
   docker:
     runs-on: ubuntu-latest
     steps:

@@ -5,3 +5,7 @@
 # Curated, committed summaries of the 2026-07 mainnet runs (referenced by the README).
 !mainnet-2026-07-summary.md
 !mainnet-2026-07-phase2.md
+
+# Curated, committed readstate-vs-rpc backend reports (referenced by the README and ADR 0023).
+!rss-parity-2026-07.md
+!rss-bench-2026-07.md

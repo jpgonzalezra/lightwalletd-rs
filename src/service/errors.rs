@@ -26,6 +26,13 @@ impl From<NodeError> for Status {
             tracing::warn!(%err, "node transport error");
             return Status::unavailable("backend node unavailable");
         }
+        // `NodeError::State` wraps errors from the in-process zebra read state (`readstate`
+        // backend), and RocksDB errors routinely embed local filesystem paths. Same treatment
+        // as `Http`: keep the detail server-side, hand the client a generic message.
+        if let NodeError::State(_) = err {
+            tracing::warn!(%err, "read state error");
+            return Status::unavailable("read state unavailable");
+        }
         Status::unavailable(err.to_string())
     }
 }

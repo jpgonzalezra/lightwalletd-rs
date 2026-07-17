@@ -102,11 +102,26 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             .await?;
     } else {
         // Real node: query the chain, open the cache, spawn the ingestor, serve `CompactTxStreamer`.
-        let node: Arc<dyn NodeRpc> = Arc::new(node::NodeClient::new(&config.node)?);
+        let rpc_client = node::NodeClient::new(&config.node)?;
 
         // Query the chain (retrying until the node is reachable): its name keys the cache file, and
-        // its Sapling activation height is the default place to start ingesting from.
-        let chain_info = connect_with_retry(node.as_ref()).await;
+        // its Sapling activation height is the default place to start ingesting from. Both backends
+        // need the RPC reachable — readstate keeps it for tx submission and the mempool.
+        let chain_info = connect_with_retry(&rpc_client).await;
+
+        let node: Arc<dyn NodeRpc> = match &config.backend {
+            config::BackendConfig::Rpc => Arc::new(rpc_client),
+            #[cfg(feature = "readstate")]
+            config::BackendConfig::Readstate {
+                state_dir,
+                indexer_url,
+            } => readstate_node(state_dir.clone(), *indexer_url, rpc_client, &chain_info).await?,
+            #[cfg(not(feature = "readstate"))]
+            config::BackendConfig::Readstate { .. } => anyhow::bail!(
+                "--backend readstate requires a build with the `readstate` cargo feature \
+                 (cargo build --release --features readstate)"
+            ),
+        };
         let start_height = config.start_height.unwrap_or_else(|| {
             chain_info
                 .upgrades
@@ -224,6 +239,64 @@ pub fn reflection_service() -> anyhow::Result<
     Ok(tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
         .build_v1()?)
+}
+
+/// Build the `readstate` backend (ADR 0023): open a read-only secondary instance of the zebrad
+/// state and keep it at the true chain tip with `TrustedChainSync` over the indexer gRPC. The
+/// JSON-RPC client is kept inside the backend for the node-only surfaces (submission, mempool,
+/// `getinfo`). Fails fast — with a pointer back to `--backend rpc` — when the state directory is
+/// missing or written by an incompatible zebra version.
+#[cfg(feature = "readstate")]
+async fn readstate_node(
+    state_dir: Option<std::path::PathBuf>,
+    indexer: std::net::SocketAddr,
+    rpc: node::NodeClient,
+    chain_info: &GetBlockchainInfo,
+) -> anyhow::Result<Arc<dyn NodeRpc>> {
+    use zebra_chain::parameters::Network;
+
+    let network = match chain_info.chain.as_str() {
+        "main" => Network::Mainnet,
+        "test" => Network::new_default_testnet(),
+        other => anyhow::bail!("readstate backend does not support chain {other:?}"),
+    };
+    let mut state_config = zebra_state::Config::default();
+    if let Some(dir) = state_dir {
+        state_config.cache_dir = dir;
+    }
+
+    let (read_state, latest_tip, _chain_tip_change, sync_task) =
+        zebra_rpc::sync::init_read_state_with_syncer(state_config.clone(), &network, indexer)
+            .await
+            .map_err(|error| anyhow::anyhow!("read state init task failed: {error}"))?
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "opening the zebra read state at {} failed: {error}. The state must belong \
+                     to a running zebrad of a compatible version (state format v28 <-> zebra 6.x) \
+                     on this host; otherwise use --backend rpc",
+                    state_config.cache_dir.display()
+                )
+            })?;
+    // `TrustedChainSync` retries a lost indexer connection internally (its sync loop re-subscribes
+    // forever), so the task only completes if it panics or the runtime shuts down. Supervise it
+    // anyway: if it ever does die, the tip would freeze while the server keeps serving increasingly
+    // stale data — that must be an `error` in the logs, not silence.
+    tokio::spawn(async move {
+        let result = sync_task.await;
+        tracing::error!(
+            ?result,
+            "zebra state sync task exited; the readstate tip will no longer advance — restart the \
+             server (or switch to --backend rpc)"
+        );
+    });
+    tracing::info!(
+        state_dir = %state_config.cache_dir.display(),
+        indexer = %indexer,
+        "readstate backend: serving reads from the zebra state in-process"
+    );
+    Ok(Arc::new(node::readstate::ZebraStateNode::new(
+        read_state, latest_tip, rpc, network,
+    )))
 }
 
 /// After this many consecutive failures we keep retrying but log at `error!`, so a genuinely

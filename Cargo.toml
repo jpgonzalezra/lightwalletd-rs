@@ -34,10 +34,21 @@ tonic-reflection = "0.14.6"
 tonic_prometheus_layer = "0.3.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
-zcash_address = "=0.13.0-pre.0"
+zcash_address = "=0.13.0"
 zcash_encoding = "0.4.0"
-zcash_primitives = "=0.29.0-pre.0"
-zcash_protocol = "=0.10.0-pre.0"
+zcash_primitives = "=0.29.0"
+zcash_protocol = "=0.10.0"
+# The readstate backend (ADR 0023): in-process reads from a running zebrad's state.
+zebra-chain = { version = "11.1.0", optional = true }
+zebra-rpc = { version = "11.1.0", optional = true }
+zebra-state = { version = "10.1.0", optional = true }
+tower = { version = "0.5", optional = true }
+
+[features]
+default = []
+# Serve reads from a co-located zebrad's state via zebra's ReadStateService
+# (--backend readstate). Heavy: pulls RocksDB and the zebra crate tree.
+readstate = ["dep:zebra-chain", "dep:zebra-rpc", "dep:zebra-state", "dep:tower"]
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"
