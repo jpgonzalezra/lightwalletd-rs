@@ -13,6 +13,7 @@ pub mod darkside;
 pub mod node;
 pub mod proto;
 pub mod service;
+pub mod snapshot;
 
 mod compact;
 mod encoding;
