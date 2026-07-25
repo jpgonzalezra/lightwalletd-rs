@@ -9,6 +9,7 @@
 //! be read consistently while the ingestor writes, and it would bypass every [`crate::cache::Cache`]
 //! invariant on the way in.
 
+pub mod export;
 pub mod format;
 
 use crate::cache::CacheError;
