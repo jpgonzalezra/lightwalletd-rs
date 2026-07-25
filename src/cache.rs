@@ -3,15 +3,35 @@
 //! Each block is stored as its protobuf encoding under its height. The store is ordered, so the lowest
 //! and highest cached heights are cheap to read, and a reorg is just "drop everything above height N".
 
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 use prost::Message;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 use crate::proto::CompactBlock;
+use crate::snapshot::format::epoch_index;
 
 /// Height → protobuf-encoded `CompactBlock`.
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("compact_blocks");
+
+/// Key → opaque value, for the small amount of state that describes the blocks rather than being
+/// one. Created empty on first open, so a cache written by an earlier version needs no migration.
+const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+
+/// Prefix of the [`META`] rows holding a snapshot epoch's digests. The index is zero-padded to the
+/// width of `u64::MAX` so lexicographic key order matches numeric epoch order.
+const EPOCH_DIGEST_PREFIX: &str = "epoch_digest/";
+
+/// The [`META`] key holding epoch `index`'s digests.
+fn epoch_digest_key(index: u64) -> String {
+    format!("{EPOCH_DIGEST_PREFIX}{index:020}")
+}
+
+/// The epoch a [`META`] key describes, or `None` if the key is not an epoch digest row.
+fn epoch_digest_index(key: &str) -> Option<u64> {
+    key.strip_prefix(EPOCH_DIGEST_PREFIX)?.parse().ok()
+}
 
 /// Errors from the block cache.
 #[derive(Debug, thiserror::Error)]
@@ -53,9 +73,10 @@ impl Cache {
     /// Open (creating if needed) the cache at `path`.
     pub fn open(path: &Path) -> Result<Self, CacheError> {
         let db = Database::create(path)?;
-        // Materialize the table so reads against an otherwise-empty cache succeed.
+        // Materialize the tables so reads against an otherwise-empty cache succeed.
         let txn = db.begin_write()?;
         txn.open_table(BLOCKS)?;
+        txn.open_table(META)?;
         txn.commit()?;
         Ok(Self { db })
     }
@@ -122,6 +143,40 @@ impl Cache {
         }
     }
 
+    /// Visit the raw stored value for each cached height in `range`, ascending, under a single read
+    /// transaction. `redb` reads are MVCC, so the view stays coherent for the whole walk even while
+    /// the ingestor appends.
+    ///
+    /// Hands out the stored bytes rather than a decoded block, so an export that only moves blocks
+    /// around pays no decode/encode round trip. The visitor's error type is free (as long as it can
+    /// carry a [`CacheError`]) so a caller need not launder its own errors through this one.
+    pub fn for_each_raw<E>(
+        &self,
+        range: RangeInclusive<u64>,
+        mut visit: impl FnMut(u64, &[u8]) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        E: From<CacheError>,
+    {
+        let txn = self.db.begin_read().map_err(CacheError::from)?;
+        let table = txn.open_table(BLOCKS).map_err(CacheError::from)?;
+        for entry in table.range(range).map_err(CacheError::from)? {
+            let (height, value) = entry.map_err(CacheError::from)?;
+            visit(height.value(), value.value())?;
+        }
+        Ok(())
+    }
+
+    /// The lowest and highest cached heights, read together, or `None` if the cache is empty.
+    pub fn range(&self) -> Result<Option<(u64, u64)>, CacheError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BLOCKS)?;
+        match (table.first()?, table.last()?) {
+            (Some((first, _)), Some((last, _))) => Ok(Some((first.value(), last.value()))),
+            _ => Ok(None),
+        }
+    }
+
     /// The highest cached height, or `None` if the cache is empty.
     pub fn latest_height(&self) -> Result<Option<u64>, CacheError> {
         let txn = self.db.begin_read()?;
@@ -141,25 +196,67 @@ impl Cache {
 
     /// Drop every block above `height` (keeping `height` itself). Used to roll back a reorg.
     pub fn reorg(&self, height: u64) -> Result<(), CacheError> {
-        let txn = self.db.begin_write()?;
-        {
-            let mut table = txn.open_table(BLOCKS)?;
-            table.retain(|cached, _| cached <= height)?;
-        }
-        txn.commit()?;
-        Ok(())
+        self.remove_from(height.saturating_add(1))
     }
 
     /// Drop every block at or above `height`, so re-ingestion refills from `height`. Backs the
     /// `--sync-from-height`/`--redownload` operator levers; `truncate_from(0)` empties the cache.
     pub fn truncate_from(&self, height: u64) -> Result<(), CacheError> {
+        self.remove_from(height)
+    }
+
+    /// Drop every block at or above `height`, together with the snapshot epoch digests describing
+    /// any epoch that reaches into the dropped range, in one transaction. Metadata must never
+    /// outlive the blocks it describes: a digest surviving its epoch would keep advertising a range
+    /// the cache no longer holds.
+    fn remove_from(&self, height: u64) -> Result<(), CacheError> {
+        let dropped_epoch = epoch_index(height);
         let txn = self.db.begin_write()?;
         {
-            let mut table = txn.open_table(BLOCKS)?;
-            table.retain(|cached, _| cached < height)?;
+            let mut blocks = txn.open_table(BLOCKS)?;
+            blocks.retain(|cached, _| cached < height)?;
+            let mut meta = txn.open_table(META)?;
+            meta.retain(|key, _| {
+                epoch_digest_index(key).is_none_or(|index| index < dropped_epoch)
+            })?;
         }
         txn.commit()?;
         Ok(())
+    }
+
+    /// The stored digest row for snapshot epoch `index`, if it has one. The value is opaque here:
+    /// the snapshot module owns its encoding.
+    pub fn epoch_digest(&self, index: u64) -> Result<Option<Vec<u8>>, CacheError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(META)?;
+        Ok(table
+            .get(epoch_digest_key(index).as_str())?
+            .map(|value| value.value().to_vec()))
+    }
+
+    /// Store the digest row for snapshot epoch `index`.
+    pub fn set_epoch_digest(&self, index: u64, value: &[u8]) -> Result<(), CacheError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(META)?;
+            table.insert(epoch_digest_key(index).as_str(), value)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Every stored epoch digest row, ascending by epoch index, read in one transaction.
+    pub fn epoch_digests(&self) -> Result<Vec<(u64, Vec<u8>)>, CacheError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(META)?;
+        let mut rows = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            if let Some(index) = epoch_digest_index(key.value()) {
+                rows.push((index, value.value().to_vec()));
+            }
+        }
+        Ok(rows)
     }
 
     /// A cheap open-time consistency check. On a non-empty cache it decodes the tip and verifies the
@@ -303,6 +400,131 @@ mod tests {
     fn get_returns_none_for_absent_height() {
         let (_dir, cache) = temp_cache();
         assert_eq!(cache.get(42).unwrap(), None);
+    }
+
+    /// A stand-in digest row. The cache treats the value as opaque, so its shape does not matter
+    /// here; only that it survives or is dropped with the blocks it describes.
+    fn digest_row(marker: u8) -> Vec<u8> {
+        vec![marker; 88]
+    }
+
+    /// The epochs that currently have a stored digest.
+    fn stored_epochs(cache: &Cache) -> Vec<u64> {
+        cache
+            .epoch_digests()
+            .unwrap()
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    #[test]
+    fn for_each_raw_visits_the_requested_range_ascending() {
+        let (_dir, cache) = temp_cache();
+        for height in 100..=105 {
+            cache.add(height, &block(height, height as u8)).unwrap();
+        }
+
+        let mut visited = Vec::new();
+        cache
+            .for_each_raw(102..=104, |height, raw| -> Result<(), CacheError> {
+                visited.push((height, CompactBlock::decode(raw)?));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            visited,
+            (102..=104)
+                .map(|height| (height, block(height, height as u8)))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn for_each_raw_propagates_the_visitors_error() {
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &block(100, 1)).unwrap();
+
+        let result = cache.for_each_raw(100..=100, |_, _| {
+            Err(CacheError::Corruption {
+                height: 100,
+                detail: "from the visitor".to_string(),
+            })
+        });
+
+        assert!(matches!(result, Err(CacheError::Corruption { .. })));
+    }
+
+    #[test]
+    fn range_reports_the_cached_bounds() {
+        let (_dir, cache) = temp_cache();
+        assert_eq!(cache.range().unwrap(), None);
+        for height in 100..=105 {
+            cache.add(height, &block(height, height as u8)).unwrap();
+        }
+        assert_eq!(cache.range().unwrap(), Some((100, 105)));
+    }
+
+    #[test]
+    fn epoch_digests_are_ordered_numerically_not_lexicographically() {
+        let (_dir, cache) = temp_cache();
+        for index in [10u64, 2, 9] {
+            cache
+                .set_epoch_digest(index, &digest_row(index as u8))
+                .unwrap();
+        }
+
+        assert_eq!(stored_epochs(&cache), vec![2, 9, 10]);
+    }
+
+    #[test]
+    fn epoch_digest_roundtrips_a_stored_row() {
+        let (_dir, cache) = temp_cache();
+        cache.set_epoch_digest(41, &digest_row(0xaa)).unwrap();
+
+        assert_eq!(cache.epoch_digest(41).unwrap(), Some(digest_row(0xaa)));
+        assert_eq!(cache.epoch_digest(42).unwrap(), None);
+    }
+
+    #[test]
+    fn reorg_drops_the_digests_of_every_epoch_it_reaches_into() {
+        let (_dir, cache) = temp_cache();
+        for index in 0..=2 {
+            cache.set_epoch_digest(index, &digest_row(1)).unwrap();
+        }
+
+        // Blocks above 15,000 go, so epoch 1 (10,000..19,999) loses part of its range.
+        cache.reorg(15_000).unwrap();
+
+        assert_eq!(stored_epochs(&cache), vec![0]);
+    }
+
+    #[test]
+    fn truncate_from_keeps_the_digests_of_epochs_it_leaves_intact() {
+        let (_dir, cache) = temp_cache();
+        for index in 0..=2 {
+            cache.set_epoch_digest(index, &digest_row(1)).unwrap();
+        }
+
+        // Epoch 1 ends at 19,999, so truncating from 20,000 leaves it whole.
+        cache.truncate_from(20_000).unwrap();
+
+        assert_eq!(stored_epochs(&cache), vec![0, 1]);
+    }
+
+    #[test]
+    fn truncate_from_zero_drops_every_digest_with_the_blocks() {
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &block(100, 1)).unwrap();
+        for index in 0..=2 {
+            cache.set_epoch_digest(index, &digest_row(1)).unwrap();
+        }
+
+        cache.truncate_from(0).unwrap();
+
+        assert_eq!(cache.latest_height().unwrap(), None);
+        assert_eq!(stored_epochs(&cache), Vec::<u64>::new());
     }
 
     #[test]
