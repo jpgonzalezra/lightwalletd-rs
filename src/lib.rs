@@ -189,6 +189,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             (cache, location, None)
         };
 
+        let start_height = effective_start_height(start_height, cache.snapshot_base_height()?);
+
         tracing::info!(
             grpc_bind = %config.grpc_bind,
             node_url = %config.node.url,
@@ -344,6 +346,27 @@ async fn connect_with_retry(node: &dyn NodeRpc) -> GetBlockchainInfo {
     }
 }
 
+/// Raise the ingest floor to the base height of an imported snapshot.
+///
+/// A bootstrapped cache cannot be rebuilt from below the height its snapshot was based at. Leaving
+/// the floor at the configured start height would mean a reorg deep enough to reach it empties the
+/// cache (see `ingestor::reorg_to_floor`) and the server silently re-ingests from Sapling
+/// activation, discarding the whole import. Clearing the cache with `--redownload` also clears the
+/// recorded base, so a deliberate wipe returns the instance to a plain cold start.
+fn effective_start_height(configured: u64, snapshot_base: Option<u64>) -> u64 {
+    match snapshot_base {
+        Some(base) if base > configured => {
+            tracing::info!(
+                configured,
+                snapshot_base = base,
+                "raising the ingest floor to the imported snapshot's base height"
+            );
+            base
+        }
+        _ => configured,
+    }
+}
+
 /// Validate a node-supplied chain name before it is used to build the cache file name.
 ///
 /// The node is trusted-local (see ADR 0001), but `getblockchaininfo`'s `chain` field still flows
@@ -453,6 +476,24 @@ mod tests {
     async fn connect_with_retry_keeps_retrying_past_the_escalation_threshold() {
         let info = connect_with_retry(&fake(ESCALATE_AFTER + 3)).await;
         assert_eq!(info.blocks, 4242);
+    }
+
+    #[test]
+    fn an_imported_snapshot_raises_the_ingest_floor_above_the_configured_start() {
+        assert_eq!(effective_start_height(419_200, Some(3_000_000)), 3_000_000);
+    }
+
+    #[test]
+    fn a_configured_start_above_the_snapshot_base_is_kept() {
+        assert_eq!(
+            effective_start_height(3_100_000, Some(3_000_000)),
+            3_100_000
+        );
+    }
+
+    #[test]
+    fn a_cache_that_was_never_bootstrapped_keeps_the_configured_start() {
+        assert_eq!(effective_start_height(419_200, None), 419_200);
     }
 
     #[test]
