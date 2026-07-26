@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use prost::Message;
@@ -398,7 +398,13 @@ async fn verify_anchor(
     node: &Arc<dyn NodeRpc>,
     config: &ImportConfig,
 ) -> Result<(), SnapshotError> {
-    let hashes = fetch_block_hashes(node, entry.start..=entry.end, config.concurrency).await?;
+    let hashes = fetch_block_hashes(
+        node,
+        entry.index,
+        entry.start..=entry.end,
+        config.concurrency,
+    )
+    .await?;
     let mut anchor = AnchorHasher::default();
     for block in blocks {
         let reject = |check: &'static str, detail: String| SnapshotError::BlockRejected {
@@ -438,33 +444,59 @@ async fn verify_anchor(
     Ok(())
 }
 
-/// Look up every height's block hash, with at most `concurrency` requests in flight.
+/// Heights per batched lookup. Measured against a real node: 1 at a time gives 17.7 heights/s,
+/// 100 gives 165, 1,000 gives 1,118. Past that the gain flattens and the request body grows.
+const LOOKUP_BATCH: usize = 1_000;
+
+/// Look up every height's block hash, in batches, with at most `concurrency` requests in flight.
 ///
-/// A fixed pool of workers pulling from a shared counter, rather than one task per height: an epoch
-/// is 10,000 heights, and they would all sit waiting on a permit.
+/// A fixed pool of workers pulling batches off a shared counter. Batch size matters more than
+/// concurrency here, since what dominates is round trips rather than the node's own work.
 async fn fetch_block_hashes(
     node: &Arc<dyn NodeRpc>,
+    epoch: u64,
     heights: RangeInclusive<u64>,
     concurrency: usize,
 ) -> Result<BTreeMap<u64, String>, SnapshotError> {
-    let next = Arc::new(AtomicU64::new(*heights.start()));
+    let batches: Arc<Vec<Vec<u64>>> = Arc::new(
+        heights
+            .collect::<Vec<u64>>()
+            .chunks(LOOKUP_BATCH)
+            .map(<[u64]>::to_vec)
+            .collect(),
+    );
+    let next = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicBool::new(false));
-    let end = *heights.end();
 
     let mut workers = JoinSet::new();
     for _ in 0..concurrency.max(1) {
         let node = Arc::clone(node);
+        let batches = Arc::clone(&batches);
         let next = Arc::clone(&next);
         let failed = Arc::clone(&failed);
         workers.spawn(async move {
             let mut found = Vec::new();
             while !failed.load(Ordering::Relaxed) {
-                let height = next.fetch_add(1, Ordering::Relaxed);
-                if height > end {
+                let Some(batch) = batches.get(next.fetch_add(1, Ordering::Relaxed)) else {
                     break;
-                }
-                match node.get_block_hash(height).await {
-                    Ok(hash) => found.push((height, hash)),
+                };
+                let height = batch[0];
+                match node.get_block_hashes(batch).await {
+                    Ok(hashes) if hashes.len() == batch.len() => {
+                        found.extend(batch.iter().copied().zip(hashes));
+                    }
+                    Ok(hashes) => {
+                        failed.store(true, Ordering::Relaxed);
+                        return Err(SnapshotError::EpochRejected {
+                            epoch,
+                            check: "anchor",
+                            detail: format!(
+                                "asked the node for {} hashes from height {height}, got {}",
+                                batch.len(),
+                                hashes.len()
+                            ),
+                        });
+                    }
                     Err(source) => {
                         // Stop the other workers rather than walking the rest of the epoch against
                         // a node that is not answering.
