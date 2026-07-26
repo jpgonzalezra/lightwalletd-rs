@@ -33,6 +33,26 @@ fn epoch_digest_index(key: &str) -> Option<u64> {
     key.strip_prefix(EPOCH_DIGEST_PREFIX)?.parse().ok()
 }
 
+/// The [`META`] key holding the base height of an imported snapshot.
+const SNAPSHOT_BASE_HEIGHT: &str = "snapshot_base_height";
+
+/// Decode a stored [`SNAPSHOT_BASE_HEIGHT`] row, whichever transaction it was read under.
+fn decode_base_height(
+    value: Option<redb::AccessGuard<'_, &'static [u8]>>,
+) -> Result<Option<u64>, CacheError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let bytes: [u8; 8] = value
+        .value()
+        .try_into()
+        .map_err(|_| CacheError::Corruption {
+            height: 0,
+            detail: "snapshot_base_height is not 8 bytes".to_string(),
+        })?;
+    Ok(Some(u64::from_le_bytes(bytes)))
+}
+
 /// Errors from the block cache.
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
@@ -101,11 +121,46 @@ impl Cache {
     /// extend the current tip by exactly one, and the heights must be consecutive. An empty batch
     /// is a no-op.
     pub fn add_batch(&self, blocks: &[CompactBlock]) -> Result<(), CacheError> {
+        self.append(blocks, None)
+    }
+
+    /// Append a batch that came from a snapshot, recording `snapshot_base` as the lowest height the
+    /// cache can be rebuilt from, in the same transaction as the blocks.
+    ///
+    /// Atomic on purpose: a recorded floor that outlived its blocks would raise the ingestor's start
+    /// height above a range the cache does not actually hold.
+    pub fn add_imported_batch(
+        &self,
+        blocks: &[CompactBlock],
+        snapshot_base: u64,
+    ) -> Result<(), CacheError> {
+        self.append(blocks, Some(snapshot_base))
+    }
+
+    /// The base height of an imported snapshot, if this cache was bootstrapped from one.
+    ///
+    /// There is no matching setter: the value is only ever written by [`Self::add_imported_batch`],
+    /// which is what keeps it from being recorded without the blocks it describes.
+    pub fn snapshot_base_height(&self) -> Result<Option<u64>, CacheError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(META)?;
+        decode_base_height(table.get(SNAPSHOT_BASE_HEIGHT)?)
+    }
+
+    fn append(
+        &self,
+        blocks: &[CompactBlock],
+        snapshot_base: Option<u64>,
+    ) -> Result<(), CacheError> {
         let Some(first) = blocks.first() else {
             return Ok(());
         };
         let txn = self.db.begin_write()?;
         {
+            if let Some(base) = snapshot_base {
+                let mut meta = txn.open_table(META)?;
+                meta.insert(SNAPSHOT_BASE_HEIGHT, base.to_le_bytes().as_slice())?;
+            }
             let mut table = txn.open_table(BLOCKS)?;
             if let Some((tip, _)) = table.last()? {
                 let tip = tip.value();
@@ -205,18 +260,29 @@ impl Cache {
         self.remove_from(height)
     }
 
-    /// Drop every block at or above `height`, together with the snapshot epoch digests describing
-    /// any epoch that reaches into the dropped range, in one transaction. Metadata must never
-    /// outlive the blocks it describes: a digest surviving its epoch would keep advertising a range
-    /// the cache no longer holds.
+    /// Drop every block at or above `height`, together with the snapshot metadata that describes
+    /// blocks going with them, in one transaction.
+    ///
+    /// Metadata must never outlive the blocks it describes. An epoch digest goes when the truncation
+    /// reaches into its epoch, and the imported base height goes when the truncation removes the
+    /// base itself, which is what makes `truncate_from(0)` (and so `--redownload`) return the
+    /// instance to a plain cold start.
     fn remove_from(&self, height: u64) -> Result<(), CacheError> {
         let dropped_epoch = epoch_index(height);
         let txn = self.db.begin_write()?;
         {
             let mut blocks = txn.open_table(BLOCKS)?;
             blocks.retain(|cached, _| cached < height)?;
+
             let mut meta = txn.open_table(META)?;
+            // Read the base inside this transaction, so the decision to drop it cannot be taken
+            // against a value another writer has already replaced.
+            let drops_the_base = decode_base_height(meta.get(SNAPSHOT_BASE_HEIGHT)?)?
+                .is_some_and(|base| height <= base);
             meta.retain(|key, _| {
+                if key == SNAPSHOT_BASE_HEIGHT {
+                    return !drops_the_base;
+                }
                 epoch_digest_index(key).is_none_or(|index| index < dropped_epoch)
             })?;
         }
@@ -511,6 +577,53 @@ mod tests {
         cache.truncate_from(20_000).unwrap();
 
         assert_eq!(stored_epochs(&cache), vec![0, 1]);
+    }
+
+    #[test]
+    fn add_imported_batch_records_the_snapshot_base_with_the_blocks() {
+        let (_dir, cache) = temp_cache();
+        assert_eq!(cache.snapshot_base_height().unwrap(), None);
+
+        let batch: Vec<CompactBlock> = (500..=505).map(|h| block(h, h as u8)).collect();
+        cache.add_imported_batch(&batch, 500).unwrap();
+
+        assert_eq!(cache.snapshot_base_height().unwrap(), Some(500));
+        assert_eq!(cache.latest_height().unwrap(), Some(505));
+    }
+
+    #[test]
+    fn a_rejected_imported_batch_records_no_base_height() {
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &block(100, 1)).unwrap();
+
+        // Does not extend the tip, so the whole transaction aborts — including the base height.
+        let batch = vec![block(500, 1), block(501, 2)];
+        assert!(cache.add_imported_batch(&batch, 500).is_err());
+
+        assert_eq!(cache.snapshot_base_height().unwrap(), None);
+    }
+
+    #[test]
+    fn truncating_above_the_snapshot_base_keeps_it() {
+        let (_dir, cache) = temp_cache();
+        let batch: Vec<CompactBlock> = (500..=505).map(|h| block(h, h as u8)).collect();
+        cache.add_imported_batch(&batch, 500).unwrap();
+
+        cache.truncate_from(503).unwrap();
+
+        assert_eq!(cache.snapshot_base_height().unwrap(), Some(500));
+    }
+
+    #[test]
+    fn truncating_the_snapshot_base_away_clears_it() {
+        let (_dir, cache) = temp_cache();
+        let batch: Vec<CompactBlock> = (500..=505).map(|h| block(h, h as u8)).collect();
+        cache.add_imported_batch(&batch, 500).unwrap();
+
+        // What --redownload does: the imported range is gone, so its floor must go with it.
+        cache.truncate_from(0).unwrap();
+
+        assert_eq!(cache.snapshot_base_height().unwrap(), None);
     }
 
     #[test]
