@@ -12,6 +12,7 @@
 pub mod export;
 pub mod format;
 pub mod import;
+pub mod serve;
 
 use crate::cache::CacheError;
 use crate::node::NodeError;

@@ -28,6 +28,10 @@ tempfile = "3.27.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = { version = "0.1.18", features = ["net"] }
+tower-http = { version = "0.6.11", default-features = false, features = [
+    "compression-gzip",
+    "compression-zstd",
+] }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tonic-prost = "0.14.6"
 tonic-reflection = "0.14.6"
@@ -58,3 +62,6 @@ proptest = "1.11.0"
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["full", "test-util"] }
 wiremock = "0.6"
+# Decompresses what the snapshot endpoint sends, so a test reads the wire bytes rather than
+# trusting a client that would decompress them transparently.
+zstd = "0.13"
