@@ -112,6 +112,9 @@ pub struct FakeNode {
     pub block_verbose_err: Option<(i64, String)>,
     pub block_count: Option<u64>,
     pub block_raw: Option<Vec<u8>>,
+    /// Per-height `get_block_hash` responses, in display order. A height that is absent yields the
+    /// same "not found" RPC error the node returns past its tip.
+    pub hash_by_height: HashMap<u64, String>,
     /// Per-height `get_block_verbose` responses; used when non-empty (a missing height then yields
     /// an RPC error instead of falling back to `block_verbose`). Lets a test serve a whole chain.
     pub verbose_by_height: HashMap<u64, GetBlockVerbose>,
@@ -186,6 +189,16 @@ impl NodeRpc for FakeNode {
         Ok(self
             .block_count
             .expect("FakeNode: get_block_count not configured"))
+    }
+
+    async fn get_block_hash(&self, height: u64) -> Result<String, NodeError> {
+        self.hash_by_height
+            .get(&height)
+            .cloned()
+            .ok_or(NodeError::Rpc {
+                code: -1,
+                message: "Provided index is greater than the current tip".to_string(),
+            })
     }
 
     async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {

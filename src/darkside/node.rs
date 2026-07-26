@@ -41,6 +41,10 @@ impl NodeRpc for DarksideNode {
         Ok(self.state.lock().await.block_count())
     }
 
+    async fn get_block_hash(&self, height: u64) -> Result<String, NodeError> {
+        Ok(self.state.lock().await.block_verbose(height)?.hash)
+    }
+
     async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {
         Ok(self.state.lock().await.block_raw_by_hash(hash)?)
     }

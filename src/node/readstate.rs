@@ -289,6 +289,19 @@ where
         Ok(self.best_tip()?.0)
     }
 
+    async fn get_block_hash(&self, height: u64) -> Result<String, NodeError> {
+        let not_found = || NodeError::Rpc {
+            code: RPC_BLOCK_NOT_FOUND,
+            message: "Block not found".to_string(),
+        };
+        let height = state_height(height).ok_or_else(not_found)?;
+        match self.read(ReadRequest::BestChainBlockHash(height)).await? {
+            ReadResponse::BlockHash(Some(hash)) => Ok(hash.to_string()),
+            ReadResponse::BlockHash(None) => Err(not_found()),
+            other => Err(unexpected(&other)),
+        }
+    }
+
     async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {
         let id = Self::parse_hash_or_height(hash)?;
         let block = self.block(id).await?;
@@ -642,6 +655,32 @@ mod tests {
         let raw = crate::testutil::testdata_blocks()[0].clone();
         let block = Block::zcash_deserialize(&raw[..]).expect("valid testdata block");
         (raw, block)
+    }
+
+    #[tokio::test]
+    async fn get_block_hash_reads_the_index_rather_than_the_whole_block() {
+        let (_raw, block) = first_testdata_block();
+        let hash = block.hash();
+        let (node, read_state) = node_with(vec![ReadResponse::BlockHash(Some(hash))], None);
+
+        let result = node.get_block_hash(380_640).await.unwrap();
+
+        assert_eq!(result, hash.to_string());
+        match &read_state.requests()[..] {
+            [ReadRequest::BestChainBlockHash(height)] => {
+                assert_eq!(*height, block::Height(380_640));
+            }
+            other => panic!("expected one BestChainBlockHash, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_block_hash_maps_an_absent_height_to_the_node_not_found_code() {
+        let (node, _) = node_with(vec![ReadResponse::BlockHash(None)], None);
+
+        let error = node.get_block_hash(380_640).await.unwrap_err();
+
+        assert!(matches!(error, NodeError::Rpc { code: -8, .. }));
     }
 
     #[tokio::test]

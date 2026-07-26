@@ -91,6 +91,11 @@ pub trait NodeRpc: Send + Sync {
     async fn get_block_verbose(&self, height: u64) -> Result<GetBlockVerbose, NodeError>;
     /// Call `getblockcount` to get the height of the best chain tip.
     async fn get_block_count(&self) -> Result<u64, NodeError>;
+    /// Call `getblockhash <height>` for the block hash at `height`, in display (hex) order.
+    ///
+    /// An index lookup rather than a block read, which is what makes verifying a snapshot height by
+    /// height affordable.
+    async fn get_block_hash(&self, height: u64) -> Result<String, NodeError>;
     /// Call `getblock <hash> 0` (raw) and return the decoded block bytes.
     async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError>;
     /// Call `getrawtransaction <txid> 1` (verbose) for a transaction's bytes and mined height.
@@ -213,6 +218,12 @@ impl NodeRpc for NodeClient {
         self.request("getblockcount", serde_json::json!([])).await
     }
 
+    async fn get_block_hash(&self, height: u64) -> Result<String, NodeError> {
+        // Unlike `getblock`, this one rejects a stringified height: the index must be a number.
+        self.request("getblockhash", serde_json::json!([height]))
+            .await
+    }
+
     async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {
         let hex_str: String = self
             .request("getblock", serde_json::json!([hash, 0]))
@@ -317,7 +328,7 @@ struct RpcErrorObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method};
+    use wiremock::matchers::{body_partial_json, header, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client_for(server: &MockServer) -> NodeClient {
@@ -369,6 +380,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, NodeError::EmptyResult));
+    }
+
+    #[tokio::test]
+    async fn get_block_hash_sends_the_height_as_a_number() {
+        // zebra accepts a stringified height for `getblock` but rejects one for `getblockhash`
+        // ("Invalid params"), so the parameter type is load-bearing rather than cosmetic.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                serde_json::json!({ "method": "getblockhash", "params": [419200] }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": "00000000025a57200d898ac7f21e26bf29028bbe96ec46e05b2c17cc9db9e4f3",
+            })))
+            .mount(&server)
+            .await;
+
+        let hash = client_for(&server).get_block_hash(419_200).await.unwrap();
+
+        assert_eq!(
+            hash,
+            "00000000025a57200d898ac7f21e26bf29028bbe96ec46e05b2c17cc9db9e4f3"
+        );
     }
 
     #[tokio::test]
