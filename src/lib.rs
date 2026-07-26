@@ -211,6 +211,38 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             ));
         }
 
+        if let Some(snapshot_config) = config.snapshot {
+            if !snapshot_config.bind.ip().is_loopback() {
+                tracing::warn!(
+                    snapshot_bind = %snapshot_config.bind,
+                    "publishing snapshots on a non-loopback address — anyone who can reach it can \
+                     download the whole cache, at whatever bandwidth this host will give them"
+                );
+            }
+            tracing::info!(
+                snapshot_bind = %snapshot_config.bind,
+                "publishing snapshots on /snapshot/manifest and /snapshot/epoch/{{index}}"
+            );
+            // The manifest only lists epochs whose digests are stored, so the maintenance walk is
+            // what makes anything publishable at all: on a cache ingested by an earlier version it
+            // backfills from the base upward, and afterwards it computes one epoch per boundary
+            // crossing. Both are the same walk, throttled against the ingestor.
+            tokio::spawn(snapshot::export::maintain_digests(
+                cache.clone(),
+                chain_info.chain.clone(),
+                snapshot::export::DigestMaintenance::default(),
+            ));
+            let snapshot_cache = cache.clone();
+            let snapshot_chain = chain_info.chain.clone();
+            tokio::spawn(async move {
+                if let Err(error) =
+                    snapshot::serve::serve(snapshot_cache, snapshot_chain, snapshot_config).await
+                {
+                    tracing::error!(%error, "snapshot server failed");
+                }
+            });
+        }
+
         // One shared mempool monitor fans the mempool out to all clients, so node load stays
         // independent of the number of connected wallets.
         let mempool = service::mempool_monitor::start(node.clone());
