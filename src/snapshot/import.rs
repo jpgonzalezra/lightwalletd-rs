@@ -17,9 +17,13 @@
 //! real tip hash in the last block, choose that block's `prevHash` freely, and everything below it
 //! would be unconstrained while still passing layers 1 to 3.
 //!
-//! Imports go through [`Cache::add_batch`], one call per epoch, so every existing cache invariant
-//! applies unchanged and a rejected epoch writes nothing. Resumption then needs no state of its own:
-//! the importer asks the cache how far it got and carries on from there.
+//! Imports go through the cache's ordinary append, one transaction per epoch, so every existing
+//! invariant applies unchanged and a rejected epoch writes nothing. Resumption then needs no state
+//! of its own: the importer asks the cache how far it got and carries on from there.
+//!
+//! An epoch body is held whole to be verified, but its blocks are decoded one at a time rather than
+//! materialized together: on mainnet a sandblasting-era epoch is 1.21 GB, so keeping both would
+//! double the peak for nothing.
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -32,7 +36,7 @@ use prost::Message;
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
 
-use crate::cache::Cache;
+use crate::cache::{Cache, CacheError};
 use crate::encoding;
 use crate::node::NodeRpc;
 use crate::proto::CompactBlock;
@@ -103,13 +107,18 @@ pub async fn import(
             });
         }
 
-        let blocks = fetch_and_verify(source, entry, &manifest.chain, node, config).await?;
-        let arriving = &blocks[(next - entry.start) as usize..];
-        check_junction(cache, entry.index, arriving)?;
-        match tip {
-            None => cache.add_imported_batch(arriving, next)?,
-            Some(_) => cache.add_batch(arriving)?,
-        }
+        // The body is the only large allocation an epoch costs: it is verified in place, and the
+        // blocks are decoded one at a time on the way into the cache.
+        let body = fetch_body(source, entry).await?;
+        let records = verify_epoch(&body, entry, &manifest.chain, node, config).await?;
+        let arriving = &records[(next - entry.start) as usize..];
+        check_junction(cache, entry.index, arriving.first().copied())?;
+        cache.add_decoded_batch(
+            arriving
+                .iter()
+                .map(|record| CompactBlock::decode(*record).map_err(CacheError::from)),
+            tip.is_none().then_some(next),
+        )?;
         tip = Some(entry.end);
         tracing::info!(
             epoch = entry.index,
@@ -190,43 +199,54 @@ fn validate_manifest(manifest: &Manifest, chain: &str) -> Result<(), SnapshotErr
     Ok(())
 }
 
-/// Fetch one epoch and run every verification layer over it, returning its blocks in height order.
-async fn fetch_and_verify(
+/// Download one epoch body, refusing anything that cannot be what the manifest describes.
+async fn fetch_body(
     source: &dyn EpochSource,
+    entry: &EpochEntry,
+) -> Result<Vec<u8>, SnapshotError> {
+    let reject = |detail: String| SnapshotError::EpochRejected {
+        epoch: entry.index,
+        check: "length",
+        detail,
+    };
+    if entry.bytes > MAX_EPOCH_BYTES {
+        return Err(reject(format!(
+            "manifest declares {} bytes, past the {MAX_EPOCH_BYTES} an epoch may hold",
+            entry.bytes
+        )));
+    }
+    let body = source.epoch(entry.index, entry.bytes).await?;
+    if body.len() as u64 != entry.bytes {
+        return Err(reject(format!(
+            "body is {} bytes, manifest declares {}",
+            body.len(),
+            entry.bytes
+        )));
+    }
+    Ok(body)
+}
+
+/// Run every verification layer over `body`, returning its records in height order.
+///
+/// Blocks are decoded one at a time and dropped again: only the body, the 32-byte hashes the anchor
+/// needs, and the block being compared are ever held. A sandblasting-era epoch is over a gigabyte,
+/// so materializing all 10,000 of them would double the peak for no reason.
+async fn verify_epoch<'a>(
+    body: &'a [u8],
     entry: &EpochEntry,
     chain: &str,
     node: &Arc<dyn NodeRpc>,
     config: &ImportConfig,
-) -> Result<Vec<CompactBlock>, SnapshotError> {
+) -> Result<Vec<&'a [u8]>, SnapshotError> {
     let epoch = entry.index;
     let reject = |check: &'static str, detail: String| SnapshotError::EpochRejected {
         epoch,
         check,
         detail,
     };
-    if entry.bytes > MAX_EPOCH_BYTES {
-        return Err(reject(
-            "length",
-            format!(
-                "manifest declares {} bytes, past the {MAX_EPOCH_BYTES} an epoch may hold",
-                entry.bytes
-            ),
-        ));
-    }
-    let body = source.epoch(epoch, entry.bytes).await?;
 
     // 1. Content digest.
-    if body.len() as u64 != entry.bytes {
-        return Err(reject(
-            "length",
-            format!(
-                "body is {} bytes, manifest declares {}",
-                body.len(),
-                entry.bytes
-            ),
-        ));
-    }
-    let digest = hex::encode(content_digest(&body));
+    let digest = hex::encode(content_digest(body));
     if digest != entry.content_digest {
         return Err(reject(
             "content digest",
@@ -237,71 +257,68 @@ async fn fetch_and_verify(
         ));
     }
 
-    // Framing, and every block sitting at the height its position implies. Scoped so the body is
-    // released before the anchor check: from here on the decoded blocks own their bytes.
+    let (header, records) =
+        parse_epoch(body).map_err(|error| reject("framing", error.to_string()))?;
+    if header.chain != chain {
+        return Err(reject(
+            "chain",
+            format!("body is for chain {:?}, expected {chain:?}", header.chain),
+        ));
+    }
     let count = entry.end - entry.start + 1;
-    let blocks = {
-        let (header, records) =
-            parse_epoch(&body).map_err(|error| reject("framing", error.to_string()))?;
-        if header.chain != chain {
-            return Err(reject(
-                "chain",
-                format!("body is for chain {:?}, expected {chain:?}", header.chain),
-            ));
-        }
-        if header.start != entry.start || u64::from(header.count) != count {
-            return Err(reject(
-                "framing",
-                format!(
-                    "body covers {} blocks from {}, manifest declares {count} from {}",
-                    header.count, header.start, entry.start
-                ),
-            ));
-        }
-        let mut blocks = Vec::with_capacity(records.len());
-        for (height, record) in (entry.start..).zip(&records) {
-            let block =
-                CompactBlock::decode(*record).map_err(|error| SnapshotError::BlockRejected {
-                    epoch,
-                    height,
-                    check: "decode",
-                    detail: error.to_string(),
-                })?;
-            if block.height != height {
-                return Err(SnapshotError::BlockRejected {
-                    epoch,
-                    height,
-                    check: "height",
-                    detail: format!("block claims height {}", block.height),
-                });
-            }
-            blocks.push(block);
-        }
-        blocks
-    };
-    drop(body);
+    if header.start != entry.start || u64::from(header.count) != count {
+        return Err(reject(
+            "framing",
+            format!(
+                "body covers {} blocks from {}, manifest declares {count} from {}",
+                header.count, header.start, entry.start
+            ),
+        ));
+    }
 
-    // 2 and 3, over every consecutive pair inside the epoch.
-    for pair in blocks.windows(2) {
-        check_linkage(epoch, &pair[0], &pair[1])?;
-        check_tree_sizes(epoch, &pair[0], &pair[1])?;
+    // One pass for layers 2 and 3, keeping only what layer 4 will need.
+    let mut hashes: Vec<Vec<u8>> = Vec::with_capacity(records.len());
+    let mut previous: Option<CompactBlock> = None;
+    for (height, record) in (entry.start..).zip(&records) {
+        let block = decode_block(epoch, height, record)?;
+        if let Some(previous) = &previous {
+            check_linkage(epoch, previous, &block)?;
+            check_tree_sizes(epoch, previous, &block)?;
+        }
+        hashes.push(block.hash.clone());
+        previous = Some(block);
     }
 
     // 4. The one that binds the epoch to the real chain.
-    verify_anchor(entry, &blocks, node, config).await?;
-    Ok(blocks)
+    verify_anchor(entry, &hashes, node, config).await?;
+    Ok(records)
+}
+
+/// Decode one record, holding it to the height its position in the epoch implies.
+fn decode_block(epoch: u64, height: u64, record: &[u8]) -> Result<CompactBlock, SnapshotError> {
+    let block = CompactBlock::decode(record).map_err(|error| SnapshotError::BlockRejected {
+        epoch,
+        height,
+        check: "decode",
+        detail: error.to_string(),
+    })?;
+    if block.height != height {
+        return Err(SnapshotError::BlockRejected {
+            epoch,
+            height,
+            check: "height",
+            detail: format!("block claims height {}", block.height),
+        });
+    }
+    Ok(block)
 }
 
 /// Check that the first arriving block continues the cache, in both hashes and tree sizes.
 ///
 /// The seam between two epochs is exactly where a snapshot could otherwise splice one chain onto
 /// another, so the checks that run inside an epoch have to run across the join too.
-fn check_junction(
-    cache: &Cache,
-    epoch: u64,
-    arriving: &[CompactBlock],
-) -> Result<(), SnapshotError> {
-    let Some(first) = arriving.first() else {
+fn check_junction(cache: &Cache, epoch: u64, arriving: Option<&[u8]>) -> Result<(), SnapshotError> {
+    let Some(record) = arriving else {
         return Ok(());
     };
     let Some(tip_height) = cache.latest_height()? else {
@@ -310,8 +327,9 @@ fn check_junction(
     let Some(tip) = cache.get(tip_height)? else {
         return Ok(());
     };
-    check_linkage(epoch, &tip, first)?;
-    check_tree_sizes(epoch, &tip, first)
+    let first = decode_block(epoch, tip_height + 1, record)?;
+    check_linkage(epoch, &tip, &first)?;
+    check_tree_sizes(epoch, &tip, &first)
 }
 
 /// `later` must name `earlier` as its predecessor.
@@ -413,11 +431,11 @@ fn check_tree_sizes(
 /// what ties the manifest's published anchor to the body that arrived.
 async fn verify_anchor(
     entry: &EpochEntry,
-    blocks: &[CompactBlock],
+    hashes: &[Vec<u8>],
     node: &Arc<dyn NodeRpc>,
     config: &ImportConfig,
 ) -> Result<(), SnapshotError> {
-    let hashes = fetch_block_hashes(
+    let node_hashes = fetch_block_hashes(
         node,
         entry.index,
         entry.start..=entry.end,
@@ -425,28 +443,28 @@ async fn verify_anchor(
     )
     .await?;
     let mut anchor = AnchorHasher::default();
-    for block in blocks {
+    for (height, claimed) in (entry.start..).zip(hashes) {
         let reject = |check: &'static str, detail: String| SnapshotError::BlockRejected {
             epoch: entry.index,
-            height: block.height,
+            height,
             check,
             detail,
         };
-        let display = hashes
-            .get(&block.height)
+        let display = node_hashes
+            .get(&height)
             .ok_or_else(|| reject("anchor", "the node has no block at this height".to_string()))?;
         let wire = encoding::display_hex_to_wire(display)
             .map_err(|error| reject("anchor", format!("node returned {display:?}: {error}")))?;
-        if wire != block.hash {
+        if wire != *claimed {
             return Err(reject(
                 "anchor",
                 format!(
                     "the node has {display}, the snapshot claims {}",
-                    encoding::wire_to_display_hex(&block.hash)
+                    encoding::wire_to_display_hex(claimed)
                 ),
             ));
         }
-        anchor.update(block.height, &wire);
+        anchor.update(height, &wire);
     }
 
     let recomputed = hex::encode(anchor.finish());
@@ -463,9 +481,11 @@ async fn verify_anchor(
     Ok(())
 }
 
-/// Largest epoch body this build will hold. A real one runs from a few MB to a few hundred; the
-/// ceiling is there so a hostile manifest cannot ask for an allocation instead of a download.
-const MAX_EPOCH_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Largest epoch body this build will hold. Measured on mainnet: 49 MB for an early-2016 epoch,
+/// 1.21 GB for an early sandblasting one, which is the era that sets the bar. The ceiling leaves
+/// room above that while still stopping a hostile manifest from asking for an allocation instead of
+/// a download.
+const MAX_EPOCH_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Per-request timeout for a snapshot download.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(300);

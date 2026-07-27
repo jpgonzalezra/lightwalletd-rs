@@ -121,25 +121,26 @@ impl Cache {
     /// extend the current tip by exactly one, and the heights must be consecutive. An empty batch
     /// is a no-op.
     pub fn add_batch(&self, blocks: &[CompactBlock]) -> Result<(), CacheError> {
-        self.append(blocks, None)
+        self.append(blocks.iter().map(Ok), None)
     }
 
-    /// Append a batch that came from a snapshot, recording `snapshot_base` as the lowest height the
-    /// cache can be rebuilt from, in the same transaction as the blocks.
+    /// Append blocks decoded on demand, optionally recording `snapshot_base` as the lowest height
+    /// the cache can be rebuilt from, all in one transaction.
     ///
-    /// Atomic on purpose: a recorded floor that outlived its blocks would raise the ingestor's start
-    /// height above a range the cache does not actually hold.
-    pub fn add_imported_batch(
+    /// Taking an iterator keeps a snapshot import from materializing a whole epoch at once: a
+    /// sandblasting-era epoch is over a gigabyte. Recording the floor here rather than separately is
+    /// what stops it from outliving the blocks it describes.
+    pub fn add_decoded_batch(
         &self,
-        blocks: &[CompactBlock],
-        snapshot_base: u64,
+        blocks: impl IntoIterator<Item = Result<CompactBlock, CacheError>>,
+        snapshot_base: Option<u64>,
     ) -> Result<(), CacheError> {
-        self.append(blocks, Some(snapshot_base))
+        self.append(blocks, snapshot_base)
     }
 
     /// The base height of an imported snapshot, if this cache was bootstrapped from one.
     ///
-    /// There is no matching setter: the value is only ever written by [`Self::add_imported_batch`],
+    /// There is no matching setter: the value is only ever written by [`Self::add_decoded_batch`],
     /// which is what keeps it from being recorded without the blocks it describes.
     pub fn snapshot_base_height(&self) -> Result<Option<u64>, CacheError> {
         let txn = self.db.begin_read()?;
@@ -147,42 +148,58 @@ impl Cache {
         decode_base_height(table.get(SNAPSHOT_BASE_HEIGHT)?)
     }
 
-    fn append(
+    fn append<B: std::borrow::Borrow<CompactBlock>>(
         &self,
-        blocks: &[CompactBlock],
+        blocks: impl IntoIterator<Item = Result<B, CacheError>>,
         snapshot_base: Option<u64>,
     ) -> Result<(), CacheError> {
-        let Some(first) = blocks.first() else {
-            return Ok(());
-        };
         let txn = self.db.begin_write()?;
+        let mut appended = false;
         {
-            if let Some(base) = snapshot_base {
+            let mut table = txn.open_table(BLOCKS)?;
+            let tip = table.last()?.map(|(height, _)| height.value());
+            let mut expected: Option<u64> = None;
+            for block in blocks {
+                let block = block?;
+                let block = block.borrow();
+                match expected {
+                    // The batch as a whole must extend the tip by exactly one.
+                    None => {
+                        if let Some(tip) = tip
+                            && block.height != tip + 1
+                        {
+                            return Err(CacheError::Corruption {
+                                height: block.height,
+                                detail: format!(
+                                    "non-monotonic append: tip is {tip}, got {}",
+                                    block.height
+                                ),
+                            });
+                        }
+                    }
+                    Some(expected) if block.height != expected => {
+                        return Err(CacheError::Corruption {
+                            height: expected,
+                            detail: format!(
+                                "batch is not consecutive: expected {expected}, got {}",
+                                block.height
+                            ),
+                        });
+                    }
+                    Some(_) => {}
+                }
+                table.insert(block.height, block.encode_to_vec().as_slice())?;
+                expected = Some(block.height + 1);
+                appended = true;
+            }
+
+            if let (Some(base), true) = (snapshot_base, appended) {
                 let mut meta = txn.open_table(META)?;
                 meta.insert(SNAPSHOT_BASE_HEIGHT, base.to_le_bytes().as_slice())?;
             }
-            let mut table = txn.open_table(BLOCKS)?;
-            if let Some((tip, _)) = table.last()? {
-                let tip = tip.value();
-                if first.height != tip + 1 {
-                    return Err(CacheError::Corruption {
-                        height: first.height,
-                        detail: format!("non-monotonic append: tip is {tip}, got {}", first.height),
-                    });
-                }
-            }
-            for (expected, block) in (first.height..).zip(blocks) {
-                if block.height != expected {
-                    return Err(CacheError::Corruption {
-                        height: expected,
-                        detail: format!(
-                            "batch is not consecutive: expected {expected}, got {}",
-                            block.height
-                        ),
-                    });
-                }
-                table.insert(block.height, block.encode_to_vec().as_slice())?;
-            }
+        }
+        if !appended {
+            return Ok(());
         }
         txn.commit()?;
         Ok(())
@@ -585,7 +602,9 @@ mod tests {
         assert_eq!(cache.snapshot_base_height().unwrap(), None);
 
         let batch: Vec<CompactBlock> = (500..=505).map(|h| block(h, h as u8)).collect();
-        cache.add_imported_batch(&batch, 500).unwrap();
+        cache
+            .add_decoded_batch(batch.into_iter().map(Ok), Some(500))
+            .unwrap();
 
         assert_eq!(cache.snapshot_base_height().unwrap(), Some(500));
         assert_eq!(cache.latest_height().unwrap(), Some(505));
@@ -598,8 +617,32 @@ mod tests {
 
         // Does not extend the tip, so the whole transaction aborts — including the base height.
         let batch = vec![block(500, 1), block(501, 2)];
-        assert!(cache.add_imported_batch(&batch, 500).is_err());
+        assert!(
+            cache
+                .add_decoded_batch(batch.into_iter().map(Ok), Some(500))
+                .is_err()
+        );
 
+        assert_eq!(cache.snapshot_base_height().unwrap(), None);
+    }
+
+    #[test]
+    fn a_decoded_batch_that_fails_mid_iteration_writes_nothing() {
+        // The blocks arrive decoded one at a time now, so a failure partway through has to abort
+        // the whole transaction rather than leave the prefix behind.
+        let (_dir, cache) = temp_cache();
+        let blocks = vec![
+            Ok(block(100, 1)),
+            Ok(block(101, 2)),
+            Err(CacheError::Corruption {
+                height: 102,
+                detail: "decode failed".to_string(),
+            }),
+        ];
+
+        assert!(cache.add_decoded_batch(blocks, Some(100)).is_err());
+
+        assert_eq!(cache.latest_height().unwrap(), None);
         assert_eq!(cache.snapshot_base_height().unwrap(), None);
     }
 
@@ -607,7 +650,9 @@ mod tests {
     fn truncating_above_the_snapshot_base_keeps_it() {
         let (_dir, cache) = temp_cache();
         let batch: Vec<CompactBlock> = (500..=505).map(|h| block(h, h as u8)).collect();
-        cache.add_imported_batch(&batch, 500).unwrap();
+        cache
+            .add_decoded_batch(batch.into_iter().map(Ok), Some(500))
+            .unwrap();
 
         cache.truncate_from(503).unwrap();
 
@@ -618,7 +663,9 @@ mod tests {
     fn truncating_the_snapshot_base_away_clears_it() {
         let (_dir, cache) = temp_cache();
         let batch: Vec<CompactBlock> = (500..=505).map(|h| block(h, h as u8)).collect();
-        cache.add_imported_batch(&batch, 500).unwrap();
+        cache
+            .add_decoded_batch(batch.into_iter().map(Ok), Some(500))
+            .unwrap();
 
         // What --redownload does: the imported range is gone, so its floor must go with it.
         cache.truncate_from(0).unwrap();
