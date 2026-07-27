@@ -98,7 +98,8 @@ pub trait NodeRpc: Send + Sync {
     async fn get_block_hash(&self, height: u64) -> Result<String, NodeError>;
 
     /// The block hashes at `heights`, in the same order. [`NodeClient`] overrides the default loop
-    /// with one batched request: over JSON-RPC the round trips dominate, measured at 63x.
+    /// with one batched request, since over JSON-RPC the round trips dominate; the default is the
+    /// right shape for a backend that answers in-process.
     async fn get_block_hashes(&self, heights: &[u64]) -> Result<Vec<String>, NodeError> {
         let mut hashes = Vec::with_capacity(heights.len());
         for height in heights {

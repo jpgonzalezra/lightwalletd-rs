@@ -583,8 +583,9 @@ impl EpochSource for HttpEpochSource {
     }
 }
 
-/// Heights per batched lookup. Measured against a real node: 1 at a time gives 17.7 heights/s,
-/// 100 gives 165, 1,000 gives 1,118. Past that the gain flattens and the request body grows.
+/// Heights per batched lookup. Measured against a real node over a high-latency link, where round
+/// trips dominate: 1 at a time gives 17.7 heights/s, 100 gives 165, 1,000 gives 1,118. Past that the
+/// gain flattens and the request body grows.
 const LOOKUP_BATCH: usize = 1_000;
 
 /// Look up every height's block hash, in batches, with at most `concurrency` requests in flight.

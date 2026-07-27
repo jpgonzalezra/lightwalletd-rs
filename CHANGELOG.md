@@ -5,6 +5,20 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+### Snapshot bootstrap
+- **Bootstrap a fresh cache from a peer** (ADR 0024) instead of ingesting the whole range from the
+  node. `--snapshot-serve` publishes this instance's cached blocks over HTTP as fixed 10,000-block
+  epochs (`/snapshot/manifest`, `/snapshot/epoch/{index}`), off by default and capped by
+  `--snapshot-max-concurrent-downloads`; `--snapshot-url` imports from such a peer at startup. Every
+  imported block is verified four ways, including its hash against the importer's own node, which is
+  what ties a snapshot to the real chain: a compact block's hash is asserted by the publisher rather
+  than derivable from its contents. A failed or unreachable peer is not fatal. Epoch bodies are
+  compressed only in transit, so the digests stay portable across servers.
+- After a successful import the ingestor floors at the snapshot's base height, so a deep reorg cannot
+  empty the cache and silently re-sync from Sapling activation. `--redownload` clears that floor with
+  the blocks.
+- `getblockhash` lookups are issued in batches, which is what makes verifying every height affordable.
+
 ### Cache & ingestor
 - **Windowed concurrent ingest** (ADR 0020): catch-up fetches up to `--ingest-window` blocks (default
   64) with `--ingest-concurrency` concurrent node requests (default 8) and commits each window in a
