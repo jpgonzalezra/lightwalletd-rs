@@ -189,6 +189,13 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             (cache, location, None)
         };
 
+        // Before the floor is resolved, since a successful import raises it, and before the
+        // ingestor starts, so it picks up from the imported tip. `--redownload` has already cleared
+        // the cache by now, so combining the two means "discard local, re-bootstrap from the peer".
+        if let Some(url) = &config.snapshot_url {
+            bootstrap_from_snapshot(url, &cache, &node, config.ingest.concurrency).await;
+        }
+
         let start_height = effective_start_height(start_height, cache.snapshot_base_height()?);
 
         tracing::info!(
@@ -378,6 +385,40 @@ async fn connect_with_retry(node: &dyn NodeRpc) -> GetBlockchainInfo {
     }
 }
 
+/// Import a peer's snapshot into the cache, verifying every block against our own node.
+///
+/// Never fatal: a peer that is unreachable, out of date or dishonest degrades to today's behaviour,
+/// where the ingestor fills the cache from the node the slow way.
+async fn bootstrap_from_snapshot(
+    url: &str,
+    cache: &Cache,
+    node: &Arc<dyn NodeRpc>,
+    concurrency: usize,
+) {
+    use snapshot::import::{HttpEpochSource, ImportConfig, import};
+
+    tracing::info!(url, "bootstrapping the cache from a snapshot peer");
+    let started = std::time::Instant::now();
+    let source = match HttpEpochSource::new(url) {
+        Ok(source) => source,
+        Err(error) => {
+            tracing::error!(%error, url, "snapshot peer unusable; ingesting from the node instead");
+            return;
+        }
+    };
+    match import(&source, cache, node, &ImportConfig { concurrency }).await {
+        Ok(Some(height)) => tracing::info!(
+            height,
+            elapsed_secs = started.elapsed().as_secs(),
+            "snapshot bootstrap finished"
+        ),
+        Ok(None) => tracing::info!("snapshot bootstrap had nothing to import"),
+        Err(error) => {
+            tracing::error!(%error, "snapshot bootstrap failed; ingesting from the node instead")
+        }
+    }
+}
+
 /// Raise the ingest floor to the base height of an imported snapshot.
 ///
 /// A bootstrapped cache cannot be rebuilt from below the height its snapshot was based at. Leaving
@@ -508,6 +549,16 @@ mod tests {
     async fn connect_with_retry_keeps_retrying_past_the_escalation_threshold() {
         let info = connect_with_retry(&fake(ESCALATE_AFTER + 3)).await;
         assert_eq!(info.blocks, 4242);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_snapshot_peer_leaves_the_cache_alone_and_does_not_abort_startup() {
+        let (_dir, cache) = crate::testutil::temp_cache();
+        let node: Arc<dyn NodeRpc> = Arc::new(fake(0));
+
+        bootstrap_from_snapshot("http://127.0.0.1:1", &cache, &node, 4).await;
+
+        assert_eq!(cache.latest_height().unwrap(), None);
     }
 
     #[test]

@@ -162,6 +162,13 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_SNAPSHOT_COMPRESSION_LEVEL)]
     pub snapshot_compression_level: i32,
 
+    /// Bootstrap the cache from a peer publishing a snapshot (e.g. `https://peer.example:9069`)
+    /// before serving, instead of ingesting the whole range from this instance's own node. Every
+    /// block is verified against that node on the way in. An unreachable or dishonest peer is not
+    /// fatal: the server starts and ingests normally.
+    #[arg(long)]
+    pub snapshot_url: Option<String>,
+
     /// Run as a darkside mock server (no real node) for deterministic wallet tests. Insecure —
     /// testing only; never deploy in production.
     #[arg(long = "darkside-very-insecure")]
@@ -284,6 +291,8 @@ pub struct Config {
     pub metrics_bind: Option<SocketAddr>,
     /// Snapshot publishing settings, if `--snapshot-serve` is on.
     pub snapshot: Option<SnapshotServeConfig>,
+    /// Peer to bootstrap the cache from at startup, if `--snapshot-url` is set.
+    pub snapshot_url: Option<String>,
     /// Whether to run as a darkside mock server instead of proxying a real node.
     pub darkside: bool,
     /// How long a darkside server runs before auto-shutting down (see `--darkside-timeout-minutes`).
@@ -404,6 +413,12 @@ impl Cli {
     pub fn resolve(self) -> Result<Config> {
         // Resolved first: the rest of this function moves fields out of `self`.
         let snapshot = self.resolve_snapshot()?;
+        if self.snapshot_url.is_some() && (self.nocache || self.darkside) {
+            anyhow::bail!(
+                "--snapshot-url cannot be combined with --nocache or darkside mode: the imported \
+                 blocks would land in a throwaway cache, or in a mock chain"
+            );
+        }
 
         let conf = match &self.zcash_conf {
             Some(path) => parse_zcash_conf(path)?,
@@ -518,6 +533,7 @@ impl Cli {
             tls,
             metrics_bind: (!self.no_metrics).then_some(self.metrics_bind),
             snapshot,
+            snapshot_url: self.snapshot_url,
             darkside: self.darkside,
             darkside_timeout: Duration::from_secs(self.darkside_timeout_minutes.saturating_mul(60)),
             nocache: self.nocache,
@@ -787,6 +803,7 @@ mod tests {
             snapshot_bind: None,
             snapshot_max_concurrent_downloads: DEFAULT_SNAPSHOT_MAX_CONCURRENT_DOWNLOADS,
             snapshot_compression_level: DEFAULT_SNAPSHOT_COMPRESSION_LEVEL,
+            snapshot_url: None,
             darkside: false,
             darkside_timeout_minutes: DEFAULT_DARKSIDE_TIMEOUT_MINUTES,
             nocache: false,
@@ -1070,6 +1087,28 @@ mod tests {
         let config = cli.resolve().unwrap();
 
         assert_eq!(config.snapshot.unwrap().compression_level, 0);
+    }
+
+    #[test]
+    fn snapshot_url_is_carried_through_and_off_by_default() {
+        assert_eq!(snapshot_cli().resolve().unwrap().snapshot_url, None);
+
+        let mut cli = snapshot_cli();
+        cli.snapshot_url = Some("https://peer.example:9069".to_string());
+
+        assert_eq!(
+            cli.resolve().unwrap().snapshot_url.as_deref(),
+            Some("https://peer.example:9069")
+        );
+    }
+
+    #[test]
+    fn snapshot_url_with_nocache_is_an_error() {
+        let mut cli = snapshot_cli();
+        cli.snapshot_url = Some("https://peer.example:9069".to_string());
+        cli.nocache = true;
+
+        assert!(cli.resolve().is_err());
     }
 
     #[test]
