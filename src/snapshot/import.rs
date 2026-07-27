@@ -583,10 +583,14 @@ impl EpochSource for HttpEpochSource {
     }
 }
 
-/// Heights per batched lookup. Measured against a real node over a high-latency link, where round
-/// trips dominate: 1 at a time gives 17.7 heights/s, 100 gives 165, 1,000 gives 1,118. Past that the
-/// gain flattens and the request body grows.
-const LOOKUP_BATCH: usize = 1_000;
+/// Heights per batched lookup.
+///
+/// Measured against a real node. Co-located, which is the shape a deployment actually has, at the
+/// default concurrency of 8: 27.7k heights/s at 100 per batch, 29.6k at 250, 20.7k at 1,000. Larger
+/// batches lose because 10,000 heights then split into too few chunks to spread across the workers.
+/// Over a high-latency link the ordering reverses, since round trips dominate and bigger batches
+/// amortize them, but even there a few hundred per batch keeps the check comfortably affordable.
+const LOOKUP_BATCH: usize = 250;
 
 /// Look up every height's block hash, in batches, with at most `concurrency` requests in flight.
 ///

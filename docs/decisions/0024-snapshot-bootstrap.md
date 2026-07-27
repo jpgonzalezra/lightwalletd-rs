@@ -58,20 +58,28 @@ failure there is never fatal: the server starts and ingests from its node as bef
 
 ### Measurements behind the design
 
-Against a real mainnet zebrad, 2026-07-26 and 2026-07-27. The node was reached over a high-latency
-link rather than co-located, which makes every rate below a **floor**: a deployment with the node on
-the same host or LAN can only do better. Sizes and compression ratios do not depend on the link.
+Against a real mainnet zebrad, 2026-07-26 and 2026-07-27, in two environments: co-located on the
+node's own host, which is the shape a deployment has, and over a high-latency link, which is a
+pessimistic floor. Sizes and compression ratios do not depend on the link.
 
-**Block-hash lookups.** The import's cost is dominated by the anchor check, one lookup per height,
-and on a high-latency link that cost is round trips rather than the node's own work. Issued
-individually with 8 concurrent requests it ran at 17.7 heights/s; batched into single JSON-RPC
-requests it ran at 165 heights/s at 100 per batch and 1,118 heights/s at 1,000 per batch. Batch size
-mattered more than concurrency, which is what identifies round trips as the bottleneck: 4 concurrent
-batches of 100 (443 heights/s) were slower than one sequential stream of 1,000-height batches. The
-speedup itself is a property of the link and shrinks as latency does, but the floor is what the
-decision rests on: even there, verifying a full range costs a small fraction of ingesting it, so the
-anchor check stays unconditional and there is no option to sample it. Note that zebra accepts a batch
-only when its elements declare `"jsonrpc": "2.0"`, though it accepts `"1.0"` for a single call.
+**Block-hash lookups.** The import's cost is dominated by the anchor check, one lookup per height.
+Co-located, at the default concurrency of 8, batched lookups run at 20.7k to 29.6k heights/s
+depending on batch size, putting a full 3.0M-height range under two minutes. Even the slowest
+configuration measured there (one worker, 100 per batch, 3.6k heights/s) covers that range in about
+14 minutes. Over the high-latency link the same code ran at 17.7 heights/s unbatched and 1,118
+batched. Verifying a full range therefore costs a small fraction of what ingesting it does in either
+environment, by a wide margin, so the anchor check stays unconditional and there is no option to
+sample it.
+
+The two environments disagree about tuning, which is worth recording because it is not obvious.
+Over a high-latency link round trips dominate, so larger batches win and concurrency adds little.
+Co-located the node's own work dominates instead, so concurrency wins and batches past a few hundred
+start to *lose*: 10,000 heights split into ten 1,000-height chunks spread badly across eight workers.
+`LOOKUP_BATCH` is set to 250 on the co-located numbers, since that is the environment that matters,
+and it stays adequate on a slow link.
+
+Note that zebra accepts a batch only when its elements declare `"jsonrpc": "2.0"`, though it accepts
+`"1.0"` for a single call.
 
 **Epoch sizes.** An epoch from the 2016 range is 49 MB (4.9 KB/block). An epoch from early
 sandblasting is 1.21 GB (121 KB/block). Extrapolated across the eras, a full mainnet snapshot is on
