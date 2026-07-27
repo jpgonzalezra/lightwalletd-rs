@@ -13,6 +13,11 @@ RUN cargo build --release --locked
 
 # Runtime stage: a slim image with just the binary, run as a non-root user.
 FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
+# `ca-certificates` is needed to verify an `https://` snapshot peer, and the HTTP client loads the
+# store when it is built, so the binary will not start without it even on a plaintext deployment.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --user-group lwd
 COPY --from=builder /build/target/release/lightwalletd-rs /usr/local/bin/lightwalletd-rs
 USER lwd
