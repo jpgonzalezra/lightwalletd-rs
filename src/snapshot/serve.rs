@@ -303,9 +303,14 @@ mod tests {
         address
     }
 
-    /// A client that does not negotiate compression on its own, so a test sees the wire bytes.
+    /// A client that neither advertises nor transparently decompresses, so these tests see the wire
+    /// bytes rather than what reqwest would quietly undo for them.
     fn client() -> reqwest::Client {
-        reqwest::Client::new()
+        reqwest::Client::builder()
+            .no_gzip()
+            .no_zstd()
+            .build()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -447,6 +452,57 @@ mod tests {
             response.bytes().await.unwrap().as_ref(),
             exported.as_slice()
         );
+    }
+
+    #[tokio::test]
+    async fn a_second_instance_bootstraps_from_a_published_snapshot_over_http() {
+        // The whole path in one test: publish, download over the wire with compression negotiated,
+        // verify against the node, land in a second cache.
+        let (_published_dir, published) = published_cache(1..=10_000, 0);
+        let blocks: Vec<CompactBlock> = (1..=9_999).map(|height| block(height, 0)).collect();
+        let node: Arc<dyn crate::node::NodeRpc> = Arc::new(crate::testutil::FakeNode {
+            blockchain_info: Some(
+                serde_json::from_value(serde_json::json!({
+                    "chain": "main",
+                    "blocks": 10_000,
+                    "bestblockhash": "00",
+                    "consensus": { "chaintip": "00000000" },
+                }))
+                .unwrap(),
+            ),
+            hash_by_height: blocks
+                .iter()
+                .map(|block| {
+                    (
+                        block.height,
+                        crate::encoding::wire_to_display_hex(&block.hash),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        });
+        let address = start(published, config(4, 3)).await;
+        let (_dir, bootstrapped) = temp_cache();
+
+        let source =
+            crate::snapshot::import::HttpEpochSource::new(&format!("http://{address}")).unwrap();
+        let reached = crate::snapshot::import::import(
+            &source,
+            &bootstrapped,
+            &node,
+            &crate::snapshot::import::ImportConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reached, Some(9_999));
+        for block in &blocks {
+            assert_eq!(
+                bootstrapped.get(block.height).unwrap().as_ref(),
+                Some(block)
+            );
+        }
+        assert!(bootstrapped.validate_light().is_ok());
     }
 
     #[tokio::test]

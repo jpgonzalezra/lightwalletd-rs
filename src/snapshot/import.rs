@@ -25,10 +25,12 @@ use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use prost::Message;
 use tokio::task::JoinSet;
+use tokio_stream::StreamExt;
 
 use crate::cache::Cache;
 use crate::encoding;
@@ -47,8 +49,11 @@ use super::format::{
 pub trait EpochSource: Send + Sync {
     /// The publisher's manifest.
     async fn manifest(&self) -> Result<Manifest, SnapshotError>;
-    /// One epoch body, uncompressed.
-    async fn epoch(&self, index: u64) -> Result<Vec<u8>, SnapshotError>;
+    /// One epoch body, uncompressed, refusing anything longer than `max_bytes`.
+    ///
+    /// The bound is passed in rather than read from the source's own manifest so it comes from the
+    /// same validated entry the digest check uses.
+    async fn epoch(&self, index: u64, max_bytes: u64) -> Result<Vec<u8>, SnapshotError>;
 }
 
 /// Tuning for a snapshot import.
@@ -199,7 +204,16 @@ async fn fetch_and_verify(
         check,
         detail,
     };
-    let body = source.epoch(epoch).await?;
+    if entry.bytes > MAX_EPOCH_BYTES {
+        return Err(reject(
+            "length",
+            format!(
+                "manifest declares {} bytes, past the {MAX_EPOCH_BYTES} an epoch may hold",
+                entry.bytes
+            ),
+        ));
+    }
+    let body = source.epoch(epoch, entry.bytes).await?;
 
     // 1. Content digest.
     if body.len() as u64 != entry.bytes {
@@ -223,44 +237,49 @@ async fn fetch_and_verify(
         ));
     }
 
-    // Framing, and every block sitting at the height its position implies.
-    let (header, records) =
-        parse_epoch(&body).map_err(|error| reject("framing", error.to_string()))?;
-    if header.chain != chain {
-        return Err(reject(
-            "chain",
-            format!("body is for chain {:?}, expected {chain:?}", header.chain),
-        ));
-    }
+    // Framing, and every block sitting at the height its position implies. Scoped so the body is
+    // released before the anchor check: from here on the decoded blocks own their bytes.
     let count = entry.end - entry.start + 1;
-    if header.start != entry.start || u64::from(header.count) != count {
-        return Err(reject(
-            "framing",
-            format!(
-                "body covers {} blocks from {}, manifest declares {count} from {}",
-                header.count, header.start, entry.start
-            ),
-        ));
-    }
-    let mut blocks = Vec::with_capacity(records.len());
-    for (height, record) in (entry.start..).zip(&records) {
-        let block =
-            CompactBlock::decode(*record).map_err(|error| SnapshotError::BlockRejected {
-                epoch,
-                height,
-                check: "decode",
-                detail: error.to_string(),
-            })?;
-        if block.height != height {
-            return Err(SnapshotError::BlockRejected {
-                epoch,
-                height,
-                check: "height",
-                detail: format!("block claims height {}", block.height),
-            });
+    let blocks = {
+        let (header, records) =
+            parse_epoch(&body).map_err(|error| reject("framing", error.to_string()))?;
+        if header.chain != chain {
+            return Err(reject(
+                "chain",
+                format!("body is for chain {:?}, expected {chain:?}", header.chain),
+            ));
         }
-        blocks.push(block);
-    }
+        if header.start != entry.start || u64::from(header.count) != count {
+            return Err(reject(
+                "framing",
+                format!(
+                    "body covers {} blocks from {}, manifest declares {count} from {}",
+                    header.count, header.start, entry.start
+                ),
+            ));
+        }
+        let mut blocks = Vec::with_capacity(records.len());
+        for (height, record) in (entry.start..).zip(&records) {
+            let block =
+                CompactBlock::decode(*record).map_err(|error| SnapshotError::BlockRejected {
+                    epoch,
+                    height,
+                    check: "decode",
+                    detail: error.to_string(),
+                })?;
+            if block.height != height {
+                return Err(SnapshotError::BlockRejected {
+                    epoch,
+                    height,
+                    check: "height",
+                    detail: format!("block claims height {}", block.height),
+                });
+            }
+            blocks.push(block);
+        }
+        blocks
+    };
+    drop(body);
 
     // 2 and 3, over every consecutive pair inside the epoch.
     for pair in blocks.windows(2) {
@@ -442,6 +461,106 @@ async fn verify_anchor(
         });
     }
     Ok(())
+}
+
+/// Largest epoch body this build will hold. A real one runs from a few MB to a few hundred; the
+/// ceiling is there so a hostile manifest cannot ask for an allocation instead of a download.
+const MAX_EPOCH_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Per-request timeout for a snapshot download.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(300);
+/// TCP connect timeout for the snapshot peer.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Attempts per epoch before giving up.
+const FETCH_ATTEMPTS: u32 = 3;
+/// First backoff between attempts; doubles from there.
+const RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
+/// An [`EpochSource`] over a peer's HTTP endpoints.
+pub struct HttpEpochSource {
+    client: reqwest::Client,
+    base_url: String,
+    attempts: u32,
+}
+
+impl HttpEpochSource {
+    /// Point a source at a peer, e.g. `https://peer.example:9069`.
+    pub fn new(url: &str) -> Result<Self, SnapshotError> {
+        Ok(Self {
+            client: reqwest::Client::builder()
+                .timeout(HTTP_TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .map_err(SnapshotError::Http)?,
+            base_url: url.trim_end_matches('/').to_string(),
+            attempts: FETCH_ATTEMPTS,
+        })
+    }
+
+    /// Fetch one epoch, refusing to hold more than `max_bytes`.
+    ///
+    /// The cap is on the decompressed stream, which is what `bytes_stream` yields: capping the wire
+    /// bytes instead would leave a few compressed megabytes free to expand into many gigabytes.
+    async fn fetch_epoch(&self, index: u64, max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
+        let response = self
+            .client
+            .get(format!("{}/snapshot/epoch/{index}", self.base_url))
+            .send()
+            .await
+            .map_err(SnapshotError::Http)?
+            .error_for_status()
+            .map_err(SnapshotError::Http)?;
+
+        let mut body: Vec<u8> = Vec::new();
+        let mut stream = Box::pin(response.bytes_stream());
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(SnapshotError::Http)?;
+            if body.len() as u64 + chunk.len() as u64 > max_bytes {
+                return Err(SnapshotError::EpochRejected {
+                    epoch: index,
+                    check: "length",
+                    detail: format!("body ran past the declared {max_bytes} bytes"),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+}
+
+#[async_trait]
+impl EpochSource for HttpEpochSource {
+    async fn manifest(&self) -> Result<Manifest, SnapshotError> {
+        Ok(self
+            .client
+            .get(format!("{}/snapshot/manifest", self.base_url))
+            .send()
+            .await
+            .map_err(SnapshotError::Http)?
+            .error_for_status()
+            .map_err(SnapshotError::Http)?
+            .json()
+            .await
+            .map_err(SnapshotError::Http)?)
+    }
+
+    async fn epoch(&self, index: u64, max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
+        // An epoch is idempotent and verified afterwards, so retrying one is always safe.
+        let mut delay = RETRY_BACKOFF;
+        let mut attempt = 1;
+        loop {
+            match self.fetch_epoch(index, max_bytes).await {
+                Ok(body) => return Ok(body),
+                Err(error) if attempt >= self.attempts => return Err(error),
+                Err(error) => {
+                    tracing::warn!(%error, epoch = index, attempt, "fetching a snapshot epoch failed; retrying");
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                    attempt += 1;
+                }
+            }
+        }
+    }
 }
 
 /// Heights per batched lookup. Measured against a real node: 1 at a time gives 17.7 heights/s,
@@ -633,7 +752,7 @@ mod tests {
             Ok(self.manifest.clone())
         }
 
-        async fn epoch(&self, index: u64) -> Result<Vec<u8>, SnapshotError> {
+        async fn epoch(&self, index: u64, _max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
             self.bodies
                 .get(&index)
                 .cloned()
@@ -680,7 +799,7 @@ mod tests {
             crate::snapshot::export::manifest(&self.cache, "main")
         }
 
-        async fn epoch(&self, index: u64) -> Result<Vec<u8>, SnapshotError> {
+        async fn epoch(&self, index: u64, _max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
             let mut body = Vec::new();
             crate::snapshot::export::write_epoch(&self.cache, "main", index, &mut body)?;
             Ok(body)
@@ -718,6 +837,81 @@ mod tests {
         // The epoch holding the publisher's tip is not published, so it does not arrive.
         assert_eq!(cache.get(EPOCH_SIZE).unwrap(), None);
         assert!(cache.validate_light().is_ok());
+    }
+
+    /// Serve `body` for every epoch request, with the given `Content-Encoding`, from an ephemeral
+    /// port. Stands in for a peer that does not play by the rules.
+    async fn hostile_server(body: Vec<u8>, encoding: Option<&'static str>) -> String {
+        use axum::http::header;
+        use axum::response::IntoResponse;
+
+        let app = axum::Router::new().route(
+            "/snapshot/epoch/{index}",
+            axum::routing::get(move || {
+                let body = body.clone();
+                async move {
+                    let mut response = body.into_response();
+                    if let Some(encoding) = encoding {
+                        response.headers_mut().insert(
+                            header::CONTENT_ENCODING,
+                            axum::http::HeaderValue::from_static(encoding),
+                        );
+                    }
+                    response
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn a_body_longer_than_the_manifest_declared_is_rejected() {
+        let url = hostile_server(vec![0u8; 4096], None).await;
+        let source = HttpEpochSource::new(&url).unwrap();
+
+        let error = source.epoch(0, 1024).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            SnapshotError::EpochRejected {
+                check: "length",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_decompression_bomb_is_aborted_instead_of_buffered() {
+        // 256 MB of zeros in ~8 KB on the wire. Capping the wire bytes would let all of it through;
+        // the cap is on the decompressed stream, so this dies on the first chunk past the limit.
+        let expanded = 256 * 1024 * 1024;
+        let bomb = zstd::encode_all(vec![0u8; expanded].as_slice(), 3).unwrap();
+        assert!(
+            expanded / bomb.len() > 1_000,
+            "expected a real expansion ratio"
+        );
+        let url = hostile_server(bomb, Some("zstd")).await;
+        let source = HttpEpochSource::new(&url).unwrap();
+
+        let error = source.epoch(0, 1024).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            SnapshotError::EpochRejected {
+                check: "length",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_cannot_be_reached_is_an_error_rather_than_a_hang() {
+        let source = HttpEpochSource::new("http://127.0.0.1:1").unwrap();
+
+        assert!(source.manifest().await.is_err());
     }
 
     #[tokio::test]

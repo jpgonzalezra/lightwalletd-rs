@@ -104,6 +104,9 @@ pub enum SnapshotError {
         /// What exactly disagreed.
         detail: String,
     },
+    /// Talking to the snapshot peer failed.
+    #[error("snapshot HTTP error: {0}")]
+    Http(#[source] reqwest::Error),
     /// The node could not answer at all.
     #[error(transparent)]
     Node(#[from] NodeError),
