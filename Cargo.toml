@@ -25,9 +25,16 @@ reqwest = { version = "0.13.4", default-features = false, features = [
     # Snapshot downloads only: consumed incrementally, over TLS since the peer is remote (unlike
     # the node, which is local and stays plaintext), with the compression the endpoint negotiates.
     "stream",
-    "rustls",
+    # `rustls-no-provider` rather than `rustls`, whose default provider would add a second crypto
+    # stack next to the `ring` that tonic and rcgen already use. The provider is installed in code.
+    "rustls-no-provider",
     "gzip",
     "zstd",
+] }
+rustls = { version = "0.23.41", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

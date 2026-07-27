@@ -507,7 +507,7 @@ impl HttpEpochSource {
     /// Point a source at a peer, e.g. `https://peer.example:9069`.
     pub fn new(url: &str) -> Result<Self, SnapshotError> {
         Ok(Self {
-            client: reqwest::Client::builder()
+            client: crate::node::http_client_builder()
                 .timeout(HTTP_TIMEOUT)
                 .connect_timeout(CONNECT_TIMEOUT)
                 .build()

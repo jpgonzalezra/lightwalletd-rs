@@ -26,6 +26,18 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// TCP connect timeout for the node HTTP client.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A `reqwest` builder with this process's TLS crypto provider installed.
+///
+/// Every outbound HTTP client in the crate must come from here. `reqwest` is built with
+/// `rustls-no-provider`, so the binary carries one crypto stack (`ring`, the one `tonic` and `rcgen`
+/// already use) instead of two — but it then **panics when a client is constructed** without a
+/// provider, even a plaintext one that will never negotiate TLS. Installing returns `Err` only if
+/// something already did it, which is the outcome we want anyway.
+pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+}
+
 /// Errors returned by the node client.
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
@@ -155,7 +167,7 @@ impl NodeClient {
         request_timeout: Duration,
         connect_timeout: Duration,
     ) -> Result<Self, reqwest::Error> {
-        let http = reqwest::Client::builder()
+        let http = http_client_builder()
             .timeout(request_timeout)
             .connect_timeout(connect_timeout)
             .build()?;
