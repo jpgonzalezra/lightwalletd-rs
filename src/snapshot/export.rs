@@ -77,13 +77,7 @@ pub fn store_next_epoch_digest(cache: &Cache, chain: &str) -> Result<Option<u64>
     let Some(digest) = compute_epoch_digest(cache, chain, index)? else {
         return Ok(None);
     };
-    // A truncation between the read and the write would leave the row describing blocks the cache no
-    // longer holds. The cache drops digest rows for the epochs a truncation touches, but this write
-    // comes after that, so it could resurrect one. Only append is safe to race with.
-    if cache.range()?.is_some_and(|(base, tip)| {
-        range_before
-            .is_some_and(|(before_base, before_tip)| base != before_base || tip < before_tip)
-    }) {
+    if was_truncated(range_before, cache.range()?) {
         tracing::warn!(
             epoch = index,
             "cache was truncated while computing epoch digests; discarding them"
@@ -92,6 +86,23 @@ pub fn store_next_epoch_digest(cache: &Cache, chain: &str) -> Result<Option<u64>
     }
     cache.set_epoch_digest(index, &digest.encode())?;
     Ok(Some(index))
+}
+
+/// Whether the cache shrank while an epoch's digests were being computed, making them unsafe to
+/// store.
+///
+/// A truncation between the read and the write would leave the row describing blocks the cache no
+/// longer holds. The cache drops digest rows for the epochs a truncation touches, but the write
+/// comes after that, so it could resurrect one. Only append is safe to race with.
+fn was_truncated(before: Option<(u64, u64)>, after: Option<(u64, u64)>) -> bool {
+    match (before, after) {
+        (Some((before_base, before_tip)), Some((base, tip))) => {
+            base != before_base || tip < before_tip
+        }
+        // Emptied outright, which is what a rollback below the ingestor floor does.
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// Tuning for [`maintain_digests`].
@@ -477,6 +488,29 @@ mod tests {
             interrupted.epoch_digests().unwrap(),
             uninterrupted.epoch_digests().unwrap()
         );
+    }
+
+    #[test]
+    fn a_cache_emptied_under_a_digest_computation_counts_as_truncated() {
+        // A rollback below the ingestor floor empties the cache outright. Storing the digests then
+        // resurrects a row describing blocks that are gone, which no later walk would recompute:
+        // `next_pending_epoch` only looks for missing rows, so a stale one is treated as done.
+        assert!(was_truncated(Some((0, 10_000)), None));
+    }
+
+    #[test]
+    fn a_lowered_tip_under_a_digest_computation_counts_as_truncated() {
+        assert!(was_truncated(Some((0, 10_000)), Some((0, 9_000))));
+    }
+
+    #[test]
+    fn a_moved_base_under_a_digest_computation_counts_as_truncated() {
+        assert!(was_truncated(Some((0, 10_000)), Some((500, 10_000))));
+    }
+
+    #[test]
+    fn an_append_under_a_digest_computation_is_not_a_truncation() {
+        assert!(!was_truncated(Some((0, 10_000)), Some((0, 10_050))));
     }
 
     #[test]
