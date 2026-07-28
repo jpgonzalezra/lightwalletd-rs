@@ -63,8 +63,9 @@ jobs:
             --data-dir /tmp/smoke
           sleep 10
           docker logs smoke
-          if ! docker ps --filter name=smoke --filter status=running --format '{{.Names}}' \
-              | grep -qx smoke; then
+          running=$(docker ps --filter name=smoke --filter status=running --format '{{.Names}}')
+          docker rm -f smoke > /dev/null
+          if [ "$running" != "smoke" ]; then
             echo "::error::the server exited instead of retrying the unreachable node (log above)"
             exit 1
           fi
