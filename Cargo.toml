@@ -20,7 +20,22 @@ hex = "0.4.3"
 prost = "0.14.4"
 rcgen = "0.14.8"
 redb = "4.1.0"
-reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "json",
+    # Snapshot downloads only: consumed incrementally, over TLS since the peer is remote (unlike
+    # the node, which is local and stays plaintext), with the compression the endpoint negotiates.
+    "stream",
+    # `rustls-no-provider` rather than `rustls`, whose default provider would add a second crypto
+    # stack next to the `ring` that tonic and rcgen already use. The provider is installed in code.
+    "rustls-no-provider",
+    "gzip",
+    "zstd",
+] }
+rustls = { version = "0.23.41", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10"
@@ -28,6 +43,10 @@ tempfile = "3.27.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = { version = "0.1.18", features = ["net"] }
+tower-http = { version = "0.6.11", default-features = false, features = [
+    "compression-gzip",
+    "compression-zstd",
+] }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tonic-prost = "0.14.6"
 tonic-reflection = "0.14.6"
@@ -58,3 +77,6 @@ proptest = "1.11.0"
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["full", "test-util"] }
 wiremock = "0.6"
+# Decompresses what the snapshot endpoint sends, so a test reads the wire bytes rather than
+# trusting a client that would decompress them transparently.
+zstd = "0.13"

@@ -218,6 +218,62 @@ the internet, so it is not run in CI.
 
 ## Advanced
 
+### Snapshot bootstrap
+
+A fresh instance normally ingests the whole range from its own node before it can serve, which takes hours
+on mainnet. It can instead download that range from a peer that already holds it, verifying every block
+against its own node on the way in.
+
+**Consuming.** Point a new instance at a peer:
+
+```bash
+lightwalletd-rs --snapshot-url https://peer.example:9069 [...]
+```
+
+The import runs before the server starts serving and resumes from wherever the cache already reaches, so an
+interrupted run continues at the epoch boundary it got to. It also stops at your own node's tip: nothing
+above that can be verified yet, so the ingestor picks the rest up instead. A peer that is unreachable, out
+of date or dishonest is not fatal: the server starts and ingests from the node as usual. Combining it with
+`--redownload` means "discard the local cache, then bootstrap from the peer".
+
+Every block is checked four ways before it is stored: the transferred bytes against the digest the peer
+published, the chain linkage within and across epochs, the note-commitment tree sizes against the outputs
+and actions each block carries, and every block hash against your own node. That last one is what ties the
+snapshot to the real chain, since a compact block's hash is asserted by the publisher rather than derivable
+from its contents.
+
+One epoch body is held in memory at a time, and the largest on mainnet is 1.21 GB. The buffer grows by
+doubling, so the transient peak while it resizes is what to plan for: budget around 3 GB of free memory. A
+peer cannot make the importer hold more than 2 GB whatever its manifest claims.
+
+**Serving.** Publishing is off by default and needs a restart:
+
+```bash
+lightwalletd-rs --snapshot-serve [--snapshot-bind 127.0.0.1:9069] [...]
+```
+
+The blocks already ingested are the snapshot; nothing is re-fetched from the node and nothing is rewritten
+on disk. On the first start the server computes one digest per completed 10,000-block epoch, throttled
+against the ingestor, and publishes each epoch as it becomes available, so consumers can start importing
+before that finishes. `GET /snapshot/manifest` lists what is available and `GET /snapshot/epoch/{index}`
+serves one epoch body, compressed if the client asks.
+
+Three limits to know:
+
+- **A server can only serve the range it holds.** An instance started with `--start-height` above Sapling
+  activation publishes a snapshot starting there, which only helps a consumer that wants the same window.
+- **The chain must match.** A testnet snapshot is rejected by a mainnet consumer at the manifest check,
+  before any epoch is fetched.
+- **A full mainnet snapshot is on the order of 50 GB**, most of it in the heavily shielded 2022-2023 range,
+  which does not compress. Serving it is a real bandwidth commitment.
+
+**Security note:** `--snapshot-bind` defaults to loopback. Binding it to a public address lets anyone who
+can reach it download the entire cache at whatever bandwidth the host will give them; the server warns at
+startup when the address is not loopback. `--snapshot-max-concurrent-downloads` (default 4) bounds how many
+downloads are served at once, and further requests get `429` rather than queueing.
+
+See [ADR 0024](docs/decisions/0024-snapshot-bootstrap.md) for the trust model and the measurements behind it.
+
 ### Darkside mode
 
 `--darkside-very-insecure` serves a controllable, in-memory mock chain instead of proxying a real node, for

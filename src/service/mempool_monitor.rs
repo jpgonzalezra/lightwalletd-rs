@@ -344,6 +344,9 @@ mod tests {
         async fn get_block_count(&self) -> Result<u64, NodeError> {
             unimplemented!()
         }
+        async fn get_block_hash(&self, _height: u64) -> Result<String, NodeError> {
+            unimplemented!()
+        }
         async fn get_block_raw(&self, _hash: &str) -> Result<Vec<u8>, NodeError> {
             unimplemented!()
         }

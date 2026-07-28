@@ -26,6 +26,18 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// TCP connect timeout for the node HTTP client.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A `reqwest` builder with this process's TLS crypto provider installed.
+///
+/// Every outbound HTTP client in the crate must come from here. `reqwest` is built with
+/// `rustls-no-provider`, so the binary carries one crypto stack (`ring`, the one `tonic` and `rcgen`
+/// already use) instead of two — but it then **panics when a client is constructed** without a
+/// provider, even a plaintext one that will never negotiate TLS. Installing returns `Err` only if
+/// something already did it, which is the outcome we want anyway.
+pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+}
+
 /// Errors returned by the node client.
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
@@ -91,6 +103,22 @@ pub trait NodeRpc: Send + Sync {
     async fn get_block_verbose(&self, height: u64) -> Result<GetBlockVerbose, NodeError>;
     /// Call `getblockcount` to get the height of the best chain tip.
     async fn get_block_count(&self) -> Result<u64, NodeError>;
+    /// Call `getblockhash <height>` for the block hash at `height`, in display (hex) order.
+    ///
+    /// An index lookup rather than a block read, which is what makes verifying a snapshot height by
+    /// height affordable.
+    async fn get_block_hash(&self, height: u64) -> Result<String, NodeError>;
+
+    /// The block hashes at `heights`, in the same order. [`NodeClient`] overrides the default loop
+    /// with one batched request, since over JSON-RPC the round trips dominate; the default is the
+    /// right shape for a backend that answers in-process.
+    async fn get_block_hashes(&self, heights: &[u64]) -> Result<Vec<String>, NodeError> {
+        let mut hashes = Vec::with_capacity(heights.len());
+        for height in heights {
+            hashes.push(self.get_block_hash(*height).await?);
+        }
+        Ok(hashes)
+    }
     /// Call `getblock <hash> 0` (raw) and return the decoded block bytes.
     async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError>;
     /// Call `getrawtransaction <txid> 1` (verbose) for a transaction's bytes and mined height.
@@ -139,7 +167,7 @@ impl NodeClient {
         request_timeout: Duration,
         connect_timeout: Duration,
     ) -> Result<Self, reqwest::Error> {
-        let http = reqwest::Client::builder()
+        let http = http_client_builder()
             .timeout(request_timeout)
             .connect_timeout(connect_timeout)
             .build()?;
@@ -182,6 +210,57 @@ impl NodeClient {
         response.result.ok_or(NodeError::EmptyResult)
     }
 
+    /// Issue one JSON-RPC call per element of `calls`, in a single request, and return the results
+    /// in the order asked for.
+    async fn batch_request(
+        &self,
+        method: &str,
+        calls: Vec<serde_json::Value>,
+    ) -> Result<Vec<serde_json::Value>, NodeError> {
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
+        let expected = calls.len();
+        let requests: Vec<BatchRequest<'_>> = calls
+            .into_iter()
+            .enumerate()
+            .map(|(id, params)| BatchRequest {
+                jsonrpc: "2.0",
+                id,
+                method,
+                params,
+            })
+            .collect();
+
+        let responses: Vec<BatchResponse> = self
+            .http
+            .post(&self.url)
+            .basic_auth(&self.user, Some(&self.password))
+            .json(&requests)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let mut results: Vec<Option<serde_json::Value>> = vec![None; expected];
+        for response in responses {
+            if let Some(error) = response.error {
+                return Err(NodeError::Rpc {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+            match response.id.and_then(|id| results.get_mut(id)) {
+                Some(slot) => *slot = response.result,
+                None => return Err(NodeError::EmptyResult),
+            }
+        }
+        results
+            .into_iter()
+            .collect::<Option<_>>()
+            .ok_or(NodeError::EmptyResult)
+    }
+
     /// Issue a JSON-RPC call and deserialize its `result` into `T`.
     async fn request<T: serde::de::DeserializeOwned>(
         &self,
@@ -211,6 +290,24 @@ impl NodeRpc for NodeClient {
 
     async fn get_block_count(&self) -> Result<u64, NodeError> {
         self.request("getblockcount", serde_json::json!([])).await
+    }
+
+    async fn get_block_hash(&self, height: u64) -> Result<String, NodeError> {
+        // Unlike `getblock`, this one rejects a stringified height: the index must be a number.
+        self.request("getblockhash", serde_json::json!([height]))
+            .await
+    }
+
+    async fn get_block_hashes(&self, heights: &[u64]) -> Result<Vec<String>, NodeError> {
+        let calls = heights
+            .iter()
+            .map(|height| serde_json::json!([height]))
+            .collect();
+        self.batch_request("getblockhash", calls)
+            .await?
+            .into_iter()
+            .map(|value| Ok(serde_json::from_value(value)?))
+            .collect()
     }
 
     async fn get_block_raw(&self, hash: &str) -> Result<Vec<u8>, NodeError> {
@@ -307,6 +404,24 @@ struct RpcResponse {
     error: Option<RpcErrorObject>,
 }
 
+/// One call inside a JSON-RPC batch. Batches must declare `2.0`: zebra answers `-32600` to a
+/// `"1.0"` element even though it accepts `"1.0"` for a single call.
+#[derive(Serialize)]
+struct BatchRequest<'a> {
+    jsonrpc: &'static str,
+    id: usize,
+    method: &'a str,
+    params: serde_json::Value,
+}
+
+/// One reply inside a batch, correlated by `id` since a server may answer in any order.
+#[derive(Deserialize)]
+struct BatchResponse {
+    id: Option<usize>,
+    result: Option<serde_json::Value>,
+    error: Option<RpcErrorObject>,
+}
+
 /// JSON-RPC error object.
 #[derive(Deserialize)]
 struct RpcErrorObject {
@@ -317,7 +432,7 @@ struct RpcErrorObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method};
+    use wiremock::matchers::{body_partial_json, header, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client_for(server: &MockServer) -> NodeClient {
@@ -369,6 +484,101 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, NodeError::EmptyResult));
+    }
+
+    #[tokio::test]
+    async fn get_block_hash_sends_the_height_as_a_number() {
+        // zebra accepts a stringified height for `getblock` but rejects one for `getblockhash`
+        // ("Invalid params"), so the parameter type is load-bearing rather than cosmetic.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                serde_json::json!({ "method": "getblockhash", "params": [419200] }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": "00000000025a57200d898ac7f21e26bf29028bbe96ec46e05b2c17cc9db9e4f3",
+            })))
+            .mount(&server)
+            .await;
+
+        let hash = client_for(&server).get_block_hash(419_200).await.unwrap();
+
+        assert_eq!(
+            hash,
+            "00000000025a57200d898ac7f21e26bf29028bbe96ec46e05b2c17cc9db9e4f3"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_block_hashes_batches_one_request_and_reorders_the_replies() {
+        // A server may answer a batch in any order, so the ids are what put it back together.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!([
+                { "jsonrpc": "2.0", "id": 0, "method": "getblockhash", "params": [10] },
+                { "jsonrpc": "2.0", "id": 1, "method": "getblockhash", "params": [11] },
+            ])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "jsonrpc": "2.0", "id": 1, "result": "bb" },
+                { "jsonrpc": "2.0", "id": 0, "result": "aa" },
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let hashes = client_for(&server)
+            .get_block_hashes(&[10, 11])
+            .await
+            .unwrap();
+
+        assert_eq!(hashes, vec!["aa".to_string(), "bb".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn get_block_hashes_surfaces_an_error_inside_the_batch() {
+        let server = mock_response(serde_json::json!([
+            { "jsonrpc": "2.0", "id": 0, "result": "aa" },
+            { "jsonrpc": "2.0", "id": 1, "error": { "code": -1, "message": "past the tip" } },
+        ]))
+        .await;
+
+        let error = client_for(&server)
+            .get_block_hashes(&[10, 11])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, NodeError::Rpc { code: -1, .. }));
+    }
+
+    #[tokio::test]
+    async fn get_block_hashes_rejects_a_batch_missing_a_reply() {
+        let server = mock_response(serde_json::json!([
+            { "jsonrpc": "2.0", "id": 0, "result": "aa" },
+        ]))
+        .await;
+
+        assert!(
+            client_for(&server)
+                .get_block_hashes(&[10, 11])
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn get_block_hashes_of_nothing_sends_no_request() {
+        // An empty batch array is itself a JSON-RPC error, so it must never leave the client.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client_for(&server).get_block_hashes(&[]).await.unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[tokio::test]

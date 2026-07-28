@@ -13,6 +13,7 @@ pub mod darkside;
 pub mod node;
 pub mod proto;
 pub mod service;
+pub mod snapshot;
 
 mod compact;
 mod encoding;
@@ -188,6 +189,20 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             (cache, location, None)
         };
 
+        // Before the floor is resolved, since a successful import raises it, and before the
+        // ingestor starts, so it picks up from the imported tip. `--redownload` has already cleared
+        // the cache by now, so combining the two means "discard local, re-bootstrap from the peer".
+        if let Some(url) = &config.snapshot_url {
+            let interrupted =
+                bootstrap_from_snapshot(url, &cache, &node, config.ingest.concurrency).await;
+            if interrupted {
+                tracing::info!("server stopped before it started serving");
+                return Ok(());
+            }
+        }
+
+        let start_height = effective_start_height(start_height, cache.snapshot_base_height()?);
+
         tracing::info!(
             grpc_bind = %config.grpc_bind,
             node_url = %config.node.url,
@@ -206,6 +221,38 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 start_height,
                 config.ingest,
             ));
+        }
+
+        if let Some(snapshot_config) = config.snapshot {
+            if !snapshot_config.bind.ip().is_loopback() {
+                tracing::warn!(
+                    snapshot_bind = %snapshot_config.bind,
+                    "publishing snapshots on a non-loopback address — anyone who can reach it can \
+                     download the whole cache, at whatever bandwidth this host will give them"
+                );
+            }
+            tracing::info!(
+                snapshot_bind = %snapshot_config.bind,
+                "publishing snapshots on /snapshot/manifest and /snapshot/epoch/{{index}}"
+            );
+            // The manifest only lists epochs whose digests are stored, so the maintenance walk is
+            // what makes anything publishable at all: on a cache ingested by an earlier version it
+            // backfills from the base upward, and afterwards it computes one epoch per boundary
+            // crossing. Both are the same walk, throttled against the ingestor.
+            tokio::spawn(snapshot::export::maintain_digests(
+                cache.clone(),
+                chain_info.chain.clone(),
+                snapshot::export::DigestMaintenance::default(),
+            ));
+            let snapshot_cache = cache.clone();
+            let snapshot_chain = chain_info.chain.clone();
+            tokio::spawn(async move {
+                if let Err(error) =
+                    snapshot::serve::serve(snapshot_cache, snapshot_chain, snapshot_config).await
+                {
+                    tracing::error!(%error, "snapshot server failed");
+                }
+            });
         }
 
         // One shared mempool monitor fans the mempool out to all clients, so node load stays
@@ -343,6 +390,78 @@ async fn connect_with_retry(node: &dyn NodeRpc) -> GetBlockchainInfo {
     }
 }
 
+/// Import a peer's snapshot into the cache, verifying every block against our own node. Returns
+/// whether the process was asked to stop before the import could finish.
+///
+/// Never fatal: a peer that is unreachable, out of date or dishonest degrades to today's behaviour,
+/// where the ingestor fills the cache from the node the slow way.
+async fn bootstrap_from_snapshot(
+    url: &str,
+    cache: &Cache,
+    node: &Arc<dyn NodeRpc>,
+    concurrency: usize,
+) -> bool {
+    use snapshot::import::{HttpEpochSource, ImportConfig, import};
+
+    tracing::info!(url, "bootstrapping the cache from a snapshot peer");
+    let started = std::time::Instant::now();
+    let source = match HttpEpochSource::new(url) {
+        Ok(source) => source,
+        Err(error) => {
+            tracing::error!(%error, url, "snapshot peer unusable; ingesting from the node instead");
+            return false;
+        }
+    };
+    let import_config = ImportConfig { concurrency };
+    let import = import(&source, cache, node, &import_config);
+    tokio::select! {
+        result = import => match result {
+            Ok(Some(height)) => tracing::info!(
+                height,
+                elapsed_secs = started.elapsed().as_secs(),
+                "snapshot bootstrap finished"
+            ),
+            Ok(None) => tracing::info!("snapshot bootstrap had nothing to import"),
+            Err(error) => {
+                tracing::error!(%error, "snapshot bootstrap failed; ingesting from the node instead")
+            }
+        },
+        // An import can run for hours before the gRPC listener binds, which is long enough for an
+        // orchestrator's stop timeout to elapse inside it. Dropping the in-flight epoch costs
+        // nothing: epochs commit one at a time, so a later run resumes from the last one that
+        // landed.
+        () = shutdown_signal() => {
+            tracing::info!(
+                cached_tip = ?cache.latest_height().ok().flatten(),
+                "stop requested during the snapshot bootstrap; keeping the epochs already imported"
+            );
+            return true;
+        }
+    }
+    false
+}
+
+/// Raise the ingest floor to the base height of an imported snapshot.
+///
+/// A bootstrapped cache cannot be rebuilt from below the height its snapshot was based at. Leaving
+/// the floor at the configured start height would mean a reorg deep enough to reach it empties the
+/// cache (see `ingestor::reorg_to_floor`) and the server silently re-ingests from Sapling
+/// activation, discarding the whole import. Clearing the cache with `--redownload` also clears the
+/// recorded base, so a deliberate wipe returns the instance to a plain cold start.
+fn effective_start_height(configured: u64, snapshot_base: Option<u64>) -> u64 {
+    match snapshot_base {
+        Some(base) if base > configured => {
+            tracing::info!(
+                configured,
+                snapshot_base = base,
+                "raising the ingest floor to the imported snapshot's base height"
+            );
+            base
+        }
+        _ => configured,
+    }
+}
+
 /// Validate a node-supplied chain name before it is used to build the cache file name.
 ///
 /// The node is trusted-local (see ADR 0001), but `getblockchaininfo`'s `chain` field still flows
@@ -452,6 +571,34 @@ mod tests {
     async fn connect_with_retry_keeps_retrying_past_the_escalation_threshold() {
         let info = connect_with_retry(&fake(ESCALATE_AFTER + 3)).await;
         assert_eq!(info.blocks, 4242);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_snapshot_peer_leaves_the_cache_alone_and_does_not_abort_startup() {
+        let (_dir, cache) = crate::testutil::temp_cache();
+        let node: Arc<dyn NodeRpc> = Arc::new(fake(0));
+
+        let interrupted = bootstrap_from_snapshot("http://127.0.0.1:1", &cache, &node, 4).await;
+
+        assert_eq!((interrupted, cache.latest_height().unwrap()), (false, None));
+    }
+
+    #[test]
+    fn an_imported_snapshot_raises_the_ingest_floor_above_the_configured_start() {
+        assert_eq!(effective_start_height(419_200, Some(3_000_000)), 3_000_000);
+    }
+
+    #[test]
+    fn a_configured_start_above_the_snapshot_base_is_kept() {
+        assert_eq!(
+            effective_start_height(3_100_000, Some(3_000_000)),
+            3_100_000
+        );
+    }
+
+    #[test]
+    fn a_cache_that_was_never_bootstrapped_keeps_the_configured_start() {
+        assert_eq!(effective_start_height(419_200, None), 419_200);
     }
 
     #[test]

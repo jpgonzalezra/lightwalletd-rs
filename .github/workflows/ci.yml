@@ -50,6 +50,26 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - run: docker build -t lightwalletd-rs .
 
+      # The runtime image is a different environment from the one the tests run in, and the HTTP
+      # client resolves its glibc, TLS provider and CA store only when a client is constructed at
+      # startup, plaintext deployment or not. `--help` exits before that, so this starts the server
+      # against a port nothing listens on: still running after 10s means startup cleared all three.
+      - name: the image starts and builds its node client
+        run: |
+          docker run -d --name smoke lightwalletd-rs \
+            --rpc-url http://127.0.0.1:1 \
+            --no-tls-very-insecure \
+            --no-metrics \
+            --data-dir /tmp/smoke
+          sleep 10
+          docker logs smoke
+          running=$(docker ps --filter name=smoke --filter status=running --format '{{.Names}}')
+          docker rm -f smoke > /dev/null
+          if [ "$running" != "smoke" ]; then
+            echo "::error::the server exited instead of retrying the unreachable node (log above)"
+            exit 1
+          fi
+
   audit:
     runs-on: ubuntu-latest
     # audit-check publishes its result as a check run, which needs write access

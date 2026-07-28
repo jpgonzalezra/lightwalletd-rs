@@ -22,6 +22,15 @@ pub const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_KEEPALIVE_TIMEOUT_SECS: u64 = 20;
 /// Default darkside auto-shutdown timeout, in minutes — matches the Go reference's fixed default.
 pub const DEFAULT_DARKSIDE_TIMEOUT_MINUTES: u64 = 30;
+/// Default address for the snapshot HTTP endpoint.
+pub const DEFAULT_SNAPSHOT_BIND: &str = "127.0.0.1:9069";
+/// Default number of epoch downloads served at once.
+pub const DEFAULT_SNAPSHOT_MAX_CONCURRENT_DOWNLOADS: usize = 4;
+/// Default `zstd` level for epoch bodies. The measured curve flattens after this: higher levels buy
+/// little for several times the CPU, and CPU is the scarce resource on a box that is also ingesting.
+pub const DEFAULT_SNAPSHOT_COMPRESSION_LEVEL: i32 = 3;
+/// Highest `zstd` level that exists.
+const MAX_COMPRESSION_LEVEL: i32 = 22;
 /// Default tracing filter when neither `--log-level` nor `RUST_LOG` is given.
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 
@@ -131,6 +140,34 @@ pub struct Cli {
     /// Disable the Prometheus metrics HTTP server.
     #[arg(long)]
     pub no_metrics: bool,
+
+    /// Publish this instance's cached blocks over HTTP, so a fresh instance can bootstrap from them
+    /// with `--snapshot-url` instead of ingesting the chain from its own node. Off by default;
+    /// enabling it serves multi-gigabyte downloads to whoever can reach `--snapshot-bind`.
+    #[arg(long)]
+    pub snapshot_serve: bool,
+
+    /// Address to publish the snapshot on (`/snapshot/manifest`, `/snapshot/epoch/{index}`).
+    /// Requires `--snapshot-serve`; defaults to `127.0.0.1:9069`.
+    #[arg(long)]
+    pub snapshot_bind: Option<SocketAddr>,
+
+    /// Epoch downloads to serve at once. Requests beyond the cap are refused with `429` rather than
+    /// queued, so a slow client cannot hold a slot indefinitely.
+    #[arg(long, default_value_t = DEFAULT_SNAPSHOT_MAX_CONCURRENT_DOWNLOADS)]
+    pub snapshot_max_concurrent_downloads: usize,
+
+    /// `zstd` level for epoch bodies, applied only when a client asks for compression. 0 disables
+    /// compression entirely.
+    #[arg(long, default_value_t = DEFAULT_SNAPSHOT_COMPRESSION_LEVEL)]
+    pub snapshot_compression_level: i32,
+
+    /// Bootstrap the cache from a peer publishing a snapshot (e.g. `https://peer.example:9069`)
+    /// before serving, instead of ingesting the whole range from this instance's own node. Every
+    /// block is verified against that node on the way in. An unreachable or dishonest peer is not
+    /// fatal: the server starts and ingests normally.
+    #[arg(long)]
+    pub snapshot_url: Option<String>,
 
     /// Run as a darkside mock server (no real node) for deterministic wallet tests. Insecure —
     /// testing only; never deploy in production.
@@ -252,6 +289,10 @@ pub struct Config {
     pub tls: TlsConfig,
     /// Address to serve Prometheus metrics on, if enabled.
     pub metrics_bind: Option<SocketAddr>,
+    /// Snapshot publishing settings, if `--snapshot-serve` is on.
+    pub snapshot: Option<SnapshotServeConfig>,
+    /// Peer to bootstrap the cache from at startup, if `--snapshot-url` is set.
+    pub snapshot_url: Option<String>,
     /// Whether to run as a darkside mock server instead of proxying a real node.
     pub darkside: bool,
     /// How long a darkside server runs before auto-shutting down (see `--darkside-timeout-minutes`).
@@ -270,6 +311,17 @@ pub struct Config {
     pub ingest: IngestConfig,
     /// Which backend serves chain data, with the settings it needs.
     pub backend: BackendConfig,
+}
+
+/// How this instance publishes its cache as a downloadable snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotServeConfig {
+    /// Address the snapshot endpoints listen on.
+    pub bind: SocketAddr,
+    /// Epoch downloads served at once; further requests are refused rather than queued.
+    pub max_concurrent_downloads: usize,
+    /// `zstd` level for epoch bodies, or 0 to serve them uncompressed.
+    pub compression_level: i32,
 }
 
 /// Ingestor catch-up tuning: how aggressively the cache is filled while behind the node tip.
@@ -359,6 +411,18 @@ impl std::fmt::Debug for NodeConfig {
 impl Cli {
     /// Resolve CLI flags (and an optional `zcash.conf`) into a [`Config`].
     pub fn resolve(self) -> Result<Config> {
+        // Resolved first: the rest of this function moves fields out of `self`.
+        let snapshot = self.resolve_snapshot()?;
+        if let Some(url) = &self.snapshot_url {
+            validate_snapshot_url(url)?;
+            if self.nocache || self.darkside {
+                anyhow::bail!(
+                    "--snapshot-url cannot be combined with --nocache or darkside mode: the \
+                     imported blocks would land in a throwaway cache, or in a mock chain"
+                );
+            }
+        }
+
         let conf = match &self.zcash_conf {
             Some(path) => parse_zcash_conf(path)?,
             None => ZcashConf::default(),
@@ -471,6 +535,8 @@ impl Cli {
             redownload: self.redownload,
             tls,
             metrics_bind: (!self.no_metrics).then_some(self.metrics_bind),
+            snapshot,
+            snapshot_url: self.snapshot_url,
             darkside: self.darkside,
             darkside_timeout: Duration::from_secs(self.darkside_timeout_minutes.saturating_mul(60)),
             nocache: self.nocache,
@@ -487,6 +553,82 @@ impl Cli {
             },
             backend,
         })
+    }
+
+    /// Resolve the snapshot publishing settings, refusing combinations that would advertise
+    /// something this instance cannot actually serve.
+    fn resolve_snapshot(&self) -> anyhow::Result<Option<SnapshotServeConfig>> {
+        if !self.snapshot_serve {
+            // A bind address without the switch reads as "I turned this on", so failing here is
+            // better than listening on nothing and leaving the operator to discover it later.
+            if let Some(bind) = self.snapshot_bind {
+                anyhow::bail!(
+                    "--snapshot-bind {bind} has no effect without --snapshot-serve; pass \
+                     --snapshot-serve to publish this instance's cache"
+                );
+            }
+            return Ok(None);
+        }
+        if self.nocache {
+            anyhow::bail!(
+                "--snapshot-serve cannot be combined with --nocache: that mode keeps the cache in \
+                 a throwaway directory and never spawns the ingestor, so the published snapshot \
+                 would stay empty forever"
+            );
+        }
+        if self.darkside {
+            anyhow::bail!(
+                "--snapshot-serve cannot be combined with darkside mode: a mock chain is not one \
+                 any consumer could verify a snapshot against"
+            );
+        }
+        if self.snapshot_max_concurrent_downloads == 0 {
+            anyhow::bail!("--snapshot-max-concurrent-downloads must be greater than 0");
+        }
+        if !(0..=MAX_COMPRESSION_LEVEL).contains(&self.snapshot_compression_level) {
+            anyhow::bail!(
+                "--snapshot-compression-level must be between 0 (uncompressed) and \
+                 {MAX_COMPRESSION_LEVEL}"
+            );
+        }
+
+        let bind = match self.snapshot_bind {
+            Some(bind) => bind,
+            None => DEFAULT_SNAPSHOT_BIND
+                .parse()
+                .context("parsing the default snapshot bind address")?,
+        };
+        Ok(Some(SnapshotServeConfig {
+            bind,
+            max_concurrent_downloads: self.snapshot_max_concurrent_downloads,
+            compression_level: self.snapshot_compression_level,
+        }))
+    }
+}
+
+/// Reject a `--snapshot-url` nothing could ever be fetched from.
+///
+/// A bootstrap failure is deliberately not fatal, so without this a typo surfaces as one error line
+/// and then a full ingest from the node: the hours-long path the flag exists to avoid, taken
+/// silently. Plaintext is allowed but called out, since a snapshot's block contents are the part no
+/// verification layer binds to the operator's own node.
+fn validate_snapshot_url(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url)
+        .with_context(|| format!("--snapshot-url {url:?} is not a valid URL"))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            tracing::warn!(
+                url,
+                "--snapshot-url is plaintext: anyone on the path can substitute the block contents \
+                 a snapshot carries, which is the part no verification layer ties to your node"
+            );
+            Ok(())
+        }
+        scheme => anyhow::bail!(
+            "--snapshot-url scheme {scheme:?} is not supported; a snapshot peer is reached over \
+             https or http"
+        ),
     }
 }
 
@@ -686,6 +828,11 @@ mod tests {
             gen_cert: false,
             metrics_bind: "127.0.0.1:9068".parse().unwrap(),
             no_metrics: false,
+            snapshot_serve: false,
+            snapshot_bind: None,
+            snapshot_max_concurrent_downloads: DEFAULT_SNAPSHOT_MAX_CONCURRENT_DOWNLOADS,
+            snapshot_compression_level: DEFAULT_SNAPSHOT_COMPRESSION_LEVEL,
+            snapshot_url: None,
             darkside: false,
             darkside_timeout_minutes: DEFAULT_DARKSIDE_TIMEOUT_MINUTES,
             nocache: false,
@@ -892,6 +1039,140 @@ mod tests {
     fn resolve_rejects_zero_keepalive() {
         let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.keepalive_interval_secs = 0;
+        assert!(cli.resolve().is_err());
+    }
+
+    /// A CLI with a reachable node and no TLS, which is every snapshot test's starting point.
+    fn snapshot_cli() -> Cli {
+        cli_with(None, None, Some("http://node"), None, None, None)
+    }
+
+    #[test]
+    fn snapshot_serving_is_off_by_default() {
+        let config = snapshot_cli().resolve().unwrap();
+        assert_eq!(config.snapshot, None);
+    }
+
+    #[test]
+    fn snapshot_serve_defaults_to_loopback_9069() {
+        let mut cli = snapshot_cli();
+        cli.snapshot_serve = true;
+
+        let config = cli.resolve().unwrap();
+
+        assert_eq!(
+            config.snapshot,
+            Some(SnapshotServeConfig {
+                bind: "127.0.0.1:9069".parse().unwrap(),
+                max_concurrent_downloads: DEFAULT_SNAPSHOT_MAX_CONCURRENT_DOWNLOADS,
+                compression_level: DEFAULT_SNAPSHOT_COMPRESSION_LEVEL,
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_bind_without_snapshot_serve_is_an_error() {
+        // Silently listening on nothing would leave the operator to discover it much later.
+        let mut cli = snapshot_cli();
+        cli.snapshot_bind = Some("0.0.0.0:9069".parse().unwrap());
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn snapshot_serve_with_nocache_is_an_error() {
+        // That mode never ingests, so the published snapshot would stay empty forever.
+        let mut cli = snapshot_cli();
+        cli.snapshot_serve = true;
+        cli.nocache = true;
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn snapshot_serve_in_darkside_mode_is_an_error() {
+        let mut cli = snapshot_cli();
+        cli.snapshot_serve = true;
+        cli.darkside = true;
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn snapshot_compression_level_above_the_zstd_maximum_is_an_error() {
+        let mut cli = snapshot_cli();
+        cli.snapshot_serve = true;
+        cli.snapshot_compression_level = MAX_COMPRESSION_LEVEL + 1;
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn snapshot_compression_level_zero_is_accepted_as_uncompressed() {
+        let mut cli = snapshot_cli();
+        cli.snapshot_serve = true;
+        cli.snapshot_compression_level = 0;
+
+        let config = cli.resolve().unwrap();
+
+        assert_eq!(config.snapshot.unwrap().compression_level, 0);
+    }
+
+    #[test]
+    fn snapshot_url_is_carried_through_and_off_by_default() {
+        assert_eq!(snapshot_cli().resolve().unwrap().snapshot_url, None);
+
+        let mut cli = snapshot_cli();
+        cli.snapshot_url = Some("https://peer.example:9069".to_string());
+
+        assert_eq!(
+            cli.resolve().unwrap().snapshot_url.as_deref(),
+            Some("https://peer.example:9069")
+        );
+    }
+
+    #[test]
+    fn a_snapshot_url_that_is_not_a_url_is_rejected_at_startup() {
+        // Not fatal at import time, so without this the operator gets one error line and then the
+        // hours-long ingest the flag exists to avoid.
+        let mut cli = snapshot_cli();
+        cli.snapshot_url = Some("peer.example 9069".to_string());
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn a_snapshot_url_with_an_unsupported_scheme_is_rejected() {
+        let mut cli = snapshot_cli();
+        cli.snapshot_url = Some("file:///var/tmp/snapshot".to_string());
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn a_plaintext_snapshot_url_is_accepted() {
+        // Allowed for a peer on a trusted network; the startup warning carries the caveat.
+        let mut cli = snapshot_cli();
+        cli.snapshot_url = Some("http://peer.example:9069".to_string());
+
+        assert!(cli.resolve().is_ok());
+    }
+
+    #[test]
+    fn snapshot_url_with_nocache_is_an_error() {
+        let mut cli = snapshot_cli();
+        cli.snapshot_url = Some("https://peer.example:9069".to_string());
+        cli.nocache = true;
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn snapshot_download_cap_of_zero_is_an_error() {
+        let mut cli = snapshot_cli();
+        cli.snapshot_serve = true;
+        cli.snapshot_max_concurrent_downloads = 0;
+
         assert!(cli.resolve().is_err());
     }
 

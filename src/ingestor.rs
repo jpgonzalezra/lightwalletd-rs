@@ -745,6 +745,9 @@ mod tests {
         async fn get_block_count(&self) -> Result<u64, crate::node::NodeError> {
             self.inner.get_block_count().await
         }
+        async fn get_block_hash(&self, height: u64) -> Result<String, crate::node::NodeError> {
+            self.inner.get_block_hash(height).await
+        }
         async fn get_raw_transaction(
             &self,
             txid: &str,

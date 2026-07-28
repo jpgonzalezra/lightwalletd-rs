@@ -79,6 +79,10 @@ the `CompactTxStreamerClient` and `DarksideStreamerClient` stubs alongside the s
 | `src/fetch.rs` | Fetch a block from the node and assemble its `CompactBlock` (shared by `GetBlock` and the ingestor). |
 | `src/cache.rs` | On-disk compact-block store (`redb`). |
 | `src/ingestor.rs` | Background task that polls the node and fills the cache; reorg handling. |
+| `src/snapshot/format.rs` | Snapshot wire format (ADR 0024): the manifest, the epoch body framing, and the content/anchor digests. |
+| `src/snapshot/export.rs` | Reads a snapshot out of a live cache: the manifest, epoch bodies, and the walk that computes and stores epoch digests. |
+| `src/snapshot/import.rs` | Consumes a snapshot: the `EpochSource` seam, its HTTP client, and the four verification layers. |
+| `src/snapshot/serve.rs` | Publishes the cache over HTTP (`/snapshot/manifest`, `/snapshot/epoch/{index}`), with a download cap and negotiated compression. |
 | `src/metrics.rs` | Serves Prometheus metrics over an HTTP `/metrics` endpoint. |
 | `src/darkside/` | Darkside test harness, split by responsibility: `error` (error type), `block` (raw-block helpers and the held `ActiveBlock`), `state` (the in-memory mock chain `DarksideState`), `node` (its `NodeRpc` implementation `DarksideNode`), and `service` (the `DarksideStreamer` control plane). |
 
@@ -158,6 +162,7 @@ Data flow and storage:
 - [0004](decisions/0004-redb-block-cache.md) — compact blocks are cached on disk with `redb`, one per height; a reorg is a truncate-from-N.
 - [0014](decisions/0014-cache-ingestor-resilience.md) — the cache and ingestor recover from corruption and reorgs locally (truncate-from-N, reorg-by-hash, capped-backoff startup).
 - [0005](decisions/0005-shared-mempool-monitor.md) — in live mode a single background task (`src/service/mempool_monitor.rs`) refreshes the mempool at most every ~2 s and fans a parsed-once snapshot out via `tokio::sync::watch`, so node load is independent of the connected-wallet count; darkside keeps the per-request path.
+- [0024](decisions/0024-snapshot-bootstrap.md) — a fresh cache can be bootstrapped from a peer's epoch-chunked snapshot over HTTP instead of ingesting the whole range, with every block verified against the importer's own node.
 
 Protocol upgrades:
 
@@ -215,6 +220,10 @@ Three per-request caps bound the work a single request can accumulate or trigger
   `MAX_TADDRESS_TXIDS` (10,000): the txid list is fetched first and a wider result is rejected with
   `ResourceExhausted` before any per-txid fetch, so one request cannot pin the node on an unbounded
   fetch loop. The client narrows its block range to proceed.
+
+Snapshot serving, when enabled, adds one more: `--snapshot-max-concurrent-downloads` (default 4)
+bounds how many epoch bodies are streamed at once, and a request past the cap is refused with `429`
+rather than queued, so a slow client cannot hold a slot indefinitely.
 
 The three server-builder limits are configurable at startup via `--max-concurrent-streams`,
 `--keepalive-interval-secs`, and `--keepalive-timeout-secs`, defaulting to the values above
@@ -474,6 +483,52 @@ transparent inputs/outputs stripped).
 `--nocache` bypasses all of the above: the ingestor is not spawned and the cache is opened in a throwaway
 `tempfile::tempdir()` instead of `--data-dir`, so it starts (and stays) empty and every read falls through
 to the node. Debugging only — matches Go's `--nocache` (see [ADR 0022](decisions/0022-ops-surface-parity.md)).
+
+## Snapshot bootstrap
+
+Filling a fresh cache from the node takes hours, and the server has nothing to serve until it is done. An
+instance that already holds those blocks can hand them over instead ([ADR 0024](decisions/0024-snapshot-bootstrap.md)),
+and `src/snapshot/` implements both halves.
+
+The artifact is a serialization of the cache contents cut into **epochs** of 10,000 heights, aligned to
+multiples of that size so any two servers cut at the same boundaries. `src/snapshot/format.rs` defines the
+manifest, the body framing (magic, chain, first height, count, then length-prefixed protobuf records), and the
+two digests every epoch carries, both taken over the uncompressed body:
+
+- `content_digest` proves the transfer arrived intact, and nothing more: the manifest that declared it came
+  from the same server as the body.
+- `anchor`, over the epoch's `(height, block hash)` pairs, is what a consumer recomputes from its own node. A
+  compact block's `hash` is a field the publisher chooses rather than one a consumer can derive, so this is
+  the only layer that ties a snapshot to the real chain.
+
+Computing an epoch's digests means reading every block in it, so they are computed once and stored in the
+cache's `meta` table rather than rebuilt per request; the manifest is then a cheap read of those rows. A single
+maintenance walk (`src/snapshot/export.rs`) fills them: on a cache written by an earlier version it backfills
+from the base upward, throttled against the ingestor, and afterwards it computes one epoch each time the tip
+crosses a boundary. Only completed epochs are published, so a manifest is a growing prefix of the served range
+and the epoch holding the tip is never offered. `reorg` and `truncate_from` drop the digest rows for every
+epoch they reach into, in the same transaction as the blocks, so metadata never outlives what it describes.
+
+Serving (`src/snapshot/serve.rs`, `--snapshot-serve`, off by default) exposes `GET /snapshot/manifest` and
+`GET /snapshot/epoch/{index}`. Bodies stream straight out of `redb` without decoding, back-pressured by the
+client, and carry an `immutable` cache directive since a published epoch never changes. Compression is
+negotiated per request and is invisible to the format: covering compressed bytes would make a digest depend on
+the compressor's version and level, so two servers holding identical blocks would publish different digests.
+
+Importing (`src/snapshot/import.rs`, `--snapshot-url`) runs four layers per epoch, in cost order, all
+unconditional: content digest, chain linkage inside the epoch and across the join onto what the cache already
+holds, note-commitment tree-size deltas against the outputs and actions each block carries, and the anchor
+against the operator's own node. The anchor is dense rather than tip-only because a tip-only check is vacuous:
+a publisher would pin the real tip hash in the last block and leave everything below it unconstrained. Blocks
+are decoded one at a time on the way into the cache rather than materialized together, which matters because a
+sandblasting-era epoch is over a gigabyte.
+
+Each epoch lands through the cache's ordinary append, one transaction, so the existing invariants apply and a
+rejected epoch writes nothing. Resumption therefore needs no state of its own: the importer asks the cache how
+far it got. A successful import into an empty cache records the snapshot's base height in the same transaction,
+and startup floors the ingestor at it, so a reorg deep enough to reach the floor cannot empty the cache and
+silently re-sync from Sapling activation. A failed or unreachable peer is not fatal: the server starts and
+ingests from its node as before.
 
 ## Testing
 

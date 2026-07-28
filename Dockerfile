@@ -1,5 +1,9 @@
 # Build stage: compile the release binary (needs protoc for the gRPC codegen).
-FROM rust:1-slim@sha256:31ee7fc65186be7e0e0ccb3f2ca305f14e4739e7642a1ae65753aa5d7b874523 AS builder
+#
+# Pinned to the same Debian release as the runtime stage below. `rust:1-slim` tracks the newest
+# Debian, whose glibc is ahead of the runtime's: a dependency that links a symbol newer than the
+# runtime provides then builds cleanly and dies on startup with "GLIBC_2.xx not found".
+FROM rust:1-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777 AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
@@ -9,6 +13,11 @@ RUN cargo build --release --locked
 
 # Runtime stage: a slim image with just the binary, run as a non-root user.
 FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
+# `ca-certificates` is needed to verify an `https://` snapshot peer, and the HTTP client loads the
+# store when it is built, so the binary will not start without it even on a plaintext deployment.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --user-group lwd
 COPY --from=builder /build/target/release/lightwalletd-rs /usr/local/bin/lightwalletd-rs
 USER lwd
