@@ -487,8 +487,13 @@ async fn verify_anchor(
 /// a download.
 const MAX_EPOCH_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Per-request timeout for a snapshot download.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(300);
+/// Idle timeout between reads from the snapshot peer, which is what detects a stalled transfer.
+///
+/// Deliberately not a total deadline: an epoch body runs to [`MAX_EPOCH_BYTES`], so any fixed total
+/// would silently impose a floor on the link speed a bootstrap needs. At 300 seconds the 1.21 GB
+/// sandblasting-era epochs, which are most of a mainnet snapshot and the reason this feature exists,
+/// would need over 4 MB/s sustained or fail every retry identically.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// TCP connect timeout for the snapshot peer.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Attempts per epoch before giving up.
@@ -508,7 +513,7 @@ impl HttpEpochSource {
     pub fn new(url: &str) -> Result<Self, SnapshotError> {
         Ok(Self {
             client: crate::node::http_client_builder()
-                .timeout(HTTP_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
                 .connect_timeout(CONNECT_TIMEOUT)
                 .build()
                 .map_err(SnapshotError::Http)?,
