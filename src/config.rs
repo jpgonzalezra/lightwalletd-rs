@@ -413,11 +413,14 @@ impl Cli {
     pub fn resolve(self) -> Result<Config> {
         // Resolved first: the rest of this function moves fields out of `self`.
         let snapshot = self.resolve_snapshot()?;
-        if self.snapshot_url.is_some() && (self.nocache || self.darkside) {
-            anyhow::bail!(
-                "--snapshot-url cannot be combined with --nocache or darkside mode: the imported \
-                 blocks would land in a throwaway cache, or in a mock chain"
-            );
+        if let Some(url) = &self.snapshot_url {
+            validate_snapshot_url(url)?;
+            if self.nocache || self.darkside {
+                anyhow::bail!(
+                    "--snapshot-url cannot be combined with --nocache or darkside mode: the \
+                     imported blocks would land in a throwaway cache, or in a mock chain"
+                );
+            }
         }
 
         let conf = match &self.zcash_conf {
@@ -600,6 +603,32 @@ impl Cli {
             max_concurrent_downloads: self.snapshot_max_concurrent_downloads,
             compression_level: self.snapshot_compression_level,
         }))
+    }
+}
+
+/// Reject a `--snapshot-url` nothing could ever be fetched from.
+///
+/// A bootstrap failure is deliberately not fatal, so without this a typo surfaces as one error line
+/// and then a full ingest from the node: the hours-long path the flag exists to avoid, taken
+/// silently. Plaintext is allowed but called out, since a snapshot's block contents are the part no
+/// verification layer binds to the operator's own node.
+fn validate_snapshot_url(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url)
+        .with_context(|| format!("--snapshot-url {url:?} is not a valid URL"))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            tracing::warn!(
+                url,
+                "--snapshot-url is plaintext: anyone on the path can substitute the block contents \
+                 a snapshot carries, which is the part no verification layer ties to your node"
+            );
+            Ok(())
+        }
+        scheme => anyhow::bail!(
+            "--snapshot-url scheme {scheme:?} is not supported; a snapshot peer is reached over \
+             https or http"
+        ),
     }
 }
 
@@ -1100,6 +1129,33 @@ mod tests {
             cli.resolve().unwrap().snapshot_url.as_deref(),
             Some("https://peer.example:9069")
         );
+    }
+
+    #[test]
+    fn a_snapshot_url_that_is_not_a_url_is_rejected_at_startup() {
+        // Not fatal at import time, so without this the operator gets one error line and then the
+        // hours-long ingest the flag exists to avoid.
+        let mut cli = snapshot_cli();
+        cli.snapshot_url = Some("peer.example 9069".to_string());
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn a_snapshot_url_with_an_unsupported_scheme_is_rejected() {
+        let mut cli = snapshot_cli();
+        cli.snapshot_url = Some("file:///var/tmp/snapshot".to_string());
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn a_plaintext_snapshot_url_is_accepted() {
+        // Allowed for a peer on a trusted network; the startup warning carries the caveat.
+        let mut cli = snapshot_cli();
+        cli.snapshot_url = Some("http://peer.example:9069".to_string());
+
+        assert!(cli.resolve().is_ok());
     }
 
     #[test]

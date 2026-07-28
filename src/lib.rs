@@ -193,7 +193,12 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         // ingestor starts, so it picks up from the imported tip. `--redownload` has already cleared
         // the cache by now, so combining the two means "discard local, re-bootstrap from the peer".
         if let Some(url) = &config.snapshot_url {
-            bootstrap_from_snapshot(url, &cache, &node, config.ingest.concurrency).await;
+            let interrupted =
+                bootstrap_from_snapshot(url, &cache, &node, config.ingest.concurrency).await;
+            if interrupted {
+                tracing::info!("server stopped before it started serving");
+                return Ok(());
+            }
         }
 
         let start_height = effective_start_height(start_height, cache.snapshot_base_height()?);
@@ -385,7 +390,8 @@ async fn connect_with_retry(node: &dyn NodeRpc) -> GetBlockchainInfo {
     }
 }
 
-/// Import a peer's snapshot into the cache, verifying every block against our own node.
+/// Import a peer's snapshot into the cache, verifying every block against our own node. Returns
+/// whether the process was asked to stop before the import could finish.
 ///
 /// Never fatal: a peer that is unreachable, out of date or dishonest degrades to today's behaviour,
 /// where the ingestor fills the cache from the node the slow way.
@@ -394,7 +400,7 @@ async fn bootstrap_from_snapshot(
     cache: &Cache,
     node: &Arc<dyn NodeRpc>,
     concurrency: usize,
-) {
+) -> bool {
     use snapshot::import::{HttpEpochSource, ImportConfig, import};
 
     tracing::info!(url, "bootstrapping the cache from a snapshot peer");
@@ -403,20 +409,36 @@ async fn bootstrap_from_snapshot(
         Ok(source) => source,
         Err(error) => {
             tracing::error!(%error, url, "snapshot peer unusable; ingesting from the node instead");
-            return;
+            return false;
         }
     };
-    match import(&source, cache, node, &ImportConfig { concurrency }).await {
-        Ok(Some(height)) => tracing::info!(
-            height,
-            elapsed_secs = started.elapsed().as_secs(),
-            "snapshot bootstrap finished"
-        ),
-        Ok(None) => tracing::info!("snapshot bootstrap had nothing to import"),
-        Err(error) => {
-            tracing::error!(%error, "snapshot bootstrap failed; ingesting from the node instead")
+    let import_config = ImportConfig { concurrency };
+    let import = import(&source, cache, node, &import_config);
+    tokio::select! {
+        result = import => match result {
+            Ok(Some(height)) => tracing::info!(
+                height,
+                elapsed_secs = started.elapsed().as_secs(),
+                "snapshot bootstrap finished"
+            ),
+            Ok(None) => tracing::info!("snapshot bootstrap had nothing to import"),
+            Err(error) => {
+                tracing::error!(%error, "snapshot bootstrap failed; ingesting from the node instead")
+            }
+        },
+        // An import can run for hours before the gRPC listener binds, which is long enough for an
+        // orchestrator's stop timeout to elapse inside it. Dropping the in-flight epoch costs
+        // nothing: epochs commit one at a time, so a later run resumes from the last one that
+        // landed.
+        () = shutdown_signal() => {
+            tracing::info!(
+                cached_tip = ?cache.latest_height().ok().flatten(),
+                "stop requested during the snapshot bootstrap; keeping the epochs already imported"
+            );
+            return true;
         }
     }
+    false
 }
 
 /// Raise the ingest floor to the base height of an imported snapshot.
@@ -556,9 +578,9 @@ mod tests {
         let (_dir, cache) = crate::testutil::temp_cache();
         let node: Arc<dyn NodeRpc> = Arc::new(fake(0));
 
-        bootstrap_from_snapshot("http://127.0.0.1:1", &cache, &node, 4).await;
+        let interrupted = bootstrap_from_snapshot("http://127.0.0.1:1", &cache, &node, 4).await;
 
-        assert_eq!(cache.latest_height().unwrap(), None);
+        assert_eq!((interrupted, cache.latest_height().unwrap()), (false, None));
     }
 
     #[test]
