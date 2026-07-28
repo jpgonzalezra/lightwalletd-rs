@@ -86,11 +86,11 @@ pub async fn import(
     config: &ImportConfig,
 ) -> Result<Option<u64>, SnapshotError> {
     let manifest = source.manifest().await?;
-    let chain = node.get_blockchain_info().await?.chain;
-    validate_manifest(&manifest, &chain)?;
+    let node_info = node.get_blockchain_info().await?;
+    validate_manifest(&manifest, &node_info.chain)?;
 
-    let started_from = cache.latest_height()?;
-    let mut tip = started_from;
+    let mut tip = cache.latest_height()?;
+    let mut imported_from: Option<u64> = None;
     for entry in &manifest.epochs {
         let next = match tip {
             Some(height) => height + 1,
@@ -107,6 +107,19 @@ pub async fn import(
             });
         }
 
+        // Nothing above the node's own tip can be anchored to it, and the anchor is the last layer,
+        // so importing it anyway means downloading a whole epoch to reject it height by height. A
+        // node still in initial sync is the likeliest bootstrap, not an edge case. Stopping here
+        // needs no state either: a later run resumes from the cached tip like any other.
+        if entry.end > node_info.blocks {
+            tracing::info!(
+                epoch = entry.index,
+                node_tip = node_info.blocks,
+                "stopping the snapshot import at the node's tip; the ingestor carries on from there"
+            );
+            break;
+        }
+
         // The body is the only large allocation an epoch costs: it is verified in place, and the
         // blocks are decoded one at a time on the way into the cache.
         let body = fetch_body(source, entry).await?;
@@ -120,6 +133,7 @@ pub async fn import(
             tip.is_none().then_some(next),
         )?;
         tip = Some(entry.end);
+        imported_from.get_or_insert(next);
         tracing::info!(
             epoch = entry.index,
             from = next,
@@ -128,12 +142,10 @@ pub async fn import(
         );
     }
 
-    match (started_from, tip) {
-        (from, Some(to)) if from != tip => tracing::info!(
-            from = from.map(|height| height + 1).unwrap_or(0),
-            to,
-            "snapshot import finished"
-        ),
+    match (imported_from, tip) {
+        // The first height actually taken from the peer, which on an empty cache is the snapshot's
+        // own base rather than anything the cache could have reported beforehand.
+        (Some(from), Some(to)) => tracing::info!(from, to, "snapshot import finished"),
         _ => tracing::info!("snapshot import had nothing to add"),
     }
     Ok(tip)
@@ -481,11 +493,13 @@ async fn verify_anchor(
     Ok(())
 }
 
-/// Largest epoch body this build will hold. Measured on mainnet: 49 MB for an early-2016 epoch,
-/// 1.21 GB for an early sandblasting one, which is the era that sets the bar. The ceiling leaves
-/// room above that while still stopping a hostile manifest from asking for an allocation instead of
-/// a download.
-const MAX_EPOCH_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Largest epoch body this build will hold, and so the memory a peer can make an importer commit.
+///
+/// Measured on mainnet: 49 MB for an early-2016 epoch, 1.21 GB for an early sandblasting one, which
+/// is the era that sets the bar. The ceiling leaves two thirds of headroom over that while keeping
+/// the worst case a hostile manifest can ask for within reach of the hosts this runs on. The buffer
+/// grows by doubling, so the transient peak while it resizes is the real cost, not this number.
+const MAX_EPOCH_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Largest manifest this build will hold. A full mainnet manifest is a few hundred entries of a
 /// couple of hundred bytes each, so the ceiling sits far above any real one and far below a body
@@ -505,6 +519,26 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FETCH_ATTEMPTS: u32 = 3;
 /// First backoff between attempts; doubles from there.
 const RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Whether another attempt at the same request could plausibly land differently.
+///
+/// Only transport failures qualify. A peer that serves a longer body than it declared, or that does
+/// not publish the epoch at all, answers identically every time: retrying it only delays the real
+/// error behind two backoffs and two warnings that read as if the transfer were flaky.
+fn is_worth_retrying(error: &SnapshotError) -> bool {
+    match error {
+        SnapshotError::Http(error) => match error.status() {
+            // A status the peer chose. 4xx is its settled answer, except for the one this very
+            // server returns when its download slots are full, which is an invitation to come back.
+            Some(status) => {
+                status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            }
+            // No status at all: connect, TLS, idle timeout, or a read that died mid-body.
+            None => true,
+        },
+        _ => false,
+    }
+}
 
 /// An [`EpochSource`] over a peer's HTTP endpoints.
 pub struct HttpEpochSource {
@@ -597,13 +631,16 @@ impl EpochSource for HttpEpochSource {
     }
 
     async fn epoch(&self, index: u64, max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
-        // An epoch is idempotent and verified afterwards, so retrying one is always safe.
+        // An epoch is idempotent and verified afterwards, so retrying one is always safe. Safe is
+        // not the same as useful, though, which is what `is_worth_retrying` decides.
         let mut delay = RETRY_BACKOFF;
         let mut attempt = 1;
         loop {
             match self.fetch_epoch(index, max_bytes).await {
                 Ok(body) => return Ok(body),
-                Err(error) if attempt >= self.attempts => return Err(error),
+                Err(error) if attempt >= self.attempts || !is_worth_retrying(&error) => {
+                    return Err(error);
+                }
                 Err(error) => {
                     tracing::warn!(%error, epoch = index, attempt, "fetching a snapshot epoch failed; retrying");
                     tokio::time::sleep(delay).await;
@@ -1000,6 +1037,61 @@ mod tests {
         ));
     }
 
+    /// A peer that answers every epoch request with `status`, counting the attempts it receives.
+    async fn refusing_server(status: axum::http::StatusCode) -> (String, Arc<AtomicUsize>) {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let app = axum::Router::new().route(
+            "/snapshot/epoch/{index}",
+            axum::routing::get(move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    status
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (format!("http://{address}"), attempts)
+    }
+
+    #[tokio::test]
+    async fn an_epoch_the_peer_does_not_publish_is_asked_for_once() {
+        let (url, attempts) = refusing_server(axum::http::StatusCode::NOT_FOUND).await;
+        let source = HttpEpochSource::new(&url).unwrap();
+
+        assert!(source.epoch(0, 1024).await.is_err());
+
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_peer_whose_download_slots_are_full_is_asked_again() {
+        // The status this very server returns under `--snapshot-max-concurrent-downloads`, which is
+        // the one 4xx that means "later", not "no".
+        let (url, attempts) = refusing_server(axum::http::StatusCode::TOO_MANY_REQUESTS).await;
+        let mut source = HttpEpochSource::new(&url).unwrap();
+        source.attempts = 2;
+
+        assert!(source.epoch(0, 1024).await.is_err());
+
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn a_body_longer_than_declared_is_not_retried() {
+        let url = hostile_server(vec![0u8; 4096], None).await;
+        let source = HttpEpochSource::new(&url).unwrap();
+        let started = std::time::Instant::now();
+
+        assert!(source.epoch(0, 1024).await.is_err());
+
+        // A retry would cost at least one backoff, so returning promptly is the observable part.
+        assert!(started.elapsed() < RETRY_BACKOFF);
+    }
+
     #[tokio::test]
     async fn a_peer_that_cannot_be_reached_is_an_error_rather_than_a_hang() {
         let source = HttpEpochSource::new("http://127.0.0.1:1").unwrap();
@@ -1245,6 +1337,21 @@ mod tests {
                 uninterrupted.get(block.height).unwrap()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_import_stops_at_the_node_tip_instead_of_downloading_what_it_cannot_verify() {
+        // A node still in initial sync, sitting below the peer's tip: the likeliest bootstrap.
+        // Without the check the second epoch would be fetched and checked three ways before the
+        // anchor rejected it for a reason the node's own tip already gave away.
+        let (first_epoch, second_epoch) = two_epochs();
+        let source = FixtureSource::new(vec![(0, first_epoch.clone()), (1, second_epoch)]);
+        let node = node_over(&first_epoch);
+        let (_dir, cache) = temp_cache();
+
+        let reached = import_into(&source, &cache, &node).await.unwrap();
+
+        assert_eq!(reached, Some(LAST));
     }
 
     #[tokio::test]

@@ -231,15 +231,20 @@ lightwalletd-rs --snapshot-url https://peer.example:9069 [...]
 ```
 
 The import runs before the server starts serving and resumes from wherever the cache already reaches, so an
-interrupted run continues at the epoch boundary it got to. A peer that is unreachable, out of date or
-dishonest is not fatal: the server starts and ingests from the node as usual. Combining it with
+interrupted run continues at the epoch boundary it got to. It also stops at your own node's tip: nothing
+above that can be verified yet, so the ingestor picks the rest up instead. A peer that is unreachable, out
+of date or dishonest is not fatal: the server starts and ingests from the node as usual. Combining it with
 `--redownload` means "discard the local cache, then bootstrap from the peer".
 
 Every block is checked four ways before it is stored: the transferred bytes against the digest the peer
 published, the chain linkage within and across epochs, the note-commitment tree sizes against the outputs
 and actions each block carries, and every block hash against your own node. That last one is what ties the
 snapshot to the real chain, since a compact block's hash is asserted by the publisher rather than derivable
-from its contents. Budget around 1.5 GB of free memory for the import.
+from its contents.
+
+One epoch body is held in memory at a time, and the largest on mainnet is 1.21 GB. The buffer grows by
+doubling, so the transient peak while it resizes is what to plan for: budget around 3 GB of free memory. A
+peer cannot make the importer hold more than 2 GB whatever its manifest claims.
 
 **Serving.** Publishing is off by default and needs a restart:
 
