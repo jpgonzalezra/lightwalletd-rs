@@ -305,8 +305,12 @@ mod tests {
 
     /// A client that neither advertises nor transparently decompresses, so these tests see the wire
     /// bytes rather than what reqwest would quietly undo for them.
+    ///
+    /// Built through [`crate::node::http_client_builder`] like every other client in the crate:
+    /// `reqwest::Client::builder()` panics outright when no rustls provider is installed yet, which
+    /// makes a test that reaches it first fail on test-ordering rather than on what it asserts.
     fn client() -> reqwest::Client {
-        reqwest::Client::builder()
+        crate::node::http_client_builder()
             .no_gzip()
             .no_zstd()
             .build()
