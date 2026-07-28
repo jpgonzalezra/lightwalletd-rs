@@ -487,6 +487,11 @@ async fn verify_anchor(
 /// a download.
 const MAX_EPOCH_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Largest manifest this build will hold. A full mainnet manifest is a few hundred entries of a
+/// couple of hundred bytes each, so the ceiling sits far above any real one and far below a body
+/// worth buffering from a peer nothing has verified yet.
+const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Idle timeout between reads from the snapshot peer, which is what detects a stalled transfer.
 ///
 /// Deliberately not a total deadline: an epoch body runs to [`MAX_EPOCH_BYTES`], so any fixed total
@@ -522,14 +527,21 @@ impl HttpEpochSource {
         })
     }
 
-    /// Fetch one epoch, refusing to hold more than `max_bytes`.
+    /// `GET url`, refusing to hold more than `max_bytes` of the response body.
     ///
     /// The cap is on the decompressed stream, which is what `bytes_stream` yields: capping the wire
     /// bytes instead would leave a few compressed megabytes free to expand into many gigabytes.
-    async fn fetch_epoch(&self, index: u64, max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
+    /// Every response from a peer comes through here, since nothing about a peer is established
+    /// before its bytes have been read.
+    async fn get_capped(
+        &self,
+        url: String,
+        max_bytes: u64,
+        too_long: impl FnOnce() -> SnapshotError,
+    ) -> Result<Vec<u8>, SnapshotError> {
         let response = self
             .client
-            .get(format!("{}/snapshot/epoch/{index}", self.base_url))
+            .get(url)
             .send()
             .await
             .map_err(SnapshotError::Http)?
@@ -541,32 +553,47 @@ impl HttpEpochSource {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(SnapshotError::Http)?;
             if body.len() as u64 + chunk.len() as u64 > max_bytes {
-                return Err(SnapshotError::EpochRejected {
-                    epoch: index,
-                    check: "length",
-                    detail: format!("body ran past the declared {max_bytes} bytes"),
-                });
+                return Err(too_long());
             }
             body.extend_from_slice(&chunk);
         }
         Ok(body)
+    }
+
+    /// Fetch one epoch, refusing to hold more than `max_bytes`.
+    async fn fetch_epoch(&self, index: u64, max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
+        self.get_capped(
+            format!("{}/snapshot/epoch/{index}", self.base_url),
+            max_bytes,
+            || SnapshotError::EpochRejected {
+                epoch: index,
+                check: "length",
+                detail: format!("body ran past the declared {max_bytes} bytes"),
+            },
+        )
+        .await
     }
 }
 
 #[async_trait]
 impl EpochSource for HttpEpochSource {
     async fn manifest(&self) -> Result<Manifest, SnapshotError> {
-        Ok(self
-            .client
-            .get(format!("{}/snapshot/manifest", self.base_url))
-            .send()
-            .await
-            .map_err(SnapshotError::Http)?
-            .error_for_status()
-            .map_err(SnapshotError::Http)?
-            .json()
-            .await
-            .map_err(SnapshotError::Http)?)
+        // Read incrementally under a cap rather than through `json()`, which buffers the whole body
+        // first: this is the one response fetched before anything about the peer is known, so it is
+        // where an unbounded read costs the most.
+        let body = self
+            .get_capped(
+                format!("{}/snapshot/manifest", self.base_url),
+                MAX_MANIFEST_BYTES,
+                || {
+                    SnapshotError::MalformedManifest(format!(
+                        "manifest ran past the {MAX_MANIFEST_BYTES} bytes one may hold"
+                    ))
+                },
+            )
+            .await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| SnapshotError::MalformedManifest(error.to_string()))
     }
 
     async fn epoch(&self, index: u64, max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
@@ -869,32 +896,68 @@ mod tests {
         assert!(cache.validate_light().is_ok());
     }
 
-    /// Serve `body` for every epoch request, with the given `Content-Encoding`, from an ephemeral
-    /// port. Stands in for a peer that does not play by the rules.
+    /// Serve `body` for every snapshot request, with the given `Content-Encoding`, from an ephemeral
+    /// port. Stands in for a peer that does not play by the rules, on either endpoint.
     async fn hostile_server(body: Vec<u8>, encoding: Option<&'static str>) -> String {
         use axum::http::header;
         use axum::response::IntoResponse;
 
-        let app = axum::Router::new().route(
-            "/snapshot/epoch/{index}",
-            axum::routing::get(move || {
-                let body = body.clone();
-                async move {
-                    let mut response = body.into_response();
-                    if let Some(encoding) = encoding {
-                        response.headers_mut().insert(
-                            header::CONTENT_ENCODING,
-                            axum::http::HeaderValue::from_static(encoding),
-                        );
-                    }
-                    response
-                }
-            }),
-        );
+        fn respond(body: &[u8], encoding: Option<&'static str>) -> axum::response::Response {
+            let mut response = body.to_vec().into_response();
+            if let Some(encoding) = encoding {
+                response.headers_mut().insert(
+                    header::CONTENT_ENCODING,
+                    axum::http::HeaderValue::from_static(encoding),
+                );
+            }
+            response
+        }
+
+        let body = Arc::new(body);
+        let epoch_body = Arc::clone(&body);
+        let app = axum::Router::new()
+            .route(
+                "/snapshot/epoch/{index}",
+                axum::routing::get(move || {
+                    let body = Arc::clone(&epoch_body);
+                    async move { respond(&body, encoding) }
+                }),
+            )
+            .route(
+                "/snapshot/manifest",
+                axum::routing::get(move || {
+                    let body = Arc::clone(&body);
+                    async move { respond(&body, encoding) }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await });
         format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn a_manifest_decompression_bomb_is_aborted_instead_of_buffered() {
+        // The same attack the epoch path defends against, aimed at the one response fetched before
+        // anything about the peer has been established: it precedes every verification layer.
+        let expanded = 2 * MAX_MANIFEST_BYTES as usize;
+        let bomb = zstd::encode_all(vec![0u8; expanded].as_slice(), 3).unwrap();
+        let url = hostile_server(bomb, Some("zstd")).await;
+        let source = HttpEpochSource::new(&url).unwrap();
+
+        let error = source.manifest().await.unwrap_err();
+
+        assert!(matches!(error, SnapshotError::MalformedManifest(_)));
+    }
+
+    #[tokio::test]
+    async fn a_manifest_that_is_not_json_is_rejected_as_a_manifest_rather_than_a_transport_error() {
+        let url = hostile_server(b"not a manifest".to_vec(), None).await;
+        let source = HttpEpochSource::new(&url).unwrap();
+
+        let error = source.manifest().await.unwrap_err();
+
+        assert!(matches!(error, SnapshotError::MalformedManifest(_)));
     }
 
     #[tokio::test]
