@@ -95,12 +95,19 @@ that still helps the light eras. A full snapshot goes from about 50 GB to about 
 
 - A new instance reaches the tip in a fraction of the time, having verified every block against its
   own node, and then serves identically to one that ingested from scratch.
-- **A publisher can still substitute individual commitment values.** The layers bind counts and chain
-  position, not the `cmu`/`cmx` values themselves: a block with the right number of outputs in the
-  right place, whose commitments are fabricated, passes every check. Recomputing subtree roots from
-  the snapshot's commitments and comparing them against `z_getsubtreesbyindex` would close this, and
-  is the natural upgrade path. Until then, the guarantee is that the snapshot describes the
-  operator's own chain at every height, not that every commitment in it is authentic.
+- **A publisher can still substitute what a block contains.** The layers bind counts and chain
+  position, not the values themselves: a block with the right number of outputs in the right place,
+  whose `cmu`/`cmx` are fabricated, passes every check. The same holds for everything else a
+  `CompactBlock` carries and no layer reaches, including `epk`, the note ciphertexts and the txids.
+  A wallet's exposure differs by field, since a txid is one it can hand back to the node, but the
+  boundary is what matters: block hashes are anchored, block contents are not. Recomputing subtree
+  roots from the snapshot's commitments and comparing them against `z_getsubtreesbyindex` would
+  close the commitment half, and is the natural upgrade path. Until then, the guarantee is that the
+  snapshot describes the operator's own chain at every height, not that everything inside each block
+  is authentic.
+- **Consuming over plaintext hands that same substitution to anyone on the path.** `--snapshot-url`
+  accepts `http://` for a peer on a trusted network and warns at startup, since the contents a
+  snapshot carries are exactly the part no layer ties back to the operator's node.
 - **An import needs about 1.5 GB of free memory.** An epoch body is held whole so its digest can be
   checked before anything is written; its blocks are decoded one at a time rather than materialized
   together, which halves the peak but cannot remove the body itself. Verifying in sub-batches would

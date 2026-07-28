@@ -12,8 +12,14 @@ All notable changes to this project are documented here. The format is loosely b
   `--snapshot-max-concurrent-downloads`; `--snapshot-url` imports from such a peer at startup. Every
   imported block is verified four ways, including its hash against the importer's own node, which is
   what ties a snapshot to the real chain: a compact block's hash is asserted by the publisher rather
-  than derivable from its contents. A failed or unreachable peer is not fatal. Epoch bodies are
-  compressed only in transit, so the digests stay portable across servers.
+  than derivable from its contents. A failed or unreachable peer is not fatal, and the import stops
+  at the operator's own node tip rather than downloading a range that node cannot verify yet. Epoch
+  bodies are compressed only in transit, so the digests stay portable across servers.
+- `--snapshot-url` is validated at startup rather than at import time, since a bootstrap failure
+  degrades to a full ingest and a typo would otherwise cost hours before anyone noticed. A plaintext
+  URL is accepted with a warning: the block contents a snapshot carries are the one part no
+  verification layer ties back to the operator's node. An import stops cleanly on `SIGTERM`, keeping
+  the epochs it had already committed.
 - After a successful import the ingestor floors at the snapshot's base height, so a deep reorg cannot
   empty the cache and silently re-sync from Sapling activation. `--redownload` clears that floor with
   the blocks.

@@ -369,8 +369,14 @@ fn check_linkage(
 /// Each pool's cumulative tree size must grow by exactly what `later` adds to it.
 ///
 /// Free to check and hard to fake: it pins the number and placement of commitments across the whole
-/// range without a single RPC. It does not pin their values, which is what the anchor and, in a
-/// future revision, subtree roots are for.
+/// range without a single RPC.
+///
+/// It does not pin their values, and neither does any other layer here: the anchor covers block
+/// hashes, not block contents. A publisher that keeps the counts and the chain position intact can
+/// still substitute the commitments themselves, along with the ciphertexts and txids beside them.
+/// Closing that needs subtree roots recomputed from the snapshot and compared against
+/// `z_getsubtreesbyindex`; until then the guarantee is that the snapshot describes the operator's
+/// own chain at every height, not that everything inside each block is authentic (ADR 0024).
 fn check_tree_sizes(
     epoch: u64,
     earlier: &CompactBlock,
