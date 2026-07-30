@@ -125,6 +125,14 @@ All notable changes to this project are documented here. The format is loosely b
 - `GetTaddressBalanceStream` now validates each address as it arrives instead of after the whole
   client stream has been received, so a stream is refused at the first malformed address rather than
   after the server has consumed every message (GHSA-x4m7-3gpp-xc36).
+- **`GetTaddressTransactions`/`GetTaddressTxids` no longer scan the address index open-endedly**
+  (ADR [0025](docs/decisions/0025-taddress-range-bounds.md)). A range with no `end` (or an `end` of
+  zero, which is how an omitted bound reaches the server) is pinned to the chain tip at request time,
+  a span wider than 10,000,000 blocks is rejected with `InvalidArgument` before the node is
+  contacted, and a single 30 s deadline covers the tip lookup, the index scan, and the per-txid
+  fetches, so an abandoned request cannot keep a node connection busy indefinitely. Clients may keep
+  sending open-ended requests; they are now answered against the tip as of the moment the request
+  arrived (GHSA-x4m7-3gpp-xc36).
 
 ### Dependencies
 - Re-bumped the NU6.3 librustzcash cohort from the pre-release pins to the published finals
