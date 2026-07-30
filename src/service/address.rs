@@ -2,6 +2,7 @@
 //! (and its streaming variant), and `GetAddressUtxos` (and its streaming variant).
 
 use async_stream::try_stream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
 use crate::encoding;
@@ -88,18 +89,27 @@ pub(super) async fn get_taddress_balance(
     }))
 }
 
+/// Accumulate the addresses a client streams in, validating and bounding each one as it arrives.
+/// Rejecting mid-stream means a malformed or over-long stream is refused at the offending message
+/// instead of after the whole stream has been received.
+async fn collect_streamed_addresses(
+    incoming: impl Stream<Item = Result<Address, Status>>,
+) -> Result<Vec<String>, Status> {
+    let mut incoming = std::pin::pin!(incoming);
+    let mut addresses = Vec::new();
+    while let Some(address) = incoming.next().await {
+        let address = address?.address;
+        check_taddress(&address)?;
+        push_bounded(&mut addresses, address)?;
+    }
+    Ok(addresses)
+}
+
 pub(super) async fn get_taddress_balance_stream(
     streamer: &Streamer,
     request: Request<tonic::Streaming<Address>>,
 ) -> Result<Response<Balance>, Status> {
-    let mut incoming = request.into_inner();
-    let mut addresses = Vec::new();
-    while let Some(address) = incoming.message().await? {
-        push_bounded(&mut addresses, address.address)?;
-    }
-    for address in &addresses {
-        check_taddress(address)?;
-    }
+    let addresses = collect_streamed_addresses(request.into_inner()).await?;
     let balance = streamer
         .node
         .get_address_balance(&addresses)
@@ -219,9 +229,30 @@ async fn taddress_transactions(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio_stream::StreamExt;
     use tonic::Code;
 
-    use super::{MAX_STREAMED_ADDRESSES, push_bounded};
+    use super::{Address, MAX_STREAMED_ADDRESSES, collect_streamed_addresses, push_bounded};
+    use crate::testutil::example_taddress;
+
+    /// A client stream over `addresses` that counts how many messages the server pulled from it.
+    fn counted_stream(
+        addresses: Vec<String>,
+    ) -> (
+        impl tokio_stream::Stream<Item = Result<Address, tonic::Status>>,
+        Arc<AtomicUsize>,
+    ) {
+        let received = Arc::new(AtomicUsize::new(0));
+        let counter = received.clone();
+        let stream = tokio_stream::iter(addresses).map(move |address| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(Address { address })
+        });
+        (stream, received)
+    }
 
     #[test]
     fn push_bounded_accepts_up_to_the_cap() {
@@ -237,5 +268,39 @@ mod tests {
         let mut addresses = vec!["t".to_string(); MAX_STREAMED_ADDRESSES];
         let status = push_bounded(&mut addresses, "t".to_string()).unwrap_err();
         assert_eq!(status.code(), Code::ResourceExhausted);
+    }
+
+    #[tokio::test]
+    async fn collect_streamed_addresses_accumulates_a_well_formed_stream() {
+        let (stream, _received) = counted_stream(vec![example_taddress(); 3]);
+
+        let addresses = collect_streamed_addresses(stream).await.unwrap();
+
+        assert_eq!(addresses, vec![example_taddress(); 3]);
+    }
+
+    #[tokio::test]
+    async fn collect_streamed_addresses_rejects_an_invalid_address_without_draining_the_stream() {
+        let (stream, received) = counted_stream(vec![
+            example_taddress(),
+            "not_a_real_address".to_string(),
+            example_taddress(),
+        ]);
+
+        let status = collect_streamed_addresses(stream).await.unwrap_err();
+
+        assert_eq!(status.code(), Code::InvalidArgument);
+        assert_eq!(received.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn collect_streamed_addresses_rejects_over_the_cap_without_draining_the_stream() {
+        let (stream, received) =
+            counted_stream(vec![example_taddress(); MAX_STREAMED_ADDRESSES + 2]);
+
+        let status = collect_streamed_addresses(stream).await.unwrap_err();
+
+        assert_eq!(status.code(), Code::ResourceExhausted);
+        assert_eq!(received.load(Ordering::SeqCst), MAX_STREAMED_ADDRESSES + 1);
     }
 }
