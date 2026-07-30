@@ -122,6 +122,9 @@ All notable changes to this project are documented here. The format is loosely b
   cannot push down `startHeight`/`maxEntries`, so the whole result was materialized before those
   filters applied and one unauthenticated request could force unbounded backend work
   (GHSA-x4m7-3gpp-xc36).
+- `GetTaddressBalanceStream` now validates each address as it arrives instead of after the whole
+  client stream has been received, so a stream is refused at the first malformed address rather than
+  after the server has consumed every message (GHSA-x4m7-3gpp-xc36).
 
 ### Dependencies
 - Re-bumped the NU6.3 librustzcash cohort from the pre-release pins to the published finals
