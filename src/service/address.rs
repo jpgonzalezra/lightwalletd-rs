@@ -12,8 +12,9 @@ use crate::proto::{
 
 use super::{Streamer, decode_hex, mined_height};
 
-/// Max addresses a single `GetTaddressBalance`/`GetTaddressBalanceStream` request may carry
-/// before the server rejects it, bounding the per-request accumulation.
+/// Max addresses a single transparent-address request may carry before the server rejects it,
+/// bounding the per-request accumulation across `GetTaddressBalance`, its streaming variant, and
+/// `GetAddressUtxos`.
 pub(super) const MAX_STREAMED_ADDRESSES: usize = 10_000;
 
 /// Max matching txids a single `GetTaddressTransactions`/`GetTaddressTxids` request may have before
@@ -128,10 +129,19 @@ pub(super) async fn get_address_utxos_stream(
 
 /// Fetch the UTXOs for the requested addresses, apply the `startHeight`/`maxEntries` filters, and
 /// convert them into the gRPC reply shape.
+///
+/// The address count is capped before the node call: `getaddressutxos` cannot push down
+/// `startHeight`/`maxEntries`, so the whole backend result is materialized before those filters
+/// apply, and an uncapped address list would turn one request into unbounded backend work.
 pub(super) async fn collect_utxos(
     streamer: &Streamer,
     arg: &GetAddressUtxosArg,
 ) -> Result<Vec<GetAddressUtxosReply>, Status> {
+    if arg.addresses.len() > MAX_STREAMED_ADDRESSES {
+        return Err(Status::resource_exhausted(format!(
+            "get_address_utxos: too many addresses submitted (limit {MAX_STREAMED_ADDRESSES})"
+        )));
+    }
     for address in &arg.addresses {
         check_taddress(address)?;
     }

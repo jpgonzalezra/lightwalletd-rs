@@ -66,6 +66,47 @@ async fn collect_utxos_reverses_txid_and_applies_start_height_and_max_entries() 
 }
 
 #[tokio::test]
+async fn collect_utxos_accepts_addresses_up_to_the_cap() {
+    let fake = Arc::new(FakeNode {
+        address_utxos: Some(Vec::new()),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake);
+
+    let replies = collect_utxos(
+        &streamer,
+        &GetAddressUtxosArg {
+            addresses: vec![taddr(); MAX_STREAMED_ADDRESSES],
+            start_height: 0,
+            max_entries: 0,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(replies, Vec::new());
+}
+
+#[tokio::test]
+async fn collect_utxos_rejects_too_many_addresses() {
+    // The FakeNode panics on any RPC, so a passing test proves the cap rejects before the node call.
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+
+    let status = collect_utxos(
+        &streamer,
+        &GetAddressUtxosArg {
+            addresses: vec![taddr(); MAX_STREAMED_ADDRESSES + 1],
+            start_height: 0,
+            max_entries: 0,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(status.code(), Code::ResourceExhausted);
+}
+
+#[tokio::test]
 async fn get_taddress_balance_returns_value_zat() {
     let fake = Arc::new(FakeNode {
         address_balance: Some(serde_json::from_value(json!({ "balance": 4242 })).unwrap()),

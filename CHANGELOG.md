@@ -116,6 +116,13 @@ All notable changes to this project are documented here. The format is loosely b
   `JoinError::Cancelled`; it now logs and skips the missing height, letting the chained prefix end
   cleanly instead of panicking.
 
+### Security
+- `GetAddressUtxos` and its streaming variant now reject an address list longer than
+  `MAX_STREAMED_ADDRESSES` (10,000) with `ResourceExhausted`, before any node call. The backend
+  cannot push down `startHeight`/`maxEntries`, so the whole result was materialized before those
+  filters applied and one unauthenticated request could force unbounded backend work
+  (GHSA-x4m7-3gpp-xc36).
+
 ### Dependencies
 - Re-bumped the NU6.3 librustzcash cohort from the pre-release pins to the published finals
   (ADR 0019): `zcash_address 0.13.0`, `zcash_primitives 0.29.0`, `zcash_protocol 0.10.0` (still
