@@ -11,7 +11,9 @@ use crate::proto::{
     AddressList, Balance, BlockId, BlockRange, GetAddressUtxosArg, GetAddressUtxosReply,
     RawTransaction, TransparentAddressBlockFilter,
 };
-use crate::service::address::{MAX_STREAMED_ADDRESSES, MAX_TADDRESS_TXIDS, collect_utxos};
+use crate::service::address::{
+    MAX_STREAMED_ADDRESSES, MAX_TADDRESS_BLOCK_SPAN, MAX_TADDRESS_TXIDS, collect_utxos,
+};
 use crate::testutil::FakeNode;
 
 use super::{streamer_with, taddr};
@@ -292,6 +294,121 @@ async fn get_taddress_transactions_without_start_is_invalid_argument() {
         .unwrap();
 
     assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+/// A node whose chain tip is at `tip` and whose address index matches nothing.
+fn node_at_tip(tip: u64) -> Arc<FakeNode> {
+    Arc::new(FakeNode {
+        blockchain_info: Some(
+            serde_json::from_value(json!({
+                "chain": "main",
+                "blocks": tip,
+                "bestblockhash": "00",
+                "consensus": { "chaintip": "00000000" },
+            }))
+            .unwrap(),
+        ),
+        address_txids: Some(Vec::new()),
+        ..Default::default()
+    })
+}
+
+fn range_filter(start: u64, end: Option<u64>) -> TransparentAddressBlockFilter {
+    TransparentAddressBlockFilter {
+        address: taddr(),
+        range: Some(BlockRange {
+            start: Some(BlockId {
+                height: start,
+                hash: vec![],
+            }),
+            end: end.map(|height| BlockId {
+                height,
+                hash: vec![],
+            }),
+            ..Default::default()
+        }),
+    }
+}
+
+#[tokio::test]
+async fn get_taddress_transactions_without_an_end_scans_up_to_the_tip() {
+    let fake = node_at_tip(2_000_000);
+    let (_dir, streamer) = streamer_with(fake.clone());
+
+    streamer
+        .get_taddress_transactions(Request::new(range_filter(1_500_000, None)))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *fake.requested_txid_range.lock().unwrap(),
+        Some((1_500_000, 2_000_000))
+    );
+}
+
+#[tokio::test]
+async fn get_taddress_transactions_with_a_zero_end_scans_up_to_the_tip() {
+    let fake = node_at_tip(2_000_000);
+    let (_dir, streamer) = streamer_with(fake.clone());
+
+    streamer
+        .get_taddress_transactions(Request::new(range_filter(1_500_000, Some(0))))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *fake.requested_txid_range.lock().unwrap(),
+        Some((1_500_000, 2_000_000))
+    );
+}
+
+#[tokio::test]
+async fn get_taddress_transactions_keeps_an_explicit_end() {
+    let fake = node_at_tip(2_000_000);
+    let (_dir, streamer) = streamer_with(fake.clone());
+
+    streamer
+        .get_taddress_transactions(Request::new(range_filter(1_500_000, Some(1_600_000))))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *fake.requested_txid_range.lock().unwrap(),
+        Some((1_500_000, 1_600_000))
+    );
+}
+
+#[tokio::test]
+async fn get_taddress_transactions_rejects_an_over_wide_range() {
+    // The FakeNode panics on any RPC, so a passing test proves the span check rejects before it.
+    let (_dir, streamer) = streamer_with(Arc::new(FakeNode::default()));
+
+    let status = streamer
+        .get_taddress_transactions(Request::new(range_filter(0, Some(u64::MAX))))
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn get_taddress_transactions_accepts_a_range_at_the_span_limit() {
+    let fake = node_at_tip(2_000_000);
+    let (_dir, streamer) = streamer_with(fake.clone());
+
+    streamer
+        .get_taddress_transactions(Request::new(range_filter(
+            1,
+            Some(1 + MAX_TADDRESS_BLOCK_SPAN),
+        )))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *fake.requested_txid_range.lock().unwrap(),
+        Some((1, 1 + MAX_TADDRESS_BLOCK_SPAN))
+    );
 }
 
 #[tokio::test]

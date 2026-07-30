@@ -186,6 +186,7 @@ Wallet-facing contract and hardening:
 - [0011](decisions/0011-up-front-input-validation.md) — malformed requests are rejected up front, before any node round-trip or stream is opened.
 - [0012](decisions/0012-tls-default-insecure-flags.md) — TLS is on by default; dangerous/testing features are gated behind off-by-default `*-very-insecure` flags.
 - [0013](decisions/0013-resource-limits.md) — the server bounds the resources a client can hold or accumulate (configurable stream/keepalive limits plus per-request caps).
+- [0025](decisions/0025-taddress-range-bounds.md) — an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
 - [0015](decisions/0015-layered-testing-strategy.md) — testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.
 - [0016](decisions/0016-test-placement-by-visibility.md) — tests are placed by visibility: handler tests grouped by family under `service/tests/`, private internals tested inline in their own module.
 
@@ -220,6 +221,14 @@ Three per-request caps bound the work a single request can accumulate or trigger
   `MAX_TADDRESS_TXIDS` (10,000): the txid list is fetched first and a wider result is rejected with
   `ResourceExhausted` before any per-txid fetch, so one request cannot pin the node on an unbounded
   fetch loop. The client narrows its block range to proceed.
+
+The same two methods also bound the address-index scan that produces those txids
+([0025](decisions/0025-taddress-range-bounds.md)): a range with no `end` (or an `end` of zero, which
+is how an omitted bound reaches the server) is pinned to the chain tip at request time rather than
+scanning open-endedly, a span wider than `MAX_TADDRESS_BLOCK_SPAN` (10,000,000 blocks) is rejected
+with `InvalidArgument` before the node is contacted, and a single 30 s deadline
+(`TADDRESS_SCAN_DEADLINE`) covers the tip lookup, the scan, and the per-txid fetches, so an abandoned
+request cannot keep a node connection busy indefinitely.
 
 Snapshot serving, when enabled, adds one more: `--snapshot-max-concurrent-downloads` (default 4)
 bounds how many epoch bodies are streamed at once, and a request past the cap is refused with `429`

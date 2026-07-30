@@ -136,6 +136,8 @@ pub struct FakeNode {
     pub raw_mempool: Option<Vec<String>>,
     /// Captures the txid string the service passed to `get_raw_transaction`.
     pub requested_txid: Mutex<Option<String>>,
+    /// Captures the `(start, end)` heights the service passed to `get_address_txids`.
+    pub requested_txid_range: Mutex<Option<(u64, u64)>>,
     /// Captures the id string (height or display-order hex hash) the service passed to
     /// `get_treestate`.
     pub requested_treestate_id: Mutex<Option<String>>,
@@ -275,9 +277,10 @@ impl NodeRpc for FakeNode {
     async fn get_address_txids(
         &self,
         _addresses: &[String],
-        _start: u64,
-        _end: u64,
+        start: u64,
+        end: u64,
     ) -> Result<Vec<String>, NodeError> {
+        *self.requested_txid_range.lock().unwrap() = Some((start, end));
         if let Some((code, message)) = self.address_txids_err.clone() {
             return Err(NodeError::Rpc { code, message });
         }
