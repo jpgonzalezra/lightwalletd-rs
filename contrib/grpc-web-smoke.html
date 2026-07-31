@@ -75,6 +75,7 @@
         let value = 0n;
         let shift = 0n;
         while (true) {
+          if (offset >= bytes.length) throw new Error("varint runs past the end of the response");
           const byte = bytes[offset++];
           value |= BigInt(byte & 0x7f) << shift;
           if ((byte & 0x80) === 0) return [value, offset];
