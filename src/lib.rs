@@ -5,7 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use http::{HeaderName, Method, header};
 use tonic::transport::{Identity, Server, ServerTlsConfig};
+use tonic_web::GrpcWebLayer;
+use tower::layer::util::{Identity as NoLayer, Stack};
+use tower::util::{Either, option_layer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub mod cache;
 pub mod config;
@@ -43,13 +48,13 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         });
     }
 
-    let mut server = Server::builder()
-        .concurrency_limit_per_connection(config.limits.max_concurrent_streams as usize)
-        .max_concurrent_streams(Some(config.limits.max_concurrent_streams))
-        .tcp_keepalive(Some(config.limits.keepalive_interval))
-        .http2_keepalive_interval(Some(config.limits.keepalive_interval))
-        .http2_keepalive_timeout(Some(config.limits.keepalive_timeout))
-        .layer(tonic_prometheus_layer::MetricsLayer::new());
+    let mut server = server_builder(&config.limits, config.grpc_web.as_ref());
+    if config.grpc_web.is_some() {
+        tracing::info!(
+            grpc_bind = %config.grpc_bind,
+            "serving gRPC-web on the gRPC port; the server now accepts HTTP/1.1 as well as HTTP/2"
+        );
+    }
     match &config.tls {
         config::TlsConfig::Enabled { cert, key } => {
             let identity = Identity::from_pem(std::fs::read(cert)?, std::fs::read(key)?);
@@ -271,6 +276,90 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     tracing::info!("server stopped");
 
     Ok(())
+}
+
+/// The middleware stack every served transport carries, from outermost to innermost: CORS, so a
+/// browser preflight is answered before anything else sees it; Prometheus metrics; and the gRPC-web
+/// translation, so the router below only ever sees a plain gRPC request. The two gRPC-web layers
+/// are `Either`s rather than a second builder branch, which keeps one concrete server type whether
+/// the transport is on or off.
+type TransportLayers = Stack<
+    Either<GrpcWebLayer, NoLayer>,
+    Stack<tonic_prometheus_layer::MetricsLayer, Stack<Either<CorsLayer, NoLayer>, NoLayer>>,
+>;
+
+/// How long a browser may cache a gRPC-web preflight. One round trip per method per browser session
+/// is pure overhead on a wallet that calls many methods, and the policy this server answers with is
+/// static for the lifetime of the process.
+const GRPC_WEB_PREFLIGHT_MAX_AGE: Duration = Duration::from_secs(3600);
+
+/// Build the gRPC server with the limits (ADR 0013) and middleware both serve paths use, optionally
+/// carrying the gRPC-web transport (ADR 0026). `pub` so the in-process test harness
+/// (`tests/common/mod.rs`) exercises the very same stack a deployment gets, rather than a
+/// look-alike assembled in the test.
+///
+/// Enabling gRPC-web also enables HTTP/1.1, which a browser needs on a plaintext port; over TLS it
+/// is redundant, since ALPN settles on HTTP/2 there and gRPC-web rides that just as well.
+pub fn server_builder(
+    limits: &config::ServerLimits,
+    grpc_web: Option<&config::GrpcWebOrigins>,
+) -> Server<TransportLayers> {
+    Server::builder()
+        .concurrency_limit_per_connection(limits.max_concurrent_streams as usize)
+        .max_concurrent_streams(Some(limits.max_concurrent_streams))
+        .tcp_keepalive(Some(limits.keepalive_interval))
+        .http2_keepalive_interval(Some(limits.keepalive_interval))
+        .http2_keepalive_timeout(Some(limits.keepalive_timeout))
+        .accept_http1(grpc_web.is_some())
+        .layer(option_layer(grpc_web.map(cors_layer)))
+        .layer(tonic_prometheus_layer::MetricsLayer::new())
+        .layer(option_layer(grpc_web.map(|_| GrpcWebLayer::new())))
+}
+
+/// The CORS policy the gRPC-web transport answers with.
+///
+/// `grpc-status` and `grpc-message` are exposed because gRPC carries the call's outcome there
+/// whenever the server answers with trailers-only (every early rejection: `Unimplemented`,
+/// `InvalidArgument`, a failed deadline). A browser hands JavaScript only the headers a server
+/// exposed, so without this the call fails with its reason stripped off, and nothing in the symptom
+/// mentions CORS.
+fn cors_layer(origins: &config::GrpcWebOrigins) -> CorsLayer {
+    let allow_origin = match origins {
+        config::GrpcWebOrigins::Any => AllowOrigin::any(),
+        config::GrpcWebOrigins::Only(allowed) => {
+            // Compared as bytes against the header the browser sent, which is exactly the form
+            // `config::validate_origin` already accepted: no parsing here that could fail.
+            let allowed = allowed.clone();
+            AllowOrigin::predicate(move |origin, _parts| {
+                allowed
+                    .iter()
+                    .any(|candidate| candidate.as_bytes() == origin.as_bytes())
+            })
+        }
+    };
+    CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_methods([Method::POST])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            // Unused by this server, allowed so a deployment fronted by token auth is not left
+            // failing its preflights with no way to widen the policy.
+            header::AUTHORIZATION,
+            HeaderName::from_static("x-grpc-web"),
+            HeaderName::from_static("x-user-agent"),
+            HeaderName::from_static("grpc-timeout"),
+            HeaderName::from_static("grpc-encoding"),
+            HeaderName::from_static("grpc-accept-encoding"),
+        ])
+        .expose_headers([
+            HeaderName::from_static("grpc-status"),
+            HeaderName::from_static("grpc-message"),
+            HeaderName::from_static("grpc-status-details-bin"),
+            HeaderName::from_static("grpc-encoding"),
+            HeaderName::from_static("grpc-accept-encoding"),
+        ])
+        .max_age(GRPC_WEB_PREFLIGHT_MAX_AGE)
 }
 
 /// Build the gRPC Server Reflection (v1) service, advertising every method in

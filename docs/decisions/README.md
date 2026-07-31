@@ -32,3 +32,4 @@ choice stays discoverable after the fact. The living overview is
 | [0023](0023-zebra-readstate-backend.md) | Hybrid Zebra ReadStateService backend behind the NodeRpc seam |
 | [0024](0024-snapshot-bootstrap.md) | Bootstrap the cache from a peer's snapshot, anchored to the operator's own node |
 | [0025](0025-taddress-range-bounds.md) | Pin an open-ended transparent-address range to the chain tip and bound its span |
+| [0026](0026-grpc-web-support.md) | Serve gRPC-web natively, behind an off-by-default runtime flag |

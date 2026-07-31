@@ -95,6 +95,8 @@ over the file.
 | `--data-dir` | `./lightwalletd-rs-data` | directory for the on-disk block cache |
 | `--start-height` | Sapling activation | height to ingest from when the cache is empty |
 | `--tls-cert` / `--tls-key` | — | PEM certificate / key (required unless `--no-tls-very-insecure` or `--gen-cert-very-insecure`) |
+| `--grpc-web` | off | also serve gRPC-web, so a browser wallet needs no proxy (see [gRPC-web](#grpc-web)) |
+| `--grpc-web-allow-origin` | any origin | browser origin allowed to call the gRPC-web transport (repeatable) |
 | `--metrics-bind` | `127.0.0.1:9068` | address to serve Prometheus `/metrics` on (disable with `--no-metrics`) |
 | `--log-level` | `info` | tracing filter (an explicit `RUST_LOG` env var always wins) |
 | `--log-file` | — | write JSON lines here instead of human-readable stderr output |
@@ -164,6 +166,30 @@ openssl req -x509 -newkey rsa:4096 -nodes -keyout key.pem -out cert.pem -days 36
 ```
 
 See [`docs/ARCHITECTURE.md#tls`](docs/ARCHITECTURE.md#tls) for details.
+
+## gRPC-web
+
+Browsers cannot speak gRPC. `--grpc-web` serves the gRPC-web translation of the same API from the same
+port, so a web wallet talks to this server directly instead of through Envoy or `grpcwebproxy`:
+
+```sh
+lightwalletd-rs ... --grpc-web --grpc-web-allow-origin https://wallet.example
+```
+
+It is off by default: enabling it also makes the listener accept HTTP/1.1, which a browser needs on a
+plaintext port. `--grpc-web-allow-origin` is repeatable and restricts the transport to an allowlist;
+with none given every origin is allowed, which is the usual shape for a public instance serving wallets
+on many origins. Origins are validated at startup against the exact `scheme://host[:port]` form a
+browser sends, so a trailing slash or a stray path fails loudly instead of denying the origin it was
+meant to allow.
+
+Note that gRPC-web cannot carry a client-streamed request, so `GetTaddressBalanceStream` is unreachable
+from a browser; use the unary `GetTaddressBalance`. All server-streaming methods work.
+
+[`contrib/grpc-web-smoke.html`](contrib/grpc-web-smoke.html) is a dependency-free page that calls
+`GetLightdInfo` over this transport, for checking a deployment from a real browser. See
+[`docs/ARCHITECTURE.md#grpc-web`](docs/ARCHITECTURE.md#grpc-web) and
+[ADR 0026](docs/decisions/0026-grpc-web-support.md).
 
 ## Observability
 

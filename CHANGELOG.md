@@ -5,6 +5,20 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+### gRPC-web
+- **Serve gRPC-web from the gRPC port** (ADR 0026) behind `--grpc-web`, so a browser wallet reaches
+  the server directly instead of through a translating proxy. Off by default, because enabling it
+  also makes the listener accept HTTP/1.1. `--grpc-web-allow-origin` (repeatable) restricts the
+  transport to an allowlist; with none given every origin is allowed and startup says why that is a
+  choice. Origins are validated at startup against the exact `scheme://host[:port]` form a browser
+  sends, since a value that cannot match would only surface as an opaque CORS error.
+- `grpc-status`, `grpc-message` and `grpc-status-details-bin` are exposed to JavaScript: gRPC carries
+  a trailers-only response's outcome in HTTP headers, which a browser hides from a page unless the
+  server exposes them. gRPC-web cannot carry a client-streamed request, so `GetTaddressBalanceStream`
+  is unreachable from a browser; the unary `GetTaddressBalance` and all server-streaming methods work.
+- `contrib/grpc-web-smoke.html`: a dependency-free page that exercises the transport from a real
+  browser, which is the only thing that covers the preflight and the exposed-header rules.
+
 ### Snapshot bootstrap
 - **Bootstrap a fresh cache from a peer** (ADR 0024) instead of ingesting the whole range from the
   node. `--snapshot-serve` publishes this instance's cached blocks over HTTP as fixed 10,000-block

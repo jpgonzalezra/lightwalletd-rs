@@ -5,6 +5,13 @@
 //! own binary and uses only the helpers it needs.
 #![allow(dead_code)]
 
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use lightwalletd_rs::config::{
+    DEFAULT_KEEPALIVE_INTERVAL_SECS, DEFAULT_KEEPALIVE_TIMEOUT_SECS,
+    DEFAULT_MAX_CONCURRENT_STREAMS, GrpcWebOrigins, ServerLimits,
+};
 use lightwalletd_rs::proto::compact_tx_streamer_client::CompactTxStreamerClient;
 use lightwalletd_rs::proto::compact_tx_streamer_server::CompactTxStreamerServer;
 use lightwalletd_rs::proto::darkside_streamer_client::DarksideStreamerClient;
@@ -12,7 +19,7 @@ use lightwalletd_rs::proto::darkside_streamer_server::DarksideStreamerServer;
 use lightwalletd_rs::proto::{
     DarksideBlock, DarksideEmptyBlocks, DarksideHeight, DarksideMetaState, RawTransaction,
 };
-use tonic::transport::{Channel, Endpoint, Server};
+use tonic::transport::{Channel, Endpoint};
 use tonic_reflection::pb::v1::server_reflection_client::ServerReflectionClient;
 use zcash_address::{ToAddress, ZcashAddress};
 use zcash_protocol::consensus::NetworkType;
@@ -25,6 +32,9 @@ pub struct TestServer {
     /// gRPC Server Reflection client, connected to the same server — lets tests verify reflection
     /// is registered (see `tests/reflection.rs`) without spawning a separate real binary.
     pub reflection: ServerReflectionClient<Channel>,
+    /// Address the server is listening on, for tests that drive the transport by hand rather than
+    /// through a generated client (see `tests/grpc_web.rs`).
+    pub addr: SocketAddr,
     server: tokio::task::JoinHandle<()>,
     _cache_dir: tempfile::TempDir,
 }
@@ -33,6 +43,11 @@ impl TestServer {
     /// Wire the darkside components with the shared `lightwalletd_rs::darkside_components` constructor
     /// (the same one `run`'s darkside branch uses), serve on `127.0.0.1:0`, and connect both clients.
     pub async fn start() -> Self {
+        Self::start_with_grpc_web(None).await
+    }
+
+    /// Same, with the gRPC-web transport enabled for the given origins.
+    pub async fn start_with_grpc_web(grpc_web: Option<GrpcWebOrigins>) -> Self {
         let cache_dir = tempfile::tempdir().unwrap();
         let (streamer, darkside_service, _state, _shutdown) =
             lightwalletd_rs::darkside_components(&cache_dir.path().join("blocks.redb")).unwrap();
@@ -42,7 +57,8 @@ impl TestServer {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
         let server = tokio::spawn(async move {
-            Server::builder()
+            // The production builder, so the transport under test is the deployed one.
+            lightwalletd_rs::server_builder(&default_limits(), grpc_web.as_ref())
                 .add_service(CompactTxStreamerServer::new(streamer))
                 .add_service(DarksideStreamerServer::new(darkside_service))
                 .add_service(lightwalletd_rs::reflection_service().unwrap())
@@ -60,6 +76,7 @@ impl TestServer {
             compact: CompactTxStreamerClient::new(channel.clone()),
             darkside: DarksideStreamerClient::new(channel.clone()),
             reflection: ServerReflectionClient::new(channel),
+            addr,
             server,
             _cache_dir: cache_dir,
         }
@@ -124,6 +141,15 @@ impl TestServer {
 impl Drop for TestServer {
     fn drop(&mut self) {
         self.server.abort();
+    }
+}
+
+/// The server limits a deployment gets with no tuning flags.
+fn default_limits() -> ServerLimits {
+    ServerLimits {
+        max_concurrent_streams: DEFAULT_MAX_CONCURRENT_STREAMS,
+        keepalive_interval: Duration::from_secs(DEFAULT_KEEPALIVE_INTERVAL_SECS),
+        keepalive_timeout: Duration::from_secs(DEFAULT_KEEPALIVE_TIMEOUT_SECS),
     }
 }
 

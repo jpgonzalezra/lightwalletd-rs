@@ -132,6 +132,17 @@ pub struct Cli {
     #[arg(long = "gen-cert-very-insecure")]
     pub gen_cert: bool,
 
+    /// Also serve gRPC-web on the gRPC port, so a browser can call this server directly instead of
+    /// through a translating proxy. Off by default, because it makes the server accept HTTP/1.1 as
+    /// well as HTTP/2 (ADR 0026).
+    #[arg(long)]
+    pub grpc_web: bool,
+
+    /// Browser origin allowed to call the gRPC-web transport, e.g. `https://wallet.example`. Repeat
+    /// the flag for several. Requires `--grpc-web`; with none given, every origin is allowed.
+    #[arg(long = "grpc-web-allow-origin", value_name = "ORIGIN")]
+    pub grpc_web_allow_origin: Vec<String>,
+
     /// Address to serve Prometheus metrics on (`/metrics`). On by default, matching the Go
     /// reference's fixed `:9068`; disable with `--no-metrics`.
     #[arg(long, default_value = "127.0.0.1:9068")]
@@ -287,6 +298,8 @@ pub struct Config {
     pub redownload: bool,
     /// Whether the gRPC server runs over TLS, and with which certificate.
     pub tls: TlsConfig,
+    /// Origins the gRPC-web transport answers, if `--grpc-web` is on.
+    pub grpc_web: Option<GrpcWebOrigins>,
     /// Address to serve Prometheus metrics on, if enabled.
     pub metrics_bind: Option<SocketAddr>,
     /// Snapshot publishing settings, if `--snapshot-serve` is on.
@@ -311,6 +324,15 @@ pub struct Config {
     pub ingest: IngestConfig,
     /// Which backend serves chain data, with the settings it needs.
     pub backend: BackendConfig,
+}
+
+/// Which browser origins the gRPC-web transport answers (see `--grpc-web-allow-origin`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrpcWebOrigins {
+    /// Any origin, as a public server serving unauthenticated chain data usually wants.
+    Any,
+    /// Only these origins, each already validated as a `scheme://host[:port]` a browser can send.
+    Only(Vec<String>),
 }
 
 /// How this instance publishes its cache as a downloadable snapshot.
@@ -413,6 +435,7 @@ impl Cli {
     pub fn resolve(self) -> Result<Config> {
         // Resolved first: the rest of this function moves fields out of `self`.
         let snapshot = self.resolve_snapshot()?;
+        let grpc_web = self.resolve_grpc_web()?;
         if let Some(url) = &self.snapshot_url {
             validate_snapshot_url(url)?;
             if self.nocache || self.darkside {
@@ -534,6 +557,7 @@ impl Cli {
             sync_from_height: self.sync_from_height,
             redownload: self.redownload,
             tls,
+            grpc_web,
             metrics_bind: (!self.no_metrics).then_some(self.metrics_bind),
             snapshot,
             snapshot_url: self.snapshot_url,
@@ -553,6 +577,36 @@ impl Cli {
             },
             backend,
         })
+    }
+
+    /// Resolve the gRPC-web transport settings, refusing an allowlist that would never be applied.
+    fn resolve_grpc_web(&self) -> Result<Option<GrpcWebOrigins>> {
+        if !self.grpc_web {
+            // Same reasoning as `--snapshot-bind`: passing an allowlist reads as "I turned this
+            // on", so silently ignoring it would leave the operator to discover it much later.
+            if let Some(origin) = self.grpc_web_allow_origin.first() {
+                anyhow::bail!(
+                    "--grpc-web-allow-origin {origin} has no effect without --grpc-web; pass \
+                     --grpc-web to serve the browser transport too"
+                );
+            }
+            return Ok(None);
+        }
+        if self.grpc_web_allow_origin.is_empty() {
+            tracing::warn!(
+                "--grpc-web without --grpc-web-allow-origin: any web page may call this server \
+                 from its visitors' browsers. Pass --grpc-web-allow-origin to narrow that down — \
+                 but note CORS only bounds which origins a browser hands the response to, so it is \
+                 not an authentication mechanism"
+            );
+            return Ok(Some(GrpcWebOrigins::Any));
+        }
+        let origins = self
+            .grpc_web_allow_origin
+            .iter()
+            .map(|origin| validate_origin(origin))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(GrpcWebOrigins::Only(origins)))
     }
 
     /// Resolve the snapshot publishing settings, refusing combinations that would advertise
@@ -604,6 +658,32 @@ impl Cli {
             compression_level: self.snapshot_compression_level,
         }))
     }
+}
+
+/// Reject a `--grpc-web-allow-origin` value no browser would ever send.
+///
+/// An `Origin` header is exactly `scheme://host[:port]`, compared byte for byte against the
+/// allowlist. A value carrying a path, a trailing slash or an explicit default port therefore
+/// matches nothing, and the failure surfaces in the browser as an opaque CORS error rather than as
+/// anything pointing back at this flag — so it is rejected at startup, with the form that works.
+fn validate_origin(origin: &str) -> Result<String> {
+    let parsed = reqwest::Url::parse(origin).with_context(|| {
+        format!("--grpc-web-allow-origin {origin:?} is not a valid origin (scheme://host[:port])")
+    })?;
+    let serialized = parsed.origin().ascii_serialization();
+    if !parsed.origin().is_tuple() {
+        anyhow::bail!(
+            "--grpc-web-allow-origin {origin:?} has no origin a browser could send; use a \
+             scheme://host[:port] origin such as https://wallet.example"
+        );
+    }
+    if serialized != origin {
+        anyhow::bail!(
+            "--grpc-web-allow-origin {origin:?} is not what a browser sends in its Origin header; \
+             pass {serialized:?} instead"
+        );
+    }
+    Ok(serialized)
 }
 
 /// Reject a `--snapshot-url` nothing could ever be fetched from.
@@ -826,6 +906,8 @@ mod tests {
             tls_key: None,
             no_tls: true,
             gen_cert: false,
+            grpc_web: false,
+            grpc_web_allow_origin: Vec::new(),
             metrics_bind: "127.0.0.1:9068".parse().unwrap(),
             no_metrics: false,
             snapshot_serve: false,
@@ -1039,6 +1121,94 @@ mod tests {
     fn resolve_rejects_zero_keepalive() {
         let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
         cli.keepalive_interval_secs = 0;
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn grpc_web_is_off_by_default() {
+        let config = cli_with(None, None, Some("http://node"), None, None, None)
+            .resolve()
+            .unwrap();
+        assert_eq!(config.grpc_web, None);
+    }
+
+    #[test]
+    fn grpc_web_without_an_allowlist_answers_any_origin() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.grpc_web = true;
+
+        let config = cli.resolve().unwrap();
+
+        assert_eq!(config.grpc_web, Some(GrpcWebOrigins::Any));
+    }
+
+    #[test]
+    fn grpc_web_keeps_the_configured_origin_allowlist() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.grpc_web = true;
+        cli.grpc_web_allow_origin = vec![
+            "http://localhost:3000".to_string(),
+            "https://wallet.example".to_string(),
+        ];
+
+        let config = cli.resolve().unwrap();
+
+        assert_eq!(
+            config.grpc_web,
+            Some(GrpcWebOrigins::Only(vec![
+                "http://localhost:3000".to_string(),
+                "https://wallet.example".to_string(),
+            ]))
+        );
+    }
+
+    #[test]
+    fn an_allowed_origin_without_grpc_web_is_an_error() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.grpc_web_allow_origin = vec!["https://wallet.example".to_string()];
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn an_allowed_origin_with_a_trailing_slash_is_rejected_with_the_form_that_works() {
+        // A browser sends `https://wallet.example`, so the trailing slash would match nothing and
+        // surface as an opaque CORS error rather than as anything pointing at this flag.
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.grpc_web = true;
+        cli.grpc_web_allow_origin = vec!["https://wallet.example/".to_string()];
+
+        let error = cli.resolve().unwrap_err().to_string();
+
+        assert!(error.contains("\"https://wallet.example\""));
+    }
+
+    #[test]
+    fn an_allowed_origin_carrying_a_path_is_rejected() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.grpc_web = true;
+        cli.grpc_web_allow_origin = vec!["https://wallet.example/app".to_string()];
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn an_allowed_origin_that_is_not_a_url_is_rejected() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.grpc_web = true;
+        cli.grpc_web_allow_origin = vec!["wallet.example".to_string()];
+
+        assert!(cli.resolve().is_err());
+    }
+
+    #[test]
+    fn an_allowed_origin_with_no_tuple_origin_is_rejected() {
+        // `file://` URLs have an opaque origin: a browser sends `Origin: null` for them, which an
+        // allowlist entry can never usefully name.
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.grpc_web = true;
+        cli.grpc_web_allow_origin = vec!["file:///tmp/wallet".to_string()];
+
         assert!(cli.resolve().is_err());
     }
 

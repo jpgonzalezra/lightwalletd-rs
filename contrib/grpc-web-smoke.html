@@ -1,0 +1,192 @@
+<!doctype html>
+<!--
+  Manual smoke test for the gRPC-web transport (ADR 0026), from a real browser. Not run in CI.
+
+  The Rust integration tests (tests/grpc_web.rs) build the same requests by hand, with the right
+  headers already set — so they can pass while a browser still fails. Only a browser exercises the
+  preflight it decides to send on its own, and the rule that JavaScript may read a response header
+  only if the server exposed it. The classic failure is a server that answers correctly but omits
+  grpc-status from Access-Control-Expose-Headers: the response arrives, the client cannot read the
+  call's outcome, and nothing in the error mentions CORS.
+
+  No dependencies and no build step: gRPC-web over HTTP/1.1 is a POST whose body is one byte of
+  flags, four bytes of big-endian length, then the protobuf. GetLightdInfo takes Empty, so the body
+  is five zero bytes, and the reply is parsed here with ~40 lines of protobuf reader.
+
+  Usage — the page must be served over http:// (a file:// page sends `Origin: null`, which no
+  allowlist can match):
+
+      lightwalletd-rs ... --grpc-web --grpc-web-allow-origin http://localhost:3000
+      python3 -m http.server 3000 --directory contrib
+      open http://localhost:3000/grpc-web-smoke.html
+
+  To check that the allowlist actually denies: serve this page on another port (3001) without adding
+  it to --grpc-web-allow-origin. The call must fail, and the browser's Network tab must show the
+  preflight answered without an Access-Control-Allow-Origin header. Read that tab, not the console:
+  for CORS the console message is generic and does not name the cause.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>lightwalletd-rs gRPC-web smoke test</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 46rem; }
+      input { width: 22rem; padding: 0.3rem; }
+      button { padding: 0.3rem 0.9rem; }
+      pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; white-space: pre-wrap; }
+      .fail { color: #a00; }
+    </style>
+  </head>
+  <body>
+    <h1>lightwalletd-rs gRPC-web smoke test</h1>
+    <p>
+      Calls <code>GetLightdInfo</code> over gRPC-web. A clean run prints the server's chain, tip
+      height and version, and a <code>grpc-status</code> of 0, with nothing in the browser console.
+    </p>
+    <p>
+      <label>Server: <input id="server" value="http://127.0.0.1:9067" /></label>
+      <button id="call">Call GetLightdInfo</button>
+    </p>
+    <pre id="output">Ready.</pre>
+
+    <script>
+      const SERVICE = "cash.z.wallet.sdk.rpc.CompactTxStreamer";
+      // LightdInfo, from proto/service.proto. Only the fields worth eyeballing.
+      const FIELDS = {
+        1: "version",
+        2: "vendor",
+        4: "chainName",
+        5: "saplingActivationHeight",
+        6: "consensusBranchId",
+        7: "blockHeight",
+        12: "estimatedHeight",
+        15: "donationAddress",
+        18: "lightwalletProtocolVersion",
+      };
+
+      const output = document.getElementById("output");
+      const show = (text, failed) => {
+        output.textContent = text;
+        output.className = failed ? "fail" : "";
+      };
+
+      /** Read a base-128 varint, returning [value, nextOffset]. */
+      function varint(bytes, offset) {
+        let value = 0n;
+        let shift = 0n;
+        while (true) {
+          if (offset >= bytes.length) throw new Error("varint runs past the end of the response");
+          const byte = bytes[offset++];
+          value |= BigInt(byte & 0x7f) << shift;
+          if ((byte & 0x80) === 0) return [value, offset];
+          shift += 7n;
+        }
+      }
+
+      /** Decode the protobuf fields named in FIELDS; skip everything else. */
+      function decodeMessage(bytes) {
+        const decoded = {};
+        let offset = 0;
+        while (offset < bytes.length) {
+          let key;
+          [key, offset] = varint(bytes, offset);
+          const field = Number(key >> 3n);
+          const wireType = Number(key & 7n);
+          let value;
+          if (wireType === 0) {
+            [value, offset] = varint(bytes, offset);
+            value = value.toString();
+          } else if (wireType === 2) {
+            let length;
+            [length, offset] = varint(bytes, offset);
+            const end = offset + Number(length);
+            value = new TextDecoder().decode(bytes.subarray(offset, end));
+            offset = end;
+          } else if (wireType === 5) {
+            offset += 4;
+            continue;
+          } else if (wireType === 1) {
+            offset += 8;
+            continue;
+          } else {
+            throw new Error(`unsupported protobuf wire type ${wireType}`);
+          }
+          if (FIELDS[field]) decoded[FIELDS[field]] = value;
+        }
+        return decoded;
+      }
+
+      /** Split a gRPC-web body into message frames and the trailer frame. */
+      function decodeFrames(bytes) {
+        const messages = [];
+        let trailers = "";
+        let offset = 0;
+        while (offset + 5 <= bytes.length) {
+          const flags = bytes[offset];
+          const view = new DataView(bytes.buffer, bytes.byteOffset + offset + 1, 4);
+          const length = view.getUint32(0);
+          const payload = bytes.subarray(offset + 5, offset + 5 + length);
+          if (flags & 0x80) {
+            trailers = new TextDecoder().decode(payload);
+          } else {
+            messages.push(payload);
+          }
+          offset += 5 + length;
+        }
+        return { messages, trailers };
+      }
+
+      async function callGetLightdInfo() {
+        const server = document.getElementById("server").value.replace(/\/$/, "");
+        show("Calling…", false);
+        let response;
+        try {
+          response = await fetch(`${server}/${SERVICE}/GetLightdInfo`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/grpc-web+proto",
+              "x-grpc-web": "1",
+            },
+            // Empty message: flags 0, length 0, no payload.
+            body: new Uint8Array([0, 0, 0, 0, 0]),
+          });
+        } catch (error) {
+          show(
+            `The request never completed: ${error}\n\n` +
+              "Most likely the browser blocked it. Open the Network tab and read the response " +
+              "headers of the OPTIONS preflight: the console message for a CORS failure is " +
+              "generic and does not name the cause. Check that the server runs with --grpc-web " +
+              "and that this page's origin is in --grpc-web-allow-origin.",
+            true,
+          );
+          return;
+        }
+
+        const body = new Uint8Array(await response.arrayBuffer());
+        const { messages, trailers } = decodeFrames(body);
+        // A trailers-only answer (every early error) carries the status in the HTTP headers
+        // instead, which is readable only because the server exposes those two header names.
+        const status = trailers.trim() || [
+          `grpc-status:${response.headers.get("grpc-status")}`,
+          `grpc-message:${response.headers.get("grpc-message")}`,
+        ].join("\n");
+        const failed = !/grpc-status:\s*0\b/.test(status);
+        const info = messages.length ? decodeMessage(messages[0]) : {};
+
+        show(
+          [
+            `HTTP ${response.status} ${response.statusText}`,
+            `content-type: ${response.headers.get("content-type")}`,
+            "",
+            JSON.stringify(info, null, 2),
+            "",
+            status,
+          ].join("\n"),
+          failed,
+        );
+      }
+
+      document.getElementById("call").addEventListener("click", callGetLightdInfo);
+    </script>
+  </body>
+</html>
