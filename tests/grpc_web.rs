@@ -260,6 +260,37 @@ async fn a_call_exposes_the_grpc_status_headers_to_javascript() {
     }
 }
 
+/// The case the exposed headers exist for. A call rejected before any message is written answers
+/// trailers-only, which gRPC-web carries as HTTP headers rather than as a trailer frame in the body:
+/// a browser reads the outcome off the response itself, and only because those headers are exposed.
+#[tokio::test]
+async fn a_rejected_call_over_grpc_web_carries_its_status_in_the_headers_and_sends_no_frames() {
+    let server = server_with_blocks().await;
+    let client = browser_like_client();
+
+    // What a client built against a newer `service.proto` sends: a method this server does not have.
+    let response = call(
+        &client,
+        server.addr,
+        "NoSuchMethod",
+        EMPTY_MESSAGE,
+        WALLET_ORIGIN,
+    )
+    .await;
+
+    let status = response.status();
+    let grpc_status = response
+        .headers()
+        .get("grpc-status")
+        .map(|value| value.to_str().unwrap().to_string());
+    let body = response.bytes().await.unwrap();
+    // `Unimplemented` (12) in the headers, and nothing in the body to decode it from.
+    assert_eq!(
+        (status, grpc_status.as_deref(), body.len()),
+        (StatusCode::OK, Some("12"), 0)
+    );
+}
+
 #[tokio::test]
 async fn a_preflight_from_an_origin_outside_the_allowlist_is_not_granted() {
     let server = server_with_blocks().await;
