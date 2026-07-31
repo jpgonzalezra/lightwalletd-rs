@@ -343,6 +343,9 @@ fn cors_layer(origins: &config::GrpcWebOrigins) -> CorsLayer {
         .allow_headers([
             header::CONTENT_TYPE,
             header::ACCEPT,
+            // Unused by this server, allowed so a deployment fronted by token auth is not left
+            // failing its preflights with no way to widen the policy.
+            header::AUTHORIZATION,
             HeaderName::from_static("x-grpc-web"),
             HeaderName::from_static("x-user-agent"),
             HeaderName::from_static("grpc-timeout"),

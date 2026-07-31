@@ -219,6 +219,7 @@ async fn a_preflight_from_an_allowed_origin_permits_every_header_a_grpc_web_clie
     // A header missing here fails the preflight, and the call never leaves the browser.
     for header in [
         "content-type",
+        "authorization",
         "x-grpc-web",
         "x-user-agent",
         "grpc-timeout",

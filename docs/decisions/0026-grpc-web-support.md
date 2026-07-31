@@ -65,4 +65,6 @@ the integration tests exercise the deployed stack rather than a look-alike assem
   covers that last step manually, outside CI.
 - The CORS policy is fixed apart from the origin list. Allowed request headers, exposed response
   headers and the preflight lifetime are what a gRPC-web client needs; making them tunable would
-  invite policies that silently break clients.
+  invite policies that silently break clients. `authorization` is allowed on the request even though
+  this server never reads it, because the alternative is a deployment behind token auth whose
+  preflights fail with no way to widen the policy.
