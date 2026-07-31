@@ -1,4 +1,4 @@
-# 0026. Serve gRPC-web natively, behind an off-by-default flag
+# 0026. Serve gRPC-web natively, behind an off-by-default runtime flag
 
 ## Context
 
@@ -45,6 +45,12 @@ Serve gRPC-web from the gRPC port, off by default, enabled with `--grpc-web`.
   exposed. Without this, such calls reach the client with their reason stripped off.
 - Preflights are cached for an hour (`Access-Control-Max-Age`), since the policy is static for the
   life of the process and a wallet calls many methods.
+- The gate is the runtime flag and nothing else: the transport is compiled in unconditionally, with
+  no Cargo feature behind it. `tonic-web` is the only new crate, its dependencies are already in the
+  tree, and CORS is a feature of a `tower-http` this build already carries, so a feature would save
+  nothing measurable at build time while adding a second axis on which a deployment can lack the
+  transport. That is the opposite of `readstate`, which is feature-gated precisely because it pulls
+  RocksDB and the zebra crate tree.
 
 Both layers are wired as `tower::util::option_layer`, so an enabled and a disabled server are the
 same concrete type. That keeps one `server_builder` for both serve paths (live and darkside) and lets
@@ -59,6 +65,11 @@ the integration tests exercise the deployed stack rather than a look-alike assem
   from a browser; its unary sibling is not. All eight server-streaming methods work.
 - With the flag on, the listener accepts HTTP/1.1, so it answers requests it previously dropped at
   the connection preface. That is the point of the flag being explicit and off by default.
+- The per-connection limits of [0013](0013-resource-limits.md) are HTTP/2 mechanisms
+  (`max_concurrent_streams`, the keepalive pair), so they bound nothing on an HTTP/1.1 connection.
+  What bounds a browser client there is one request per connection plus `tcp_keepalive`; there is no
+  global cap on connections either way. The transport being off by default is what keeps this from
+  widening the exposure of a default deployment.
 - The transport is tested by hand-built HTTP requests (`tests/grpc_web.rs`), which is necessary but
   not sufficient: a test that sets the headers itself can pass while a browser fails, because the
   browser is what decides to send a preflight and what a page may read. `contrib/grpc-web-smoke.html`
