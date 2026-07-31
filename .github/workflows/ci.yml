@@ -1,6 +1,11 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  # Without the branch filter, every push to a branch with an open PR runs this workflow twice: once
+  # for the push and once for the pull_request. Branch pushes are covered when the PR opens.
+  push:
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
@@ -20,7 +25,13 @@ jobs:
       - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # Only the default branch writes to the cache. A run can read the default branch's entries but
+      # may only write to its own ref, so per-branch copies serve nothing beyond a re-run of that same
+      # branch while counting against the repo's 10 GB limit. Since eviction is LRU across the repo,
+      # they push out the entries every PR restores from (the readstate lane alone stores ~1.8 GB).
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - run: make build
       - run: make test
       - run: make lint
@@ -41,6 +52,8 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - run: cargo clippy --features readstate --all-targets -- -D warnings
       - run: cargo test --features readstate
 
@@ -93,5 +106,7 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - run: cargo build
       - run: cargo test
