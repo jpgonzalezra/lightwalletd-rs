@@ -186,6 +186,7 @@ Wallet-facing contract and hardening:
 - [0011](decisions/0011-up-front-input-validation.md) — malformed requests are rejected up front, before any node round-trip or stream is opened.
 - [0012](decisions/0012-tls-default-insecure-flags.md) — TLS is on by default; dangerous/testing features are gated behind off-by-default `*-very-insecure` flags.
 - [0013](decisions/0013-resource-limits.md) — the server bounds the resources a client can hold or accumulate (configurable stream/keepalive limits plus per-request caps).
+- [0026](decisions/0026-grpc-web-support.md) — gRPC-web is served from the gRPC port behind an off-by-default `--grpc-web`, with an origin allowlist, so a browser wallet needs no translating proxy.
 - [0025](decisions/0025-taddress-range-bounds.md) — an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
 - [0015](decisions/0015-layered-testing-strategy.md) — testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.
 - [0016](decisions/0016-test-placement-by-visibility.md) — tests are placed by visibility: handler tests grouped by family under `service/tests/`, private internals tested inline in their own module.
@@ -201,7 +202,8 @@ a public-facing deployment is not at the mercy of a few abusive peers. The lever
 concurrent long-lived streams (`GetBlockRange`, `GetMempoolStream`), connections held open by dead
 peers, and unbounded per-request accumulation.
 
-The shared `Server` builder in `src/lib.rs` — used by both the live and darkside serve paths — sets:
+The shared `server_builder` in `src/lib.rs` — used by both the live and darkside serve paths, and by
+the integration tests — sets:
 
 - `concurrency_limit_per_connection` and `max_concurrent_streams`, both set from
   `--max-concurrent-streams` (default 256), bounding the in-flight requests and HTTP/2 streams a
@@ -298,6 +300,36 @@ without hand-rolling a cert first. Mutually exclusive with `--tls-cert`/`--tls-k
 
 This TLS protects the **wallet ↔ server** hop. The **server ↔ node** (`zebrad`) connection is plain HTTP on
 purpose — it is local and never crosses the open network.
+
+## gRPC-web
+
+A browser cannot speak gRPC: it exposes no API for the trailers and HTTP/2 framing the protocol needs.
+`--grpc-web` serves the [gRPC-web](https://github.com/grpc/grpc-web) translation of the same API from the
+same port, so a web wallet reaches this server directly instead of through Envoy or `grpcwebproxy`
+([ADR 0026](decisions/0026-grpc-web-support.md)):
+
+```sh
+lightwalletd-rs ... --grpc-web --grpc-web-allow-origin https://wallet.example
+```
+
+The flag is **off by default**, because enabling it also makes the listener accept HTTP/1.1 — which a
+browser needs on a plaintext port, and which changes what the server answers. Over TLS, ALPN settles on
+HTTP/2 and gRPC-web rides that just as well.
+
+`--grpc-web-allow-origin` is repeatable and restricts the transport to an allowlist of browser origins;
+with none given, any origin is allowed and startup logs why that is a choice. Origins are validated at
+startup against the exact `scheme://host[:port]` form a browser sends, since a value that cannot match
+would surface as an opaque CORS error naming nothing. `grpc-status`, `grpc-message` and
+`grpc-status-details-bin` are exposed to JavaScript: gRPC carries a trailers-only response's outcome in
+HTTP headers, and a browser gives a page only the headers the server exposed.
+
+**Client streaming does not work over gRPC-web** — the protocol has no way to send a request stream — so
+`GetTaddressBalanceStream` is unreachable from a browser (its unary sibling `GetTaddressBalance` is not).
+All eight server-streaming methods work.
+
+`tests/grpc_web.rs` drives the transport with hand-built HTTP requests, and
+[`contrib/grpc-web-smoke.html`](../contrib/grpc-web-smoke.html) covers what only a real browser exercises:
+the preflight it decides to send, and the response headers it lets a page read.
 
 ## Metrics
 
