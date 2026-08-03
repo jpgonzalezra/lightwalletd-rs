@@ -1,0 +1,39 @@
+# Two containers, one per side. The dialer needs an address the service provider only knows once it
+# is running, so the order matters: start `sp`, read the NYM_ADDRESS it prints, export it, start
+# `dial`. See README.md.
+name: nym-spike
+
+services:
+  sp:
+    build: .
+    command: ["sp"]
+    environment:
+      # The gRPC listener runs on the host, not in this network.
+      SP_UPSTREAM: "host.docker.internal:9067"
+      SP_STATE_DIR: "/state"
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
+      # Holds the client identity, which is a private key directory: lose it and the address
+      # changes, copy it and the service provider can be impersonated.
+      - sp-state:/state
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  dial:
+    build: .
+    command: ["dial"]
+    environment:
+      # Left empty rather than made mandatory here, so `docker compose build` works before the
+      # service provider has ever run and printed an address.
+      DIAL_SP: "${SP_ADDRESS:-}"
+      DIAL_BIND: "0.0.0.0:9068"
+      # The variable under test. 10 is the SDK default.
+      DIAL_REPLY_SURBS: "${REPLY_SURBS:-10}"
+      RUST_LOG: "${RUST_LOG:-info}"
+    ports:
+      # Bound to loopback: this port is an unauthenticated door to the upstream. Published on 9069
+      # because the server's own metrics endpoint already holds 9068 on the host.
+      - "127.0.0.1:${DIAL_HOST_PORT:-9069}:9068"
+
+volumes:
+  sp-state:
