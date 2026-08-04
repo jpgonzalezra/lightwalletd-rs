@@ -10,7 +10,8 @@ use crate::proto::{
     BlockId, BlockRange, CompactBlock, CompactOrchardAction, CompactSaplingSpend, CompactTx,
     CompactTxIn, PoolType,
 };
-use crate::testutil::{FakeNode, temp_cache};
+use crate::repair::RepairSignal;
+use crate::testutil::{FakeNode, fake_node_serving, temp_cache, testdata_blocks};
 
 use super::super::Streamer;
 use super::streamer_with;
@@ -29,6 +30,65 @@ fn streamer_with_cached_blocks(blocks: &[CompactBlock]) -> (tempfile::TempDir, S
         None,
     );
     (dir, streamer)
+}
+
+/// A streamer whose cache holds `blocks` and whose node serves `raws`, so a range can be made to
+/// straddle the cache/node boundary the way a real one does at the cached tip.
+fn streamer_with_cache_and_node(
+    blocks: &[CompactBlock],
+    raws: &[Vec<u8>],
+) -> (tempfile::TempDir, Streamer, RepairSignal) {
+    let (dir, cache) = temp_cache();
+    for block in blocks {
+        cache.add(block.height, block).unwrap();
+    }
+    let repair = RepairSignal::new();
+    let streamer = Streamer::new(
+        Arc::new(fake_node_serving(raws)),
+        Arc::new(cache),
+        "main".to_string(),
+        None,
+    )
+    .with_repair_signal(repair.clone());
+    (dir, streamer, repair)
+}
+
+/// A block at `height` hashing to a value derived from its height, chaining onto `prev_hash`.
+fn chained_block(height: u64, prev_hash: Vec<u8>) -> CompactBlock {
+    CompactBlock {
+        height,
+        hash: vec![height as u8; 32],
+        prev_hash,
+        ..Default::default()
+    }
+}
+
+/// A contiguous chain of synthetic blocks covering `heights`.
+fn chain(heights: std::ops::RangeInclusive<u64>) -> Vec<CompactBlock> {
+    heights
+        .map(|height| chained_block(height, vec![(height - 1) as u8; 32]))
+        .collect()
+}
+
+/// Collect a block range, stopping at the first error, as `(blocks served, error)`.
+async fn collect_range(
+    streamer: &Streamer,
+    start: u64,
+    end: u64,
+) -> (Vec<CompactBlock>, Option<tonic::Status>) {
+    let mut stream = streamer
+        .get_block_range(Request::new(nullifiers_range(start, end, vec![])))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut blocks = Vec::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(block) => blocks.push(block),
+            Err(status) => return (blocks, Some(status)),
+        }
+    }
+    (blocks, None)
 }
 
 /// A block at `height` with two transactions: one transparent-only, one carrying a Sapling spend
@@ -256,4 +316,141 @@ async fn get_block_range_nullifiers_default_pool_types_keeps_shielded_nullifiers
     assert_eq!(blocks[0].vtx[0].spends[0].nf, vec![7; 32]);
     assert_eq!(blocks[0].vtx[1].actions[0].nullifier, vec![9; 32]);
     assert!(blocks[0].vtx[1].actions[0].cmx.is_empty());
+}
+
+#[tokio::test]
+async fn get_block_range_aborts_on_a_forward_discontinuity() {
+    // Height 3 no longer chains onto height 2: what the cache holds mid reorg repair.
+    let mut blocks = chain(1..=3);
+    blocks[2].prev_hash = vec![0xff; 32];
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&blocks, &[]);
+
+    let (served, status) = collect_range(&streamer, 1, 3).await;
+
+    assert_eq!(
+        (served.len(), status.map(|status| status.code())),
+        (2, Some(Code::Aborted))
+    );
+}
+
+#[tokio::test]
+async fn get_block_range_aborts_on_a_reverse_discontinuity() {
+    let mut blocks = chain(1..=3);
+    blocks[2].prev_hash = vec![0xff; 32];
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&blocks, &[]);
+
+    let (served, status) = collect_range(&streamer, 3, 1).await;
+
+    assert_eq!(
+        (served.len(), status.map(|status| status.code())),
+        (1, Some(Code::Aborted))
+    );
+}
+
+#[tokio::test]
+async fn get_block_range_serves_a_contiguous_reverse_range() {
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&chain(1..=3), &[]);
+
+    let (served, status) = collect_range(&streamer, 3, 1).await;
+
+    assert_eq!(
+        (
+            served.iter().map(|block| block.height).collect::<Vec<_>>(),
+            status.is_none()
+        ),
+        (vec![3, 2, 1], true)
+    );
+}
+
+#[tokio::test]
+async fn a_discontinuity_reports_the_lower_height_of_the_seam_for_repair() {
+    // Truncating from the lower height drops both sides of the seam, whichever one is stale.
+    let mut blocks = chain(1..=3);
+    blocks[2].prev_hash = vec![0xff; 32];
+    let (_dir, streamer, repair) = streamer_with_cache_and_node(&blocks, &[]);
+
+    collect_range(&streamer, 1, 3).await;
+
+    assert_eq!(repair.take(), Some(2));
+}
+
+#[tokio::test]
+async fn a_contiguous_range_reports_nothing_for_repair() {
+    let (_dir, streamer, repair) = streamer_with_cache_and_node(&chain(1..=3), &[]);
+
+    collect_range(&streamer, 1, 3).await;
+
+    assert_eq!(repair.take(), None);
+}
+
+/// The four consecutive raw blocks of `testdata/blocks`, with their parsed compact forms.
+fn testdata_chain() -> (Vec<Vec<u8>>, Vec<CompactBlock>) {
+    let raws = testdata_blocks();
+    let parsed = raws
+        .iter()
+        .map(|raw| crate::compact::to_compact_block(raw).unwrap())
+        .collect();
+    (raws, parsed)
+}
+
+#[tokio::test]
+async fn get_block_range_serves_a_contiguous_range_across_the_cache_and_the_node() {
+    // The real boundary: the cache ends partway through the range and the node serves the rest.
+    let (raws, parsed) = testdata_chain();
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&parsed[..2], &raws[2..]);
+
+    let (served, status) = collect_range(&streamer, parsed[0].height, parsed[3].height).await;
+
+    assert_eq!(
+        (
+            served.iter().map(|block| block.height).collect::<Vec<_>>(),
+            status.is_none()
+        ),
+        (
+            parsed.iter().map(|block| block.height).collect::<Vec<_>>(),
+            true
+        )
+    );
+}
+
+#[tokio::test]
+async fn get_block_range_aborts_when_the_cached_block_is_from_an_abandoned_fork() {
+    // The cache holds a block of the fork the node has already abandoned, so the node's next block
+    // does not chain onto it. Serving both would describe a chain that never existed.
+    let (raws, parsed) = testdata_chain();
+    let mut stale = parsed[1].clone();
+    stale.hash = vec![0xff; 32];
+    let (_dir, streamer, repair) = streamer_with_cache_and_node(&[stale.clone()], &raws[2..3]);
+
+    let (served, status) = collect_range(&streamer, stale.height, stale.height + 1).await;
+
+    assert_eq!(
+        (
+            served.len(),
+            status.map(|status| status.code()),
+            repair.take()
+        ),
+        (1, Some(Code::Aborted), Some(stale.height))
+    );
+}
+
+#[tokio::test]
+async fn get_block_range_nullifiers_aborts_on_a_discontinuity_too() {
+    let mut blocks = chain(1..=3);
+    blocks[2].prev_hash = vec![0xff; 32];
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&blocks, &[]);
+
+    let mut stream = streamer
+        .get_block_range_nullifiers(Request::new(nullifiers_range(1, 3, vec![])))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut codes = Vec::new();
+    while let Some(item) = stream.next().await {
+        if let Err(status) = item {
+            codes.push(status.code());
+        }
+    }
+
+    assert_eq!(codes, vec![Code::Aborted]);
 }

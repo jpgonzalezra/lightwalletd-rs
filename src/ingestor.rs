@@ -19,6 +19,7 @@ use crate::encoding;
 use crate::fetch::{self, FetchError};
 use crate::node::{NodeError, NodeRpc};
 use crate::proto::CompactBlock;
+use crate::repair::RepairSignal;
 
 /// After this many consecutive corruption recoveries without a successful normal step, fall back to
 /// the backoff sleep so recovery can never spin at full CPU even if the `fetch` height guard is
@@ -37,6 +38,7 @@ pub async fn run(
     cache: Arc<Cache>,
     start_height: u64,
     config: IngestConfig,
+    repair: RepairSignal,
 ) {
     tracing::info!(
         start_height,
@@ -46,6 +48,9 @@ pub async fn run(
     );
     let mut consecutive_recoveries = 0u32;
     loop {
+        if let Some(height) = repair.take() {
+            repair_reported(&cache, height, start_height, &mut consecutive_recoveries);
+        }
         match step(&node, &cache, start_height, &config).await {
             // Advanced (or handled a reorg): go for the next window immediately.
             Ok(Progress::Advanced) => consecutive_recoveries = 0,
@@ -75,6 +80,36 @@ pub async fn run(
                 tokio::time::sleep(ERROR_BACKOFF).await;
             }
         }
+    }
+}
+
+/// Act on a discontinuity the read path reported at `height`: drop that block and everything above
+/// it, so the next steps re-ingest from the node's chain.
+///
+/// Counted against the same [`MAX_CONSECUTIVE_RECOVERIES`] bound as corruption recovery, so a node
+/// that keeps serving a chain the cache cannot reconcile with cannot drive an endless
+/// truncate/re-ingest cycle.
+fn repair_reported(
+    cache: &Cache,
+    height: u64,
+    start_height: u64,
+    consecutive_recoveries: &mut u32,
+) {
+    if *consecutive_recoveries >= MAX_CONSECUTIVE_RECOVERIES {
+        tracing::error!(
+            height,
+            "chain discontinuity reported past the recovery limit; leaving the cache alone"
+        );
+        return;
+    }
+    *consecutive_recoveries += 1;
+    tracing::warn!(
+        height,
+        consecutive_recoveries,
+        "chain discontinuity reported while serving; truncating the cache to re-ingest"
+    );
+    if let Err(error) = reorg_to_floor(cache, height.saturating_sub(1), start_height) {
+        tracing::error!(%error, height, "truncating after a reported discontinuity failed");
     }
 }
 
@@ -877,5 +912,48 @@ mod tests {
             got: 9,
         });
         assert!(!should_recover(&transport, 0));
+    }
+
+    #[test]
+    fn a_reported_discontinuity_truncates_the_cache_from_that_height() {
+        let (_dir, cache) = temp_cache();
+        for height in 100..=105 {
+            cache
+                .add(height, &tip_block(height, vec![height as u8; 32]))
+                .unwrap();
+        }
+        let mut consecutive_recoveries = 0;
+
+        repair_reported(&cache, 103, 100, &mut consecutive_recoveries);
+
+        assert_eq!(cache.latest_height().unwrap(), Some(102));
+    }
+
+    #[test]
+    fn a_reported_discontinuity_counts_as_a_recovery() {
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &tip_block(100, vec![100; 32])).unwrap();
+        let mut consecutive_recoveries = 0;
+
+        repair_reported(&cache, 100, 100, &mut consecutive_recoveries);
+
+        assert_eq!(consecutive_recoveries, 1);
+    }
+
+    #[test]
+    fn a_reported_discontinuity_past_the_recovery_limit_leaves_the_cache_alone() {
+        // Backstop against a node the cache can never reconcile with driving an endless
+        // truncate/re-ingest cycle.
+        let (_dir, cache) = temp_cache();
+        for height in 100..=105 {
+            cache
+                .add(height, &tip_block(height, vec![height as u8; 32]))
+                .unwrap();
+        }
+        let mut consecutive_recoveries = MAX_CONSECUTIVE_RECOVERIES;
+
+        repair_reported(&cache, 103, 100, &mut consecutive_recoveries);
+
+        assert_eq!(cache.latest_height().unwrap(), Some(105));
     }
 }

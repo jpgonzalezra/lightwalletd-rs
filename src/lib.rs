@@ -17,6 +17,7 @@ pub mod config;
 pub mod darkside;
 pub mod node;
 pub mod proto;
+pub mod repair;
 pub mod service;
 pub mod snapshot;
 
@@ -217,6 +218,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             "lightwalletd-rs starting"
         );
 
+        // Serving and ingesting share this: the read path reports a cache entry that cannot be part of
+        // the node's chain, the ingestor drops it. Left unattached under `--nocache`, where nothing
+        // ingests and so nothing can repair.
+        let repair = repair::RepairSignal::new();
         if config.nocache {
             tracing::info!("--nocache: ingestor not started");
         } else {
@@ -225,6 +230,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 cache.clone(),
                 start_height,
                 config.ingest,
+                repair.clone(),
             ));
         }
 
@@ -263,10 +269,13 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         // One shared mempool monitor fans the mempool out to all clients, so node load stays
         // independent of the number of connected wallets.
         let mempool = service::mempool_monitor::start(node.clone());
-        let streamer = service::Streamer::new(node, cache, chain_info.chain, None)
+        let mut streamer = service::Streamer::new(node, cache, chain_info.chain, None)
             .with_mempool_monitor(mempool)
             .with_ping_enabled(config.ping_enable)
             .with_donation_address(config.donation_address.clone());
+        if !config.nocache {
+            streamer = streamer.with_repair_signal(repair);
+        }
         server
             .add_service(CompactTxStreamerServer::new(streamer))
             .add_service(reflection_service()?)

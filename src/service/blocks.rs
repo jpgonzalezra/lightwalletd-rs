@@ -1,17 +1,19 @@
 //! Block-serving methods: `GetBlock`, `GetBlockNullifiers`, `GetBlockRange`, and
 //! `GetBlockRangeNullifiers`.
 
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use async_stream::try_stream;
 use tonic::{Request, Response, Status};
 
 use crate::cache::Cache;
-use crate::filter;
 use crate::node::NodeRpc;
 use crate::proto::{BlockId, BlockRange, BoxStream, CompactBlock};
+use crate::repair::RepairSignal;
+use crate::{fetch, filter};
 
-use super::{Streamer, block_at};
+use super::{Streamer, block_at, errors};
 
 /// Maximum number of blocks a single `GetBlockRange(Nullifiers)` request may span.
 /// A wallet syncs in bounded windows; an unbounded span is a denial-of-service lever.
@@ -89,6 +91,7 @@ pub(super) async fn get_block_range(
     let stream = block_range_stream(
         streamer.cache.clone(),
         streamer.node.clone(),
+        streamer.repair.clone(),
         start,
         end,
         move |block| filter::filter_block_to_pools(block, &pool_types),
@@ -117,6 +120,7 @@ pub(super) async fn get_block_range_nullifiers(
     let stream = block_range_stream(
         streamer.cache.clone(),
         streamer.node.clone(),
+        streamer.repair.clone(),
         start,
         end,
         move |block| filter::filter_block_to_pools_nullifiers_only(block, &pool_types),
@@ -124,25 +128,139 @@ pub(super) async fn get_block_range_nullifiers(
     Ok(Response::new(stream))
 }
 
-/// Stream the blocks in the range (ascending if `start <= end`, otherwise descending), reading each
-/// from the cache or the node and applying `transform` before yielding it. Shared by `GetBlockRange`
-/// and `GetBlockRangeNullifiers`, which differ only in that final transform.
+/// Number of consecutive heights read from the cache under one read transaction. Bounds both how
+/// much of a range is held in memory at once and how long a transaction stays open: an open read
+/// transaction keeps `redb` from reclaiming superseded pages, and a stream advances at the client's
+/// pace, so spanning a whole 10,000-block range in one transaction would let a slow wallet pin the
+/// cache file's growth.
+const CACHE_READ_CHUNK: u64 = 64;
+
+/// What the next block in the stream must hash to, and the height that established it.
+struct ChainLink {
+    height: u64,
+    /// Ascending, the previous block's `hash`, matched against the next block's `prev_hash`;
+    /// descending, the previous block's `prev_hash`, matched against the next block's `hash`.
+    expected_hash: Vec<u8>,
+}
+
+impl ChainLink {
+    /// The link `block` establishes for whatever follows it in this direction.
+    fn after(height: u64, block: &CompactBlock, descending: bool) -> Self {
+        let expected_hash = if descending {
+            block.prev_hash.clone()
+        } else {
+            block.hash.clone()
+        };
+        Self {
+            height,
+            expected_hash,
+        }
+    }
+
+    /// Check that `block` connects to this link, reporting the suspect height for repair if it does
+    /// not.
+    ///
+    /// A range is resolved height by height from the cache or the node, and during a reorg repair
+    /// those two disagree: the cache can still hold the abandoned fork below the point the ingestor
+    /// has rolled back to while the node already serves the new chain. Splicing them would describe a
+    /// chain that never existed, so the stream fails instead.
+    fn check(
+        &self,
+        block: &CompactBlock,
+        height: u64,
+        descending: bool,
+        repair: Option<&RepairSignal>,
+    ) -> Result<(), Status> {
+        let actual_hash = if descending {
+            &block.hash
+        } else {
+            &block.prev_hash
+        };
+        if *actual_hash == self.expected_hash {
+            return Ok(());
+        }
+        // Either side of the seam may be the stale one, so the lower height is what has to go: dropping
+        // it drops everything above it too.
+        let suspect_height = height.min(self.height);
+        tracing::warn!(
+            height,
+            previous_height = self.height,
+            suspect_height,
+            "chain discontinuity while serving a block range"
+        );
+        if let Some(repair) = repair {
+            repair.report(suspect_height);
+        }
+        Err(Status::aborted(format!(
+            "get_block_range: chain discontinuity at height {height}; the cache is being repaired \
+             after a reorg, retry"
+        )))
+    }
+}
+
+/// The sub-ranges of `low..=high` to read from the cache, in the order they are served.
+fn cache_chunks(low: u64, high: u64, descending: bool) -> Vec<RangeInclusive<u64>> {
+    let mut chunks = Vec::new();
+    let mut chunk_low = low;
+    loop {
+        let chunk_high = chunk_low.saturating_add(CACHE_READ_CHUNK - 1).min(high);
+        chunks.push(chunk_low..=chunk_high);
+        if chunk_high >= high {
+            break;
+        }
+        chunk_low = chunk_high + 1;
+    }
+    if descending {
+        chunks.reverse();
+    }
+    chunks
+}
+
+/// Stream the blocks in the range (ascending if `start <= end`, otherwise descending), reading them
+/// from the cache in chunks and falling back to the node per missing height, and applying `transform`
+/// before yielding each. Shared by `GetBlockRange` and `GetBlockRangeNullifiers`, which differ only in
+/// that final transform.
+///
+/// Consecutive blocks are checked to connect, whichever source they came from, so a range served
+/// across a reorg repair aborts rather than splicing two chains together.
 fn block_range_stream(
     cache: Arc<Cache>,
     node: Arc<dyn NodeRpc>,
+    repair: Option<RepairSignal>,
     start: u64,
     end: u64,
     transform: impl Fn(CompactBlock) -> CompactBlock + Send + 'static,
 ) -> BoxStream<CompactBlock> {
+    let descending = start > end;
+    let (low, high) = if descending {
+        (end, start)
+    } else {
+        (start, end)
+    };
     Box::pin(try_stream! {
-        let heights: Vec<u64> = if start <= end {
-            (start..=end).collect()
-        } else {
-            (end..=start).rev().collect()
-        };
-        for height in heights {
-            let block = block_at(&cache, node.as_ref(), height).await?;
-            yield transform(block);
+        let mut link: Option<ChainLink> = None;
+        for chunk in cache_chunks(low, high, descending) {
+            // One transaction per chunk, released before the node is awaited: the fetch below is the
+            // slow part, and holding a read transaction across it would pin the cache for no gain.
+            let mut cached = cache.get_range(chunk.clone())?;
+            let heights: Vec<u64> = if descending {
+                chunk.rev().collect()
+            } else {
+                chunk.collect()
+            };
+            for height in heights {
+                let block = match cached.remove(&height) {
+                    Some(block) => block,
+                    None => fetch::compact_block(node.as_ref(), height)
+                        .await
+                        .map_err(|err| errors::block_fetch_to_status(err, height))?,
+                };
+                if let Some(previous) = &link {
+                    previous.check(&block, height, descending, repair.as_ref())?;
+                }
+                link = Some(ChainLink::after(height, &block, descending));
+                yield transform(block);
+            }
         }
     })
 }
@@ -223,6 +341,38 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[test]
+    fn cache_chunks_covers_a_short_range_in_one_chunk() {
+        assert_eq!(super::cache_chunks(10, 20, false), vec![10..=20]);
+    }
+
+    #[test]
+    fn cache_chunks_splits_a_long_range_at_the_chunk_size() {
+        assert_eq!(
+            super::cache_chunks(1, 2 * super::CACHE_READ_CHUNK, false),
+            vec![
+                1..=super::CACHE_READ_CHUNK,
+                (super::CACHE_READ_CHUNK + 1)..=(2 * super::CACHE_READ_CHUNK)
+            ]
+        );
+    }
+
+    #[test]
+    fn cache_chunks_are_ordered_high_to_low_when_descending() {
+        assert_eq!(
+            super::cache_chunks(1, 2 * super::CACHE_READ_CHUNK, true),
+            vec![
+                (super::CACHE_READ_CHUNK + 1)..=(2 * super::CACHE_READ_CHUNK),
+                1..=super::CACHE_READ_CHUNK
+            ]
+        );
+    }
+
+    #[test]
+    fn cache_chunks_covers_a_single_height() {
+        assert_eq!(super::cache_chunks(7, 7, false), vec![7..=7]);
     }
 
     #[test]
