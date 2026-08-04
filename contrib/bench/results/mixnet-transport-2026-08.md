@@ -76,31 +76,84 @@ is paid for. An earlier single-sample pass at 1,000 did not complete within 30 m
 with that line.
 
 **No budget-dependent hang is claimed at the low end.** The two timeouts at 25 and 50 initially read
-as one, but the establishment-failure rate measured below (about 17%) predicts roughly 2.5 random
-failures across 15 runs, and exactly 2 were observed. With three repetitions per point, their landing
-in the low rows is compatible with chance.
+as one, but the 18-window run described below failed three times out of eighteen, about 17%, and
+that rate predicts roughly 2.5 random failures across these 15 runs. Exactly 2 were observed. With
+three repetitions per point, their landing in the low rows is compatible with chance.
 
 At a budget of 100, 1,000 blocks in ~27 s is about 48 KB/s, near 400 kbps: well under the ~1 Mbps
 nominal figure but real. That extrapolates to ~30 s for a day of catch-up, ~4 hours for a year of
 wallet history, and ~11 days for a full sync from Sapling activation.
 
-## Stream establishment fails about one time in six
+## Streams fail silently, at a rate that moves by an order of magnitude
 
-Eighteen consecutive 2-minute windows, one connection each, budget 100:
+First seen through the rig: across 18 consecutive 2-minute windows at budget 100, three carried 253
+bytes out and 33 back, which is one request and no real response (33 bytes is HTTP/2 control
+framing). All 18 connections closed cleanly with zero aborts, so these were not streams dying
+mid-life. Three of eighteen is about 17%, which is the rate the budget sweep above is checked
+against.
 
-| windows | bytes sent | bytes received |
-|---|---|---|
-| normal (15) | ~3,000 to 3,800 | ~10,000 to 13,000 |
-| failed (3) | **253** | **33** |
+Because that measurement passed through four layers, it could not attribute the fault. A minimal
+reproduction (`src/bin/repro.rs` in the rig) removes them all: two mixnet clients in one process, one
+echoing 64 bytes and one dialling, no gRPC, no HTTP/2, no proxies, no shared client behind a mutex.
+The echo side counts three stages separately, which turns a failure into a direction.
 
-253 bytes out and 33 back is one request and no real response; 33 bytes is HTTP/2 control framing,
-not a compact block. Each failure surfaced to the caller as one `DeadlineExceeded` followed by one
-`Unavailable` ("use of closed network connection").
+**It reproduces.** The defect is in the SDK or the network, not in the rig.
 
-The service provider reported no errors, and all 18 connections closed cleanly with zero aborts. So
-these are not streams dying mid-life. **They open, accept a request, and never deliver anything.**
+| run | version | trials | failure rate |
+|---|---|---|---|
+| 2026-08-03 afternoon | 1.21.4 | 200 | 7.0% |
+| 2026-08-03 afternoon | 1.21.5-rc.3 | 200 | 2.0% |
+| 2026-08-03 evening | 1.21.5-rc.3 | 100 | 2.0% |
+| 2026-08-04 | 1.21.5-rc.3 | 400 | **36.5%** |
 
-Three of eighteen, about 17%. A client without detect-and-retry appears broken at that rate.
+The signature is consistent: the far side's `accept()` fires, the sender's `write_all` and `flush`
+both return `Ok`, and the payload never arrives. Neither end errors and neither times out; both hang
+until an external deadline. Under the degraded conditions of the last run, loss also appeared on the
+return path (34 of 400), where the echo side read and replied successfully and the reply never
+arrived.
+
+The rate is **not stationary**, and that matters more than its value. Within the 400-trial run,
+failures nearly tripled between the first and second halves (40 then 106). Across days at identical
+settings it moved between 2% and 36.5%.
+
+### The reply-block budget shifts it, but does not fix it
+
+An earlier sweep ran each budget as its own block, which a drifting network makes uninterpretable.
+Rerun with the budgets rotated one per trial inside a single process, so drift hits every value
+equally, 100 trials each:
+
+| reply blocks | fragments per message | failures | p50 |
+|---|---|---|---|
+| 1 | 1 | **51%** | 1,412 ms |
+| 20 | 6 | 34% | 1,863 ms |
+| 100 | 29 | 35% | 4,054 ms |
+| 400 | 115 | **26%** | 7,529 ms |
+
+More reply blocks means fewer failures, monotonically, which is consistent with the far side running
+out of them: acknowledgements and retransmissions consume the budget alongside the reply itself. But
+the effect is second-order next to conditions, the best observed setting still failed 26% of the
+time, and buying that took 5.3x the latency.
+
+**A fragmentation hypothesis was tested and refuted.** Each attached reply block is a precomputed
+Sphinx header, so the budget inflates every outbound message: 64 bytes of payload ships as 1, 6, 29
+or 115 fragments at the budgets above, and a message only reassembles once every fragment arrives.
+That predicted more fragments would mean more failures. The opposite holds: the most fragmented
+configuration was the most reliable.
+
+### What the SDK's own logs show
+
+Tracing a 100-trial run at budget 100:
+
+- Every message split into **29 fragments** to carry 64 bytes of payload, the rest being reply blocks.
+- Reply blocks accumulated unboundedly on the receiving side, from 100 to **19,903** over 200
+  messages, since each message attaches 100 and roughly one is used.
+- Acknowledgement loss is routine: 16 chunks arrived as duplicates "because the ack got lost", and 17
+  pending acks were already gone when their removal was attempted. Retransmission machinery exists
+  and fires (21 events), so most losses do recover.
+- Two internal errors surfaced across runs, both from the client's own code:
+  `failed to send mixnet packet due to closed channel (outside of shutdown!)` and, on the gateway
+  connection, `Broken pipe` / `Connection reset without closing handshake`. The first is the SDK
+  flagging its own invariant violation.
 
 Separately, the Nym client failed to register with a gateway within two minutes in 2 of 15 attempts,
 an unrelated startup failure that matters for operating a long-lived service provider.
@@ -134,10 +187,20 @@ Recorded so they are not re-derived:
 
 ## Limitations
 
-- One network path, one pair of gateways, two sessions on consecutive days. Between them the median
-  nearly doubled, so absolute figures should be treated as one sample of a wide distribution.
-- Three repetitions per budget value cannot pin down a failure rate; the 17% figure comes from a
-  separate 18-window run and is itself a small sample.
+- One network path, one pair of gateways, one machine, across three days. Conditions moved by more
+  than an order of magnitude within that, so every absolute figure here is one sample of a wide and
+  drifting distribution rather than a property of the transport.
+- The budget comparison is interleaved and therefore internally valid, but it is still a single run
+  under one day's conditions. Its ordering should hold; its absolute rates should not be quoted.
+- The 17% used to defuse the two low-budget timeouts comes from the 18-window run, which is a small
+  sample on top of a rate that moves by an order of magnitude. It supports "compatible with chance"
+  and nothing stronger.
+- Direction of loss is approximate. The reproduction credits a trial by sampling counters the echo
+  side advances from spawned tasks, so a stage arriving after that trial's deadline lands on the
+  next one. Totals such as the 34 return-path losses are therefore indicative; the aggregate failure
+  rate, which only counts deadlines, is not affected.
+- Why the rate varies so much between sessions is unexplained. It is the most important open question
+  about this transport and nothing here answers it.
 - No single stream lived longer than two minutes, so the behaviour of a long-lived stream crossing an
   epoch boundary remains untested. It matters little in practice, since the establishment-failure
   rate already forces retry and resumption.

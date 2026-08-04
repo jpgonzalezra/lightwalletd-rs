@@ -28,10 +28,14 @@ The costs sit elsewhere. Full method and numbers in
 [`contrib/bench/results/mixnet-transport-2026-08.md`](../../contrib/bench/results/mixnet-transport-2026-08.md);
 the four that decide this ADR:
 
-1. **About one in six new streams never delivers a response.** Across 18 consecutive two-minute
-   windows, three carried a single request and nothing back, then closed cleanly. Not slowness:
-   silent failure to establish. A client that does not detect and retry appears broken 17% of the
-   time.
+1. **Streams fail silently, at a rate between 2% and 51% that is not stationary.** A stream opens,
+   the far side accepts it, the sender's `write_all` and `flush` both return `Ok`, and the payload
+   never arrives. Neither end receives an error and neither times out: both hang indefinitely. A
+   minimal reproduction using nothing but the SDK (`contrib/nym/src/bin/repro.rs`, two clients in one
+   process, no gRPC and no proxies) measured 2% over 200 trials one afternoon and 36.5% over 400
+   trials the next day, with failures nearly tripling between the first and second halves of that
+   same run. Raising the reply-block budget mitigates it only partially, from 51% at one block to 26%
+   at four hundred, and costs 5.3x the latency to do so. No setting observed makes it reliable.
 2. **Latency is seconds, not milliseconds.** `GetBlock` served from cache measured p50 1.39 s and p99
    3.42 s in one session, p50 2.4 s and p99 7.1 s in another, against p50 0.29 ms and p99 1.19 ms on
    the ordinary listener. Published per-hop figures suggest tens of milliseconds in total; the gap is
@@ -73,8 +77,11 @@ the decision rather than an aside:
   reaches the replenishment path at all, and seconds of latency are irrelevant against 75-second
   blocks.
 - **Not worth routing over a mixnet:** bulk block download, unless the wallet's birthday is recent.
-- **Retry is mandatory, not optional.** Given (1), a client must detect a stream that opens and never
-  answers, then retry on a fresh one.
+- **Retry is mandatory, not optional, and cannot be tuned away.** Given (1), a client must impose its
+  own deadline on a stream that opens and never answers, then retry on a fresh one. Under degraded
+  conditions loss was observed in both directions, so the deadline has to cover the whole exchange
+  rather than just the connect. Raising the reply-block budget lowers the rate but never to zero, and
+  buys that at a large latency cost, so it is a tuning knob and not a fix.
 - **Do not sync and submit through the same server.** An operator that sees an IP synchronising and
   moments later receives an anonymous transaction can correlate the two by timing, and with few
   concurrent users the anonymity set is negligible. Submitting through a different instance than the
