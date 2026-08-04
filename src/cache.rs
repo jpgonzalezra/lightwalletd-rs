@@ -3,6 +3,7 @@
 //! Each block is stored as its protobuf encoding under its height. The store is ordered, so the lowest
 //! and highest cached heights are cheap to read, and a reorg is just "drop everything above height N".
 
+use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::path::Path;
 
@@ -239,6 +240,25 @@ impl Cache {
         Ok(())
     }
 
+    /// Read every cached block in `range` under a single read transaction, keyed by height. Heights
+    /// the cache does not hold are simply absent from the result.
+    ///
+    /// Reading a whole range in one transaction is what makes a served range self-consistent: `redb`
+    /// reads are MVCC, so the blocks come from one point in time even if the ingestor truncates a
+    /// reorg mid-read. Resolving each height on its own would let a range straddle the truncation and
+    /// mix two chains.
+    pub fn get_range(
+        &self,
+        range: RangeInclusive<u64>,
+    ) -> Result<BTreeMap<u64, CompactBlock>, CacheError> {
+        let mut blocks = BTreeMap::new();
+        self.for_each_raw(range, |height, bytes| {
+            blocks.insert(height, CompactBlock::decode(bytes)?);
+            Ok::<(), CacheError>(())
+        })?;
+        Ok(blocks)
+    }
+
     /// The lowest and highest cached heights, read together, or `None` if the cache is empty.
     pub fn range(&self) -> Result<Option<(u64, u64)>, CacheError> {
         let txn = self.db.begin_read()?;
@@ -470,6 +490,44 @@ mod tests {
             hash: vec![hash_byte; 32],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn get_range_returns_the_blocks_it_holds_keyed_by_height() {
+        let (_dir, cache) = temp_cache();
+        for height in 100..=104 {
+            cache.add(height, &block(height, height as u8)).unwrap();
+        }
+
+        let blocks = cache.get_range(101..=103).unwrap();
+
+        assert_eq!(
+            blocks.into_iter().collect::<Vec<_>>(),
+            vec![
+                (101, block(101, 101)),
+                (102, block(102, 102)),
+                (103, block(103, 103))
+            ]
+        );
+    }
+
+    #[test]
+    fn get_range_omits_the_heights_past_the_cached_tip() {
+        // Appends are monotonic, so the only heights a range can miss are the ones beyond the tip
+        // (served from the node) and the ones below the cache floor.
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &block(100, 100)).unwrap();
+        cache.add(101, &block(101, 101)).unwrap();
+
+        let blocks = cache.get_range(99..=103).unwrap();
+
+        assert_eq!(blocks.keys().copied().collect::<Vec<_>>(), vec![100, 101]);
+    }
+
+    #[test]
+    fn get_range_of_an_empty_cache_is_empty() {
+        let (_dir, cache) = temp_cache();
+        assert_eq!(cache.get_range(1..=10).unwrap().len(), 0);
     }
 
     #[test]
