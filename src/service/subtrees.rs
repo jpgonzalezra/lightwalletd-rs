@@ -18,6 +18,14 @@ use super::{Streamer, block_at, decode_hex};
 /// code shared by many unrelated errors) keeps this narrowly scoped to the unrecognized-pool case.
 const INVALID_POOL_NAME: &str = "invalid pool name";
 
+/// Highest subtree index the backend node can represent. zebrad's `z_get_subtrees_by_index` takes a
+/// `NoteCommitmentSubtreeIndex` (`zebra-chain` `subtree.rs`: a `u16`) for both the start index and
+/// the limit, while the protocol declares each of them a `uint32`. Anything above this is rejected by
+/// the node as `Invalid params`, which carries the generic `Misc` code and so would reach the client
+/// as a retryable `Unavailable`, telling a wallet to back off and try again over input that can
+/// never succeed. The range is therefore enforced here, before a round-trip that could only fail.
+const MAX_SUBTREE_INDEX: u32 = u16::MAX as u32;
+
 pub(super) async fn get_subtree_roots(
     streamer: &Streamer,
     request: Request<GetSubtreeRootsArg>,
@@ -29,20 +37,32 @@ pub(super) async fn get_subtree_roots(
         Ok(ShieldedProtocol::Ironwood) => "ironwood",
         Err(_) => return Err(Status::invalid_argument("unrecognized shielded protocol")),
     };
+    if arg.start_index > MAX_SUBTREE_INDEX {
+        return Err(Status::invalid_argument(format!(
+            "start_index {} is above the highest subtree index the node can address ({})",
+            arg.start_index, MAX_SUBTREE_INDEX
+        )));
+    }
+    // Unlike the start index, a limit above the range is not an error: no pool can hold more than
+    // `MAX_SUBTREE_INDEX` subtrees, so asking for more is asking for all of them. Saturating answers
+    // that request instead of failing it, and cannot change which roots are returned.
+    let max_entries = arg.max_entries.min(MAX_SUBTREE_INDEX);
+
     // In darkside mode the roots are staged complete (with their completing block already set),
-    // so they are served verbatim rather than computed from the cached blocks.
+    // so they are served verbatim rather than computed from the cached blocks. Both backends are
+    // bounded by the checks above, so they answer the same request identically.
     if let Some(state) = &streamer.darkside {
         let roots = state.lock().await.subtree_roots_for(
             arg.shielded_protocol,
             arg.start_index,
-            arg.max_entries,
+            max_entries,
         );
         let stream = tokio_stream::iter(roots.into_iter().map(Ok::<_, Status>));
         return Ok(Response::new(Box::pin(stream)));
     }
     let subtrees = match streamer
         .node
-        .get_subtrees(protocol, arg.start_index, arg.max_entries)
+        .get_subtrees(protocol, arg.start_index, max_entries)
         .await
     {
         Ok(subtrees) => subtrees,

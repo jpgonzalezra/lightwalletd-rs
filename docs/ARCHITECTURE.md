@@ -188,6 +188,7 @@ Wallet-facing contract and hardening:
 - [0013](decisions/0013-resource-limits.md) — the server bounds the resources a client can hold or accumulate (configurable stream/keepalive limits plus per-request caps).
 - [0026](decisions/0026-grpc-web-support.md) — gRPC-web is served from the gRPC port behind an off-by-default `--grpc-web`, with an origin allowlist, so a browser wallet needs no translating proxy.
 - [0025](decisions/0025-taddress-range-bounds.md) — an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
+- [0028](decisions/0028-subtree-index-range.md) — subtree indexes are bounded to the node's `u16` range before any round-trip: an out-of-range start index is `InvalidArgument`, an out-of-range limit saturates.
 - [0015](decisions/0015-layered-testing-strategy.md) — testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.
 - [0016](decisions/0016-test-placement-by-visibility.md) — tests are placed by visibility: handler tests grouped by family under `service/tests/`, private internals tested inline in their own module.
 
