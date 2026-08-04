@@ -164,6 +164,9 @@ pub struct FakeNode {
     pub address_txids_err: Option<(i64, String)>,
     pub subtrees: Option<GetSubtrees>,
     pub subtrees_err: Option<(i64, String)>,
+    /// Captures the `(protocol, start_index, max_entries)` the service passed to `get_subtrees`.
+    /// Stays `None` when the service answers without consulting the node.
+    pub requested_subtree_params: Mutex<Option<(String, u32, u32)>>,
     pub raw_mempool: Option<Vec<String>>,
     /// Captures the txid string the service passed to `get_raw_transaction`.
     pub requested_txid: Mutex<Option<String>>,
@@ -323,10 +326,12 @@ impl NodeRpc for FakeNode {
 
     async fn get_subtrees(
         &self,
-        _protocol: &str,
-        _start_index: u32,
-        _max_entries: u32,
+        protocol: &str,
+        start_index: u32,
+        max_entries: u32,
     ) -> Result<GetSubtrees, NodeError> {
+        *self.requested_subtree_params.lock().unwrap() =
+            Some((protocol.to_string(), start_index, max_entries));
         if let Some((code, message)) = self.subtrees_err.clone() {
             return Err(NodeError::Rpc { code, message });
         }
