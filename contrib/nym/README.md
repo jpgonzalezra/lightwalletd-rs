@@ -59,6 +59,21 @@ hundreds of milliseconds. The question is whether the curve has a usable knee.
 Alongside that: the tail of the latency distribution for a small unary call, and whether a stream
 survives crossing an epoch boundary, which lasts an hour and is when reply blocks expire.
 
+## Reproducing the stream failures
+
+`repro` is the third binary and needs neither half above: it runs two mixnet clients in one process,
+one echoing a 64-byte payload and one dialling it, with no gRPC, no HTTP/2 and no proxies in the
+path. A failure there belongs to the SDK or the network rather than to this rig, which is what makes
+it the evidence the reports cite.
+
+```
+docker compose run --rm repro
+TRIALS=400 BUDGETS=1,20,100,400 docker compose run --rm repro
+```
+
+Budgets are rotated one per trial rather than run in blocks, so a drifting network hits every value
+equally. It exits when the trials are done and prints a per-budget table.
+
 ## Notes
 
 - `sp` keeps its identity in a Docker volume. That directory holds private keys: the Nym address is

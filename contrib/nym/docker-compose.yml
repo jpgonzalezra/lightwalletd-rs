@@ -35,5 +35,20 @@ services:
       # because the server's own metrics endpoint already holds 9068 on the host.
       - "127.0.0.1:${DIAL_HOST_PORT:-9069}:9068"
 
+  # Self-contained: two mixnet clients in one process, no upstream and no ports. Run it with
+  # `docker compose run --rm repro`, since it exits when its trials are done.
+  repro:
+    build: .
+    command:
+      [
+        "repro",
+        "--trials",
+        "${TRIALS:-200}",
+        "--budgets",
+        "${BUDGETS:-1,20,100,400}",
+      ]
+    environment:
+      RUST_LOG: "${RUST_LOG:-info}"
+
 volumes:
   sp-state:

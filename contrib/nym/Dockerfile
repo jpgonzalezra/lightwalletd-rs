@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked \
  && mkdir -p /out \
- && cp target/release/sp target/release/dial /out/
+ && cp target/release/sp target/release/dial target/release/repro /out/
 
 # Must match the build image's distro: rust:1.96-slim is Debian 13 (glibc 2.41), and a bookworm
 # runtime rejects the binary with a GLIBC_2.38 error.
@@ -31,4 +31,4 @@ FROM debian:trixie-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates libssl3t64 \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=build /out/sp /out/dial /usr/local/bin/
+COPY --from=build /out/sp /out/dial /out/repro /usr/local/bin/
