@@ -36,3 +36,4 @@ choice stays discoverable after the fact. The living overview is
 | [0027](0027-block-range-continuity.md) | Serve only self-consistent block ranges |
 | [0028](0028-mvcc-chunked-cache-reads.md) | Read the cache in MVCC chunks when serving a range |
 | [0029](0029-mixnet-transport-scope.md) | Keep a mixnet transport out of the crate, behind a sidecar |
+| [0030](0030-subtree-index-range.md) | Bound the subtree index range at the service boundary |
