@@ -163,6 +163,7 @@ Data flow and storage:
 - [0014](decisions/0014-cache-ingestor-resilience.md) — the cache and ingestor recover from corruption and reorgs locally (truncate-from-N, reorg-by-hash, capped-backoff startup).
 - [0005](decisions/0005-shared-mempool-monitor.md) — in live mode a single background task (`src/service/mempool_monitor.rs`) refreshes the mempool at most every ~2 s and fans a parsed-once snapshot out via `tokio::sync::watch`, so node load is independent of the connected-wallet count; darkside keeps the per-request path.
 - [0024](decisions/0024-snapshot-bootstrap.md) — a fresh cache can be bootstrapped from a peer's epoch-chunked snapshot over HTTP instead of ingesting the whole range, with every block verified against the importer's own node.
+- [0028](decisions/0028-mvcc-chunked-cache-reads.md) — a range reads the cache in 64-height chunks, one MVCC read transaction each, released before any node request: the cached blocks in a chunk come from one consistent snapshot even while the ingestor truncates a reorg.
 
 Protocol upgrades:
 
@@ -188,6 +189,7 @@ Wallet-facing contract and hardening:
 - [0013](decisions/0013-resource-limits.md) — the server bounds the resources a client can hold or accumulate (configurable stream/keepalive limits plus per-request caps).
 - [0026](decisions/0026-grpc-web-support.md) — gRPC-web is served from the gRPC port behind an off-by-default `--grpc-web`, with an origin allowlist, so a browser wallet needs no translating proxy.
 - [0025](decisions/0025-taddress-range-bounds.md) — an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
+- [0027](decisions/0027-block-range-continuity.md) — consecutive blocks in a served range must connect by hash, whichever source each came from; a discontinuity ends the stream with `Aborted` and reports the height so the ingestor truncates and re-ingests it.
 - [0015](decisions/0015-layered-testing-strategy.md) — testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.
 - [0016](decisions/0016-test-placement-by-visibility.md) — tests are placed by visibility: handler tests grouped by family under `service/tests/`, private internals tested inline in their own module.
 
@@ -520,6 +522,17 @@ from where it left off.
 the range (ascending if `start <= end`, otherwise descending) and prunes each block to the requested
 `poolTypes` — an empty list means the legacy default of shielded-only data (Sapling, Orchard, and Ironwood;
 transparent inputs/outputs stripped).
+
+A range is read from the cache in chunks of 64 consecutive heights, one `redb` read transaction per chunk,
+released before any node request is awaited ([ADR 0028](decisions/0028-mvcc-chunked-cache-reads.md)); the
+heights a chunk did not contain are fetched from the node. Consecutive blocks are then verified to connect,
+whichever source each came from: ascending, the next block's `prev_hash` must equal the previous block's
+`hash`; descending, the reverse ([ADR 0027](decisions/0027-block-range-continuity.md)). This matters while the
+ingestor is repairing a reorg, when the cache still holds the abandoned fork below the point it has rolled back
+to and the node already serves the new chain: splicing them would describe a chain that never existed. A
+mismatch ends the stream with `Aborted` and reports the lower height of the seam, which the ingestor drains at
+the top of its loop and truncates from, so re-ingestion repairs the cache and the client's retry succeeds
+instead of hitting the same seam.
 
 `--nocache` bypasses all of the above: the ingestor is not spawned and the cache is opened in a throwaway
 `tempfile::tempdir()` instead of `--data-dir`, so it starts (and stays) empty and every read falls through

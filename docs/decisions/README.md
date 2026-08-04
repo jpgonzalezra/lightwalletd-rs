@@ -33,3 +33,5 @@ choice stays discoverable after the fact. The living overview is
 | [0024](0024-snapshot-bootstrap.md) | Bootstrap the cache from a peer's snapshot, anchored to the operator's own node |
 | [0025](0025-taddress-range-bounds.md) | Pin an open-ended transparent-address range to the chain tip and bound its span |
 | [0026](0026-grpc-web-support.md) | Serve gRPC-web natively, behind an off-by-default runtime flag |
+| [0027](0027-block-range-continuity.md) | Serve only self-consistent block ranges |
+| [0028](0028-mvcc-chunked-cache-reads.md) | Read the cache in MVCC chunks when serving a range |

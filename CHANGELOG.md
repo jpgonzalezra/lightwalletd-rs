@@ -5,6 +5,22 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+### Block range continuity
+- **A served block range is verified to be one chain** (ADR 0027). `GetBlockRange` and
+  `GetBlockRangeNullifiers` resolve each height from the cache or the node, and during a reorg repair those
+  two disagree: the cache can still hold the abandoned fork while the node already serves the new one, so a
+  range spanning the boundary could splice them into a chain that never existed. Consecutive blocks are now
+  checked to connect by hash (ascending, the next block's `prev_hash` against the previous block's `hash`;
+  descending, the reverse) and a mismatch ends the stream with `Aborted` instead of serving the splice.
+- A detected discontinuity is reported to the ingestor, which truncates the cache from that height so
+  re-ingestion refills it from the node's chain. Without it the same seam would fail every retry until the
+  ingestor reached those heights on its own. The read path only reports; the ingestor remains the cache's
+  single writer, and the repair is counted against the existing corruption-recovery bound.
+- **Ranges read the cache in MVCC chunks** (ADR 0028): 64 consecutive heights per `redb` read transaction,
+  released before any node request is awaited, instead of one transaction per height. The cached blocks in a
+  chunk now come from a single consistent snapshot, so a truncation landing mid-range can no longer be
+  straddled, and a long range does less transaction setup.
+
 ### gRPC-web
 - **Serve gRPC-web from the gRPC port** (ADR 0026) behind `--grpc-web`, so a browser wallet reaches
   the server directly instead of through a translating proxy. Off by default, because enabling it
