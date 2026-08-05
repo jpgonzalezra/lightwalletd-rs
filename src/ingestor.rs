@@ -32,6 +32,56 @@ const IDLE_POLL: Duration = Duration::from_secs(2);
 /// Backoff after a node/transport error (and after corruption past the recovery bound).
 const ERROR_BACKOFF: Duration = Duration::from_secs(8);
 
+/// How many reported discontinuities may truncate the cache within one [`REPAIR_WINDOW`].
+const MAX_REPAIRS_PER_WINDOW: u32 = 5;
+
+/// The span the repair budget is charged over. Long enough that the reorgs a healthy chain produces
+/// never approach the budget, short enough that a genuine repair is never held back for long.
+const REPAIR_WINDOW: Duration = Duration::from_secs(600);
+
+/// How often a reported discontinuity may truncate the cache.
+///
+/// This cannot ride on [`MAX_CONSECUTIVE_RECOVERIES`]: a repair truncation is followed by a
+/// re-ingestion step that succeeds, so a counter that resets on success would never engage against
+/// the case it exists for, a node the cache cannot reconcile with (an endpoint balancing over nodes
+/// on different forks, say) driving an endless truncate/re-ingest cycle. The budget decays with time
+/// instead of with progress.
+struct RepairBudget {
+    spent: u32,
+    window_started: Instant,
+    /// Whether this window's refusal was already logged, so an exhausted budget does not log once
+    /// per loop iteration.
+    refusal_logged: bool,
+}
+
+impl RepairBudget {
+    fn new(now: Instant) -> Self {
+        Self {
+            spent: 0,
+            window_started: now,
+            refusal_logged: false,
+        }
+    }
+
+    /// Whether a repair may run, charging it to the current window. The window restarts once
+    /// [`REPAIR_WINDOW`] has passed since it opened.
+    fn try_spend(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.window_started) >= REPAIR_WINDOW {
+            *self = Self::new(now);
+        }
+        if self.spent >= MAX_REPAIRS_PER_WINDOW {
+            return false;
+        }
+        self.spent += 1;
+        true
+    }
+
+    /// Whether this refusal is the first of its window, and so worth logging.
+    fn first_refusal_of_window(&mut self) -> bool {
+        !std::mem::replace(&mut self.refusal_logged, true)
+    }
+}
+
 /// Poll the node forever, appending new blocks to the cache and rolling back reorgs.
 pub async fn run(
     node: Arc<dyn NodeRpc>,
@@ -47,9 +97,10 @@ pub async fn run(
         "ingestor started"
     );
     let mut consecutive_recoveries = 0u32;
+    let mut repair_budget = RepairBudget::new(Instant::now());
     loop {
         if let Some(height) = repair.take() {
-            repair_reported(&cache, height, start_height, &mut consecutive_recoveries);
+            repair_reported(&cache, height, start_height, &repair, &mut repair_budget);
         }
         match step(&node, &cache, start_height, &config).await {
             // Advanced (or handled a reorg): go for the next window immediately.
@@ -86,26 +137,45 @@ pub async fn run(
 /// Act on a discontinuity the read path reported at `height`: drop that block and everything above
 /// it, so the next steps re-ingest from the node's chain.
 ///
-/// Counted against the same [`MAX_CONSECUTIVE_RECOVERIES`] bound as corruption recovery, so a node
-/// that keeps serving a chain the cache cannot reconcile with cannot drive an endless
-/// truncate/re-ingest cycle.
+/// Truncation is charged to [`RepairBudget`], and a report the budget refuses is put back so it is
+/// acted on once the window rolls over rather than lost.
 fn repair_reported(
     cache: &Cache,
     height: u64,
     start_height: u64,
-    consecutive_recoveries: &mut u32,
+    repair: &RepairSignal,
+    budget: &mut RepairBudget,
 ) {
-    if *consecutive_recoveries >= MAX_CONSECUTIVE_RECOVERIES {
-        tracing::error!(
-            height,
-            "chain discontinuity reported past the recovery limit; leaving the cache alone"
-        );
+    // A report above the cached tip is a seam between two blocks the node served, and there is
+    // nothing cached at those heights to drop. Truncating anyway would reach the cache floor and
+    // empty it for a reorg the cache never held.
+    match cache.latest_height() {
+        Ok(Some(tip)) if height <= tip => {}
+        Ok(tip) => {
+            tracing::debug!(
+                height,
+                cached_tip = tip,
+                "chain discontinuity reported above the cached tip; nothing to repair"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::error!(%error, height, "reading the cached tip for a reported discontinuity failed");
+            return;
+        }
+    }
+    if !budget.try_spend(Instant::now()) {
+        repair.report(height);
+        if budget.first_refusal_of_window() {
+            tracing::error!(
+                height,
+                "chain discontinuity reports exhausted the repair budget; leaving the cache alone"
+            );
+        }
         return;
     }
-    *consecutive_recoveries += 1;
     tracing::warn!(
         height,
-        consecutive_recoveries,
         "chain discontinuity reported while serving; truncating the cache to re-ingest"
     );
     if let Err(error) = reorg_to_floor(cache, height.saturating_sub(1), start_height) {
@@ -914,46 +984,138 @@ mod tests {
         assert!(!should_recover(&transport, 0));
     }
 
-    #[test]
-    fn a_reported_discontinuity_truncates_the_cache_from_that_height() {
-        let (_dir, cache) = temp_cache();
-        for height in 100..=105 {
+    /// A cache holding a contiguous chain over `heights`.
+    fn cache_holding(heights: std::ops::RangeInclusive<u64>) -> (tempfile::TempDir, Cache) {
+        let (dir, cache) = temp_cache();
+        for height in heights {
             cache
                 .add(height, &tip_block(height, vec![height as u8; 32]))
                 .unwrap();
         }
-        let mut consecutive_recoveries = 0;
+        (dir, cache)
+    }
 
-        repair_reported(&cache, 103, 100, &mut consecutive_recoveries);
+    #[test]
+    fn a_reported_discontinuity_truncates_the_cache_from_that_height() {
+        let (_dir, cache) = cache_holding(100..=105);
+        let repair = RepairSignal::new();
+        let mut budget = RepairBudget::new(Instant::now());
+
+        repair_reported(&cache, 103, 100, &repair, &mut budget);
 
         assert_eq!(cache.latest_height().unwrap(), Some(102));
     }
 
     #[test]
-    fn a_reported_discontinuity_counts_as_a_recovery() {
-        let (_dir, cache) = temp_cache();
-        cache.add(100, &tip_block(100, vec![100; 32])).unwrap();
-        let mut consecutive_recoveries = 0;
+    fn a_reported_discontinuity_spends_the_repair_budget() {
+        let (_dir, cache) = cache_holding(100..=105);
+        let repair = RepairSignal::new();
+        let mut budget = RepairBudget::new(Instant::now());
 
-        repair_reported(&cache, 100, 100, &mut consecutive_recoveries);
+        repair_reported(&cache, 103, 100, &repair, &mut budget);
 
-        assert_eq!(consecutive_recoveries, 1);
+        assert_eq!(budget.spent, 1);
     }
 
     #[test]
-    fn a_reported_discontinuity_past_the_recovery_limit_leaves_the_cache_alone() {
-        // Backstop against a node the cache can never reconcile with driving an endless
-        // truncate/re-ingest cycle.
-        let (_dir, cache) = temp_cache();
-        for height in 100..=105 {
-            cache
-                .add(height, &tip_block(height, vec![height as u8; 32]))
-                .unwrap();
-        }
-        let mut consecutive_recoveries = MAX_CONSECUTIVE_RECOVERIES;
+    fn a_discontinuity_reported_above_the_cached_tip_leaves_the_cache_alone() {
+        // A seam between two node-served blocks: nothing is cached at those heights, so truncating
+        // would reach the floor and empty a cache the reorg never touched.
+        let (_dir, cache) = cache_holding(100..=105);
+        let repair = RepairSignal::new();
+        let mut budget = RepairBudget::new(Instant::now());
 
-        repair_reported(&cache, 103, 100, &mut consecutive_recoveries);
+        repair_reported(&cache, 106, 100, &repair, &mut budget);
 
         assert_eq!(cache.latest_height().unwrap(), Some(105));
+    }
+
+    #[test]
+    fn a_discontinuity_reported_above_the_cached_tip_does_not_spend_the_budget() {
+        let (_dir, cache) = cache_holding(100..=105);
+        let repair = RepairSignal::new();
+        let mut budget = RepairBudget::new(Instant::now());
+
+        repair_reported(&cache, 106, 100, &repair, &mut budget);
+
+        assert_eq!(budget.spent, 0);
+    }
+
+    #[test]
+    fn a_reported_discontinuity_past_the_repair_budget_leaves_the_cache_alone() {
+        // Backstop against a node the cache can never reconcile with driving an endless
+        // truncate/re-ingest cycle.
+        let (_dir, cache) = cache_holding(100..=105);
+        let repair = RepairSignal::new();
+        let now = Instant::now();
+        let mut budget = RepairBudget::new(now);
+        for _ in 0..MAX_REPAIRS_PER_WINDOW {
+            budget.try_spend(now);
+        }
+
+        repair_reported(&cache, 103, 100, &repair, &mut budget);
+
+        assert_eq!(cache.latest_height().unwrap(), Some(105));
+    }
+
+    #[test]
+    fn a_discontinuity_refused_by_the_budget_stays_reported() {
+        let (_dir, cache) = cache_holding(100..=105);
+        let repair = RepairSignal::new();
+        let now = Instant::now();
+        let mut budget = RepairBudget::new(now);
+        for _ in 0..MAX_REPAIRS_PER_WINDOW {
+            budget.try_spend(now);
+        }
+
+        repair_reported(&cache, 103, 100, &repair, &mut budget);
+
+        assert_eq!(repair.take(), Some(103));
+    }
+
+    #[test]
+    fn the_repair_budget_allows_its_quota_within_a_window() {
+        let now = Instant::now();
+        let mut budget = RepairBudget::new(now);
+
+        let granted = (0..MAX_REPAIRS_PER_WINDOW + 1)
+            .map(|_| budget.try_spend(now))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            granted.iter().filter(|ok| **ok).count() as u32,
+            MAX_REPAIRS_PER_WINDOW
+        );
+    }
+
+    #[test]
+    fn the_repair_budget_refills_once_the_window_has_passed() {
+        // A successful step must not refill it: after a repair truncation the next step always
+        // succeeds, so a progress-reset counter would never bound anything.
+        let now = Instant::now();
+        let mut budget = RepairBudget::new(now);
+        for _ in 0..MAX_REPAIRS_PER_WINDOW {
+            budget.try_spend(now);
+        }
+
+        assert!(budget.try_spend(now + REPAIR_WINDOW));
+    }
+
+    #[test]
+    fn the_repair_budget_logs_one_refusal_per_window() {
+        let now = Instant::now();
+        let mut budget = RepairBudget::new(now);
+        for _ in 0..MAX_REPAIRS_PER_WINDOW {
+            budget.try_spend(now);
+        }
+        budget.try_spend(now);
+
+        assert_eq!(
+            (
+                budget.first_refusal_of_window(),
+                budget.first_refusal_of_window()
+            ),
+            (true, false)
+        );
     }
 }
