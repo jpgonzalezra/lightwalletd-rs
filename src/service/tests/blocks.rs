@@ -435,6 +435,64 @@ async fn get_block_range_aborts_when_the_cached_block_is_from_an_abandoned_fork(
 }
 
 #[tokio::test]
+async fn get_block_range_aborts_on_a_discontinuity_between_two_node_served_blocks() {
+    // Above the cached tip every height is fetched from the node one at a time, so a reorg between
+    // two of those fetches breaks the chain with the cache nowhere near the seam.
+    let (mut raws, parsed) = testdata_chain();
+    raws[3][4..36].copy_from_slice(&[0xff; 32]);
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&parsed[..2], &raws[2..]);
+
+    let (served, status) = collect_range(&streamer, parsed[0].height, parsed[3].height).await;
+
+    assert_eq!(
+        (served.len(), status.map(|status| status.code())),
+        (3, Some(Code::Aborted))
+    );
+}
+
+#[tokio::test]
+async fn a_discontinuity_between_two_node_served_blocks_reports_nothing_for_repair() {
+    // The cache holds no block at either side of the seam, so truncating it would repair nothing and
+    // (the seam being above the cached tip) would empty it down to the floor.
+    let (mut raws, parsed) = testdata_chain();
+    raws[3][4..36].copy_from_slice(&[0xff; 32]);
+    let (_dir, streamer, repair) = streamer_with_cache_and_node(&parsed[..2], &raws[2..]);
+
+    collect_range(&streamer, parsed[0].height, parsed[3].height).await;
+
+    assert_eq!(repair.take(), None);
+}
+
+#[tokio::test]
+async fn get_block_range_serves_a_contiguous_range_spanning_several_cache_chunks() {
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&chain(1..=70), &[]);
+
+    let (served, status) = collect_range(&streamer, 1, 70).await;
+
+    assert_eq!((served.len(), status.is_none()), (70, true));
+}
+
+#[tokio::test]
+async fn get_block_range_aborts_on_a_discontinuity_across_a_cache_chunk_boundary() {
+    // Heights 1..=64 and 65..=70 are read under separate transactions; the link handed between them
+    // is what catches a seam the chunking would otherwise hide.
+    let mut blocks = chain(1..=70);
+    blocks[64].prev_hash = vec![0xff; 32];
+    let (_dir, streamer, repair) = streamer_with_cache_and_node(&blocks, &[]);
+
+    let (served, status) = collect_range(&streamer, 1, 70).await;
+
+    assert_eq!(
+        (
+            served.len(),
+            status.map(|status| status.code()),
+            repair.take()
+        ),
+        (64, Some(Code::Aborted), Some(64))
+    );
+}
+
+#[tokio::test]
 async fn get_block_range_nullifiers_aborts_on_a_discontinuity_too() {
     let mut blocks = chain(1..=3);
     blocks[2].prev_hash = vec![0xff; 32];

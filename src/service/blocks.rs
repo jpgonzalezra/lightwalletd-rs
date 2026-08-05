@@ -135,17 +135,26 @@ pub(super) async fn get_block_range_nullifiers(
 /// cache file's growth.
 const CACHE_READ_CHUNK: u64 = 64;
 
+/// Where a block in the stream came from. A discontinuity between two node-served blocks is the node
+/// reorging between two fetches, which the cache had no part in and cannot repair.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BlockSource {
+    Cache,
+    Node,
+}
+
 /// What the next block in the stream must hash to, and the height that established it.
 struct ChainLink {
     height: u64,
     /// Ascending, the previous block's `hash`, matched against the next block's `prev_hash`;
     /// descending, the previous block's `prev_hash`, matched against the next block's `hash`.
     expected_hash: Vec<u8>,
+    source: BlockSource,
 }
 
 impl ChainLink {
     /// The link `block` establishes for whatever follows it in this direction.
-    fn after(height: u64, block: &CompactBlock, descending: bool) -> Self {
+    fn after(height: u64, block: &CompactBlock, descending: bool, source: BlockSource) -> Self {
         let expected_hash = if descending {
             block.prev_hash.clone()
         } else {
@@ -154,21 +163,27 @@ impl ChainLink {
         Self {
             height,
             expected_hash,
+            source,
         }
     }
 
     /// Check that `block` connects to this link, reporting the suspect height for repair if it does
-    /// not.
+    /// not and the cache is implicated.
     ///
     /// A range is resolved height by height from the cache or the node, and during a reorg repair
     /// those two disagree: the cache can still hold the abandoned fork below the point the ingestor
     /// has rolled back to while the node already serves the new chain. Splicing them would describe a
     /// chain that never existed, so the stream fails instead.
+    ///
+    /// Only a seam with a cache-served block on at least one side is reported: two node-served blocks
+    /// that do not connect are the node reorging between two fetches, and truncating the cache for
+    /// that repairs nothing (the seam is above the cached tip, where nothing is cached to drop).
     fn check(
         &self,
         block: &CompactBlock,
         height: u64,
         descending: bool,
+        source: BlockSource,
         repair: Option<&RepairSignal>,
     ) -> Result<(), Status> {
         let actual_hash = if descending {
@@ -182,18 +197,20 @@ impl ChainLink {
         // Either side of the seam may be the stale one, so the lower height is what has to go: dropping
         // it drops everything above it too.
         let suspect_height = height.min(self.height);
+        let cache_implicated = self.source == BlockSource::Cache || source == BlockSource::Cache;
         tracing::warn!(
             height,
             previous_height = self.height,
             suspect_height,
+            cache_implicated,
             "chain discontinuity while serving a block range"
         );
-        if let Some(repair) = repair {
+        if cache_implicated && let Some(repair) = repair {
             repair.report(suspect_height);
         }
         Err(Status::aborted(format!(
-            "get_block_range: chain discontinuity at height {height}; the cache is being repaired \
-             after a reorg, retry"
+            "get_block_range: chain discontinuity at height {height}; the chain reorged while \
+             serving, retry"
         )))
     }
 }
@@ -249,16 +266,19 @@ fn block_range_stream(
                 chunk.collect()
             };
             for height in heights {
-                let block = match cached.remove(&height) {
-                    Some(block) => block,
-                    None => fetch::compact_block(node.as_ref(), height)
-                        .await
-                        .map_err(|err| errors::block_fetch_to_status(err, height))?,
+                let (block, source) = match cached.remove(&height) {
+                    Some(block) => (block, BlockSource::Cache),
+                    None => (
+                        fetch::compact_block(node.as_ref(), height)
+                            .await
+                            .map_err(|err| errors::block_fetch_to_status(err, height))?,
+                        BlockSource::Node,
+                    ),
                 };
                 if let Some(previous) = &link {
-                    previous.check(&block, height, descending, repair.as_ref())?;
+                    previous.check(&block, height, descending, source, repair.as_ref())?;
                 }
-                link = Some(ChainLink::after(height, &block, descending));
+                link = Some(ChainLink::after(height, &block, descending, source));
                 yield transform(block);
             }
         }
