@@ -34,8 +34,10 @@ store's page reclamation for the duration with nothing gained.
   by detection.
 - One read transaction per 64 heights instead of one per height, so a long range does less
   transaction setup.
-- A chunk's blocks are held in memory together, bounding a range's peak memory at 64 compact blocks
-  rather than the whole span.
+- A chunk's blocks are held in memory together, where the per-height reads held one at a time: peak
+  memory per in-flight stream goes up 64-fold. That is the price of the intra-chunk guarantee, and it
+  is small in absolute terms (a compact block is far smaller than the full block it summarizes), but
+  it is a cost, not a saving.
 - Page reclamation is delayed by at most one chunk's service time, not by a whole range's, so a slow
   client cannot pin the cache file's growth.
 - The chunk size is a fixed constant, not a flag: it trades two costs that no operator is positioned

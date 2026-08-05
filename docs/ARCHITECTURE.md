@@ -530,9 +530,12 @@ whichever source each came from: ascending, the next block's `prev_hash` must eq
 `hash`; descending, the reverse ([ADR 0027](decisions/0027-block-range-continuity.md)). This matters while the
 ingestor is repairing a reorg, when the cache still holds the abandoned fork below the point it has rolled back
 to and the node already serves the new chain: splicing them would describe a chain that never existed. A
-mismatch ends the stream with `Aborted` and reports the lower height of the seam, which the ingestor drains at
-the top of its loop and truncates from, so re-ingestion repairs the cache and the client's retry succeeds
-instead of hitting the same seam.
+mismatch ends the stream with `Aborted` and, when the cache served at least one side of the seam, reports its
+lower height, which the ingestor drains at the top of its loop and truncates from, so re-ingestion repairs the
+cache and the client's retry succeeds instead of hitting the same seam. A seam between two node-served blocks
+is the node reorging between two per-height fetches, above the cached tip where nothing is cached to drop: it
+aborts the range and leaves the cache untouched. Truncations are charged to a budget of five per ten-minute
+window, so a node the cache cannot reconcile with cannot drive an endless truncate/re-ingest cycle.
 
 `--nocache` bypasses all of the above: the ingestor is not spawned and the cache is opened in a throwaway
 `tempfile::tempdir()` instead of `--data-dir`, so it starts (and stays) empty and every read falls through
