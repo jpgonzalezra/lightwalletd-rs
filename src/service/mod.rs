@@ -57,6 +57,9 @@ pub struct Streamer {
     ping_count: Arc<AtomicI64>,
     /// Donation address advertised in `GetLightdInfo`; `None` when unconfigured.
     donation_address: Option<String>,
+    /// Where a chain discontinuity seen while serving a range is reported, so the ingestor repairs
+    /// the cache instead of leaving every retry to hit it; `None` when no ingestor is running.
+    repair: Option<crate::repair::RepairSignal>,
 }
 
 impl Streamer {
@@ -77,7 +80,15 @@ impl Streamer {
             ping_enable: false,
             ping_count: Arc::new(AtomicI64::new(0)),
             donation_address: None,
+            repair: None,
         }
+    }
+
+    /// Attach the signal the ingestor watches, so a chain discontinuity seen while serving a range
+    /// gets the offending cache entry truncated and re-ingested. Live mode only.
+    pub fn with_repair_signal(mut self, repair: crate::repair::RepairSignal) -> Self {
+        self.repair = Some(repair);
+        self
     }
 
     /// Attach a shared mempool monitor, so the two mempool methods serve from its snapshot instead of

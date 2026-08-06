@@ -108,6 +108,11 @@ chain.
 - **[Block hashing — double SHA-256](https://zips.z.cash/protocol/protocol.pdf#blockheader)** — internal
   little-endian, display big-endian, the Bitcoin convention.
   *Where:* `src/compact.rs` `sha256d`, `src/encoding.rs`.
+- **[Block header `hashPrevBlock` — Protocol Specification §7.6](https://zips.z.cash/protocol/protocol.pdf#blockheader)**
+  — each header commits to its parent's hash, which is what makes a served range verifiable as one chain rather
+  than a set of blocks that happen to be consecutive by height.
+  *Where:* `src/compact.rs` `to_compact_block` (`prev_hash`), `src/service/blocks.rs` `ChainLink`,
+  `src/ingestor.rs` `step`.
 - **[CompactSize (variable-length integer)](https://developer.bitcoin.org/reference/transactions.html#compactsize-unsigned-integers)**
   — the Bitcoin "CompactSize unsigned integer" used for transaction counts and the solution / script lengths.
   *Where:* `src/compact.rs` `write_compact_size`, `zcash_encoding::CompactSize`.

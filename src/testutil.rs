@@ -46,6 +46,37 @@ pub fn testdata_blocks() -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// The `getblock` verbose response a node would return for the raw block `raw`: its real hash (which
+/// the fetch path verifies against the bytes) and zeroed note-commitment tree sizes.
+pub fn verbose_for_raw_block(raw: &[u8]) -> (String, GetBlockVerbose) {
+    let hash =
+        crate::encoding::wire_to_display_hex(&crate::compact::to_compact_block(raw).unwrap().hash);
+    let verbose = serde_json::from_value(serde_json::json!({
+        "hash": hash,
+        "trees": { "sapling": { "size": 0 }, "orchard": { "size": 0 } },
+    }))
+    .unwrap();
+    (hash, verbose)
+}
+
+/// A [`FakeNode`] serving each of `raws` at its real height, the way the fetch path asks for a block:
+/// the verbose response by height, then the raw bytes by the hash it carries.
+pub fn fake_node_serving(raws: &[Vec<u8>]) -> FakeNode {
+    let mut verbose_by_height = HashMap::new();
+    let mut raw_by_hash = HashMap::new();
+    for raw in raws {
+        let height = crate::compact::to_compact_block(raw).unwrap().height;
+        let (hash, verbose) = verbose_for_raw_block(raw);
+        verbose_by_height.insert(height, verbose);
+        raw_by_hash.insert(hash, raw.clone());
+    }
+    FakeNode {
+        verbose_by_height,
+        raw_by_hash,
+        ..Default::default()
+    }
+}
+
 /// Every v5 transaction vector in `testdata/tx_v5.json` (skipping its two header rows), each as
 /// `(raw_tx, sapling_outputs, orchard_actions)`. The consensus branch id (bytes 8..12) is patched to
 /// NU5 so the parser accepts these synthetic vectors.
