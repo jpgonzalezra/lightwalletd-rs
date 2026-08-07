@@ -1,0 +1,85 @@
+# Mixnet transport spike
+
+Throwaway rig for measuring what it costs to serve `CompactTxStreamer` over a mixnet. Not part of
+the crate, not built by CI, and deliberately its own cargo workspace so `nym-sdk` and its ~750
+transitive packages never enter the parent lockfile.
+
+Two halves:
+
+```
+measurement tool
+      |  plain TCP, 127.0.0.1:9069 on the host
+    [dial]      opens a mixnet stream per inbound connection
+      |  mixnet
+     [sp]       pipes each accepted stream to the upstream
+      |  plain TCP, 127.0.0.1:9067
+lightwalletd-rs
+```
+
+Neither half understands gRPC. A mixnet stream implements `AsyncRead + AsyncWrite`, so gRPC travels
+through unmodified and existing tools work against the local port without changes.
+
+## Running
+
+Everything runs in containers; nothing is installed on the host.
+
+Start the server side and note the address it prints:
+
+```
+docker compose up --build sp
+# NYM_ADDRESS=<identity>.<encryption>@<gateway>
+```
+
+Then, with `lightwalletd-rs` listening on the host at `:9067`, start the dialer:
+
+```
+SP_ADDRESS=<the address above> docker compose up dial
+```
+
+Point any gRPC client at `127.0.0.1:9069`. The dialer listens on 9068 inside its container and
+Compose publishes it on 9069, because the server's own metrics endpoint already holds 9068 on the
+host. Override with `DIAL_HOST_PORT`.
+
+To sweep the variable under test:
+
+```
+SP_ADDRESS=<address> REPLY_SURBS=200 docker compose up dial
+```
+
+## What is being measured
+
+Every reply packet the far side sends consumes one reply block. A `GetBlockRange` of 1,000 recent
+blocks is roughly 1.3 MiB, which is about 659 packets, against a default budget of 10; even a single
+day of catch-up needs around 759. See `contrib/bench/results/compact-block-wire-size-2026-08.md`.
+
+So `REPLY_SURBS` does not really sweep "how many blocks are sent". It sweeps how often
+replenishment fires, and each replenishment is an extra round trip across a network that adds
+hundreds of milliseconds. The question is whether the curve has a usable knee.
+
+Alongside that: the tail of the latency distribution for a small unary call, and whether a stream
+survives crossing an epoch boundary, which lasts an hour and is when reply blocks expire.
+
+## Reproducing the stream failures
+
+`repro` is the third binary and needs neither half above: it runs two mixnet clients in one process,
+one echoing a 64-byte payload and one dialling it, with no gRPC, no HTTP/2 and no proxies in the
+path. A failure there belongs to the SDK or the network rather than to this rig, which is what makes
+it the evidence the reports cite.
+
+```
+docker compose run --rm repro
+TRIALS=400 BUDGETS=1,20,100,400 docker compose run --rm repro
+```
+
+Budgets are rotated one per trial rather than run in blocks, so a drifting network hits every value
+equally. It exits when the trials are done and prints a per-budget table.
+
+## Notes
+
+- `sp` keeps its identity in a Docker volume. That directory holds private keys: the Nym address is
+  derived from them, so losing it changes identity and copying it allows impersonation.
+- `dial` is deliberately ephemeral. A stable client identity is exactly what would let a server
+  correlate a client's requests, and the transport never hands the listener a client address anyway:
+  inbound opens without reply blocks are dropped by the SDK.
+- Each connected client generates continuous cover traffic, so running both halves costs roughly
+  2 Mbps sustained for as long as the rig is up.

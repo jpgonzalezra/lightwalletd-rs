@@ -35,3 +35,4 @@ choice stays discoverable after the fact. The living overview is
 | [0026](0026-grpc-web-support.md) | Serve gRPC-web natively, behind an off-by-default runtime flag |
 | [0027](0027-block-range-continuity.md) | Serve only self-consistent block ranges |
 | [0028](0028-mvcc-chunked-cache-reads.md) | Read the cache in MVCC chunks when serving a range |
+| [0029](0029-mixnet-transport-scope.md) | Keep a mixnet transport out of the crate, behind a sidecar |

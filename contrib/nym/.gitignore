@@ -1,0 +1,2 @@
+# Build artifacts: this project only ever builds inside its container.
+/target

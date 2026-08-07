@@ -9,3 +9,7 @@
 # Curated, committed readstate-vs-rpc backend reports (referenced by the README and ADR 0023).
 !rss-parity-2026-07.md
 !rss-bench-2026-07.md
+
+# Curated, committed mixnet transport evaluation (referenced by ADR 0029).
+!compact-block-wire-size-2026-08.md
+!mixnet-transport-2026-08.md
