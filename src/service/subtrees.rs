@@ -43,10 +43,15 @@ pub(super) async fn get_subtree_roots(
             arg.start_index, MAX_SUBTREE_INDEX
         )));
     }
-    // Unlike the start index, a limit above the range is not an error: no pool can hold more than
-    // `MAX_SUBTREE_INDEX` subtrees, so asking for more is asking for all of them. Saturating answers
-    // that request instead of failing it, and cannot change which roots are returned.
-    let max_entries = arg.max_entries.min(MAX_SUBTREE_INDEX);
+    // Unlike the start index, a limit above the range is not an error: a limit is a ceiling, so one
+    // past the range means "all of them". That request is already expressible as the unlimited `0`,
+    // so it maps there. Clamping to `MAX_SUBTREE_INDEX` would instead cap the count one short of the
+    // `MAX_SUBTREE_INDEX + 1` subtrees a full pool can hold (indexes `0..=MAX_SUBTREE_INDEX`).
+    let max_entries = if arg.max_entries > MAX_SUBTREE_INDEX {
+        0
+    } else {
+        arg.max_entries
+    };
 
     // In darkside mode the roots are staged complete (with their completing block already set),
     // so they are served verbatim rather than computed from the cached blocks. Both backends are

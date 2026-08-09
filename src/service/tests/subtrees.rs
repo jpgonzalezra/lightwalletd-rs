@@ -115,10 +115,11 @@ async fn start_index_above_the_node_range_is_rejected_without_a_node_call() {
     assert_eq!(*node.requested_subtree_params.lock().unwrap(), None);
 }
 
-// A limit is a ceiling, not a position: no pool can hold more subtrees than the node can address,
-// so a larger one asks for all of them. It saturates rather than failing the request.
+// A limit is a ceiling, not a position: one past the range asks for all of the subtrees, which is
+// exactly what the unlimited `0` expresses. Clamping to `u16::MAX` would instead cap the count one
+// short of the `u16::MAX + 1` subtrees a full pool can hold.
 #[tokio::test]
-async fn max_entries_above_the_node_range_is_saturated() {
+async fn max_entries_above_the_node_range_is_forwarded_as_unlimited() {
     let node = Arc::new(FakeNode {
         subtrees: Some(GetSubtrees { subtrees: vec![] }),
         ..Default::default()
@@ -136,7 +137,7 @@ async fn max_entries_above_the_node_range_is_saturated() {
 
     assert_eq!(
         *node.requested_subtree_params.lock().unwrap(),
-        Some(("orchard".to_string(), 0, u16::MAX as u32))
+        Some(("orchard".to_string(), 0, 0))
     );
 }
 
