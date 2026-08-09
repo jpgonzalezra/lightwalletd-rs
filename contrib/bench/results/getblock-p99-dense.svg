@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 440" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+  <style>
+    .surface { fill: #fcfcfb; }
+    .t-primary { fill: #0b0b0b; }
+    .t-secondary { fill: #52514e; }
+    .t-muted { fill: #898781; }
+    .tick { font-variant-numeric: tabular-nums; }
+    .grid { stroke: #e1e0d9; stroke-width: 1; }
+    .axis { stroke: #c3c2b7; stroke-width: 1; }
+    .s-rust { stroke: #2a78d6; }
+    .f-rust { fill: #2a78d6; }
+    .s-go { stroke: #eb6834; }
+    .f-go { fill: #eb6834; }
+    .ring { stroke: #fcfcfb; stroke-width: 2; }
+    @media (prefers-color-scheme: dark) {
+      .surface { fill: #1a1a19; }
+      .t-primary { fill: #ffffff; }
+      .t-secondary { fill: #c3c2b7; }
+      .grid { stroke: #2c2c2a; }
+      .axis { stroke: #383835; }
+      .s-rust { stroke: #3987e5; }
+      .f-rust { fill: #3987e5; }
+      .s-go { stroke: #d95926; }
+      .f-go { fill: #d95926; }
+      .ring { stroke: #1a1a19; }
+    }
+  </style>
+  <rect class="surface" width="760" height="440"/>
+
+  <text class="t-primary" x="32" y="30" font-size="15" font-weight="600">GetBlock p99 latency, dense mainnet blocks</text>
+  <text class="t-secondary" x="32" y="50" font-size="12">Median-of-reps p99 per request, log scale; both servers fully cached; 2 vCPU / 2 GiB per container</text>
+
+  <rect class="f-rust" x="32" y="64" width="16" height="3" rx="1.5"/>
+  <text class="t-secondary" x="54" y="70" font-size="12">lightwalletd-rs</text>
+  <rect class="f-go" x="168" y="64" width="16" height="3" rx="1.5"/>
+  <text class="t-secondary" x="190" y="70" font-size="12">Go lightwalletd</text>
+
+  <line class="grid" x1="70" y1="276" x2="580" y2="276"/>
+  <line class="grid" x1="70" y1="180" x2="580" y2="180"/>
+  <line class="grid" x1="70" y1="84" x2="580" y2="84"/>
+  <line class="axis" x1="70" y1="372" x2="580" y2="372"/>
+
+  <text class="t-muted tick" x="60" y="376" font-size="11" text-anchor="end">0.1 ms</text>
+  <text class="t-muted tick" x="60" y="280" font-size="11" text-anchor="end">1 ms</text>
+  <text class="t-muted tick" x="60" y="184" font-size="11" text-anchor="end">10 ms</text>
+  <text class="t-muted tick" x="60" y="88" font-size="11" text-anchor="end">100 ms</text>
+
+  <text class="t-muted tick" x="70" y="392" font-size="11" text-anchor="middle">1</text>
+  <text class="t-muted tick" x="155" y="392" font-size="11" text-anchor="middle">2</text>
+  <text class="t-muted tick" x="240" y="392" font-size="11" text-anchor="middle">4</text>
+  <text class="t-muted tick" x="325" y="392" font-size="11" text-anchor="middle">8</text>
+  <text class="t-muted tick" x="410" y="392" font-size="11" text-anchor="middle">16</text>
+  <text class="t-muted tick" x="495" y="392" font-size="11" text-anchor="middle">32</text>
+  <text class="t-muted tick" x="580" y="392" font-size="11" text-anchor="middle">64</text>
+  <text class="t-muted" x="325" y="412" font-size="11" text-anchor="middle">concurrent clients</text>
+
+  <polyline class="s-go" points="70,308.9 155,329.1 240,320.2 325,286.5 410,202.0 495,108.5 580,110.3" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+  <polyline class="s-rust" points="70,316.7 155,319.3 240,336.2 325,325.4 410,293.1 495,265.6 580,235.3" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+
+  <circle class="f-go ring" cx="70" cy="308.9" r="3.5"/>
+  <circle class="f-go ring" cx="155" cy="329.1" r="3.5"/>
+  <circle class="f-go ring" cx="240" cy="320.2" r="3.5"/>
+  <circle class="f-go ring" cx="325" cy="286.5" r="3.5"/>
+  <circle class="f-go ring" cx="410" cy="202.0" r="3.5"/>
+  <circle class="f-go ring" cx="495" cy="108.5" r="3.5"/>
+  <circle class="f-go ring" cx="580" cy="110.3" r="4.5"/>
+
+  <circle class="f-rust ring" cx="70" cy="316.7" r="3.5"/>
+  <circle class="f-rust ring" cx="155" cy="319.3" r="3.5"/>
+  <circle class="f-rust ring" cx="240" cy="336.2" r="3.5"/>
+  <circle class="f-rust ring" cx="325" cy="325.4" r="3.5"/>
+  <circle class="f-rust ring" cx="410" cy="293.1" r="3.5"/>
+  <circle class="f-rust ring" cx="495" cy="265.6" r="3.5"/>
+  <circle class="f-rust ring" cx="580" cy="235.3" r="4.5"/>
+
+  <text class="t-primary" x="592" y="114" font-size="13.5" font-weight="600">53 ms</text>
+  <text class="t-secondary" x="592" y="130" font-size="11.5">Go lightwalletd</text>
+  <text class="t-primary" x="592" y="239" font-size="13.5" font-weight="600">2.7 ms</text>
+  <text class="t-secondary" x="592" y="255" font-size="11.5">lightwalletd-rs</text>
+
+  <text class="t-muted" x="32" y="426" font-size="11">contrib/bench harness, live mainnet dataset, July 2026 run; full tables in contrib/bench/results/</text>
+</svg>

@@ -13,3 +13,7 @@
 # Curated, committed mixnet transport evaluation (referenced by ADR 0029).
 !compact-block-wire-size-2026-08.md
 !mixnet-transport-2026-08.md
+
+# Charts rendered from the 2026-07 mainnet summary tables.
+!getblockrange-throughput-dense.svg
+!getblock-p99-dense.svg
