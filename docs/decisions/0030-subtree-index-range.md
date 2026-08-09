@@ -31,10 +31,11 @@ Bound the range in the handler, before any node round-trip, per [0011](0011-up-f
   also be defensible, but an index that large is unreachable through chain growth (it would take 2^32
   note commitments) and so only ever indicates a client bug. Reporting it as "no data" would hide that
   bug behind a plausible-looking answer.
-- A `maxEntries` above `u16::MAX` is saturated rather than rejected. The asymmetry is deliberate: an
-  index is a position, so out of range means it does not exist, while a limit is a ceiling, so out of
-  range means "all of them". No pool can hold more subtrees than the node can address, so saturating
-  cannot change which roots are returned.
+- A `maxEntries` above `u16::MAX` is mapped to the unlimited `0` rather than rejected. The asymmetry
+  is deliberate: an index is a position, so out of range means it does not exist, while a limit is a
+  ceiling, so out of range means "all of them" — a request `0` already expresses by omitting the
+  limit. Clamping to `u16::MAX` would instead cap the count one short of the 65,536 subtrees a full
+  pool can hold (indexes 0 through 65,535).
 - Both checks run before the darkside branch, so the mock and node-backed backends answer an
   out-of-range request identically. This follows the reasoning in
   [0025](0025-taddress-range-bounds.md), which likewise bounds at the service layer precisely because
