@@ -18,8 +18,11 @@ chain.
   52-byte compact-note prefix kept from each output's ciphertext.
   *Where:* `proto/compact_formats.proto`, `src/compact.rs` (`COMPACT_CIPHERTEXT_LEN`, `to_compact_tx`).
 - **[Light wallet gRPC interface (`CompactTxStreamer`)](https://github.com/zcash/lightwallet-protocol)** — the
-  canonical light-client `.proto` set; the gRPC contract this server implements.
-  *Where:* `proto/service.proto`, `proto/compact_formats.proto`, `src/proto.rs`.
+  canonical light-client `.proto` set; the gRPC contract this server implements. The vendored copy is v0.5.0,
+  the version reported to clients in `LightdInfo.lightwalletProtocolVersion` and the one a wallet checks
+  before requesting non-default `poolTypes` (`proto/service.proto:35-38`).
+  *Where:* `proto/service.proto`, `proto/compact_formats.proto`, `src/proto.rs`,
+  `src/service/chain.rs` (`LIGHTWALLET_PROTOCOL_VERSION`).
 
 ## Transaction format & identifiers
 
