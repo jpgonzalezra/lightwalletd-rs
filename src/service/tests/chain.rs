@@ -96,6 +96,20 @@ async fn get_lightd_info_donation_address_empty_when_unset() {
 }
 
 #[tokio::test]
+async fn get_lightd_info_reports_the_served_lightwallet_protocol_version() {
+    let (_dir, streamer) = streamer_with(lightd_info_node());
+
+    let response = streamer
+        .get_lightd_info(Request::new(Empty {}))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // A client checks this before requesting non-default `poolTypes`; empty reads as pre-v0.4.0.
+    assert_eq!(response.lightwallet_protocol_version, "v0.5.0");
+}
+
+#[tokio::test]
 async fn get_lightd_info_reports_sapling_by_branch_id_and_next_pending_upgrade() {
     let fake = Arc::new(FakeNode {
         info: Some(

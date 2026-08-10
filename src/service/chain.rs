@@ -22,6 +22,15 @@ pub(super) async fn get_latest_block(streamer: &Streamer) -> Result<Response<Blo
 /// up by this key. Absent on regtest, where it defaults to 0.
 const SAPLING_BRANCH_ID: &str = "76b809bb";
 
+/// Version of [lightwallet-protocol] this server implements, reported in `LightdInfo`. It is a
+/// constant rather than a build stamp: it describes the protocol served, not the binary. Clients
+/// read it to decide whether they may request non-default `poolTypes`, so it tracks the vendored
+/// `proto/` set and moves only once the server actually serves everything the named version
+/// specifies.
+///
+/// [lightwallet-protocol]: https://github.com/zcash/lightwallet-protocol
+const LIGHTWALLET_PROTOCOL_VERSION: &str = "v0.5.0";
+
 pub(super) async fn get_lightd_info(streamer: &Streamer) -> Result<Response<LightdInfo>, Status> {
     let node_info = streamer.node.get_info().await?;
     let chain = streamer.node.get_blockchain_info().await?;
@@ -56,6 +65,7 @@ pub(super) async fn get_lightd_info(streamer: &Streamer) -> Result<Response<Ligh
         donation_address: streamer.donation_address.clone().unwrap_or_default(),
         upgrade_name,
         upgrade_height,
+        lightwallet_protocol_version: LIGHTWALLET_PROTOCOL_VERSION.to_string(),
         ..Default::default()
     };
     Ok(Response::new(info))
