@@ -20,7 +20,7 @@ pub const DEFAULT_INGEST_CONCURRENCY: usize = 8;
 pub const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 60;
 /// Default time, in seconds, to wait for a keepalive ack before dropping a connection.
 pub const DEFAULT_KEEPALIVE_TIMEOUT_SECS: u64 = 20;
-/// Default darkside auto-shutdown timeout, in minutes — matches the Go reference's fixed default.
+/// Default darkside auto-shutdown timeout, in minutes; matches the Go reference's fixed default.
 pub const DEFAULT_DARKSIDE_TIMEOUT_MINUTES: u64 = 30;
 /// Default address for the snapshot HTTP endpoint.
 pub const DEFAULT_SNAPSHOT_BIND: &str = "127.0.0.1:9069";
@@ -121,12 +121,12 @@ pub struct Cli {
     #[arg(long)]
     pub tls_key: Option<PathBuf>,
 
-    /// Run the gRPC server without TLS (plaintext). Insecure — development only.
+    /// Run the gRPC server without TLS (plaintext). Insecure; development only.
     #[arg(long = "no-tls-very-insecure")]
     pub no_tls: bool,
 
     /// Generate an in-memory self-signed TLS certificate at startup instead of reading
-    /// `--tls-cert`/`--tls-key` from disk. Insecure — the certificate is not trusted by anything,
+    /// `--tls-cert`/`--tls-key` from disk. Insecure: the certificate is not trusted by anything,
     /// so it only helps a client that already skips verification; development only. Mutually
     /// exclusive with `--tls-cert`/`--tls-key` and `--no-tls-very-insecure`.
     #[arg(long = "gen-cert-very-insecure")]
@@ -180,26 +180,26 @@ pub struct Cli {
     #[arg(long)]
     pub snapshot_url: Option<String>,
 
-    /// Run as a darkside mock server (no real node) for deterministic wallet tests. Insecure —
-    /// testing only; never deploy in production.
+    /// Run as a darkside mock server (no real node) for deterministic wallet tests. Insecure:
+    /// testing only, never deploy in production.
     #[arg(long = "darkside-very-insecure")]
     pub darkside: bool,
 
     /// In darkside mode, shut the mock server down after this many minutes so a forgotten or
     /// leaked CI job cannot serve indefinitely (matches the Go reference's fixed 30-minute
-    /// default; Go has no way to disable it, so neither do we — pass a very large value for an
+    /// default; Go has no way to disable it, so neither do we. Pass a very large value for an
     /// effectively unbounded local session). Ignored outside darkside mode.
     #[arg(long, default_value_t = DEFAULT_DARKSIDE_TIMEOUT_MINUTES)]
     pub darkside_timeout_minutes: u64,
 
     /// Run without the on-disk block cache: every block read falls through to the node instead of
-    /// being served from `--data-dir`. Debugging only — throughput suffers badly against a real
+    /// being served from `--data-dir`. Debugging only: throughput suffers badly against a real
     /// chain, since nothing is cached between requests.
     #[arg(long)]
     pub nocache: bool,
 
-    /// Enable the `Ping` gRPC (testing/benchmark only). Off by default; insecure — it lets a client
-    /// hold server resources, so never enable in production.
+    /// Enable the `Ping` gRPC (testing/benchmark only). Off by default and insecure: it lets a
+    /// client hold server resources, so never enable in production.
     #[arg(long = "ping-very-insecure")]
     pub ping_enable: bool,
 
@@ -266,7 +266,7 @@ pub enum Backend {
     Readstate,
 }
 
-/// The resolved backend selection, carrying the settings the chosen backend needs — so a
+/// The resolved backend selection, carrying the settings the chosen backend needs, so a
 /// `readstate` backend without an indexer address is unrepresentable past [`Cli::resolve`].
 #[derive(Debug, Clone)]
 pub enum BackendConfig {
@@ -384,7 +384,7 @@ pub enum TlsConfig {
         /// PEM-encoded private key.
         key_pem: String,
     },
-    /// Serve plaintext (no TLS) — insecure, development only.
+    /// Serve plaintext (no TLS): insecure, development only.
     Disabled,
 }
 
@@ -492,7 +492,7 @@ impl Cli {
         } else if self.gen_cert {
             tracing::warn!(
                 "--gen-cert-very-insecure: generating an in-memory self-signed TLS certificate \
-                 for \"localhost\" — trusted by nothing, development only, never use in production"
+                 for \"localhost\": trusted by nothing, development only, never use in production"
             );
             let rcgen::CertifiedKey { cert, signing_key } =
                 rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
@@ -595,8 +595,8 @@ impl Cli {
         if self.grpc_web_allow_origin.is_empty() {
             tracing::warn!(
                 "--grpc-web without --grpc-web-allow-origin: any web page may call this server \
-                 from its visitors' browsers. Pass --grpc-web-allow-origin to narrow that down — \
-                 but note CORS only bounds which origins a browser hands the response to, so it is \
+                 from its visitors' browsers. Pass --grpc-web-allow-origin to narrow that down, \
+                 but CORS only bounds which origins a browser hands the response to, so it is \
                  not an authentication mechanism"
             );
             return Ok(Some(GrpcWebOrigins::Any));
@@ -665,7 +665,7 @@ impl Cli {
 /// An `Origin` header is exactly `scheme://host[:port]`, compared byte for byte against the
 /// allowlist. A value carrying a path, a trailing slash or an explicit default port therefore
 /// matches nothing, and the failure surfaces in the browser as an opaque CORS error rather than as
-/// anything pointing back at this flag — so it is rejected at startup, with the form that works.
+/// anything pointing back at this flag. So it is rejected at startup, with the form that works.
 fn validate_origin(origin: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(origin).with_context(|| {
         format!("--grpc-web-allow-origin {origin:?} is not a valid origin (scheme://host[:port])")
@@ -780,7 +780,7 @@ fn parse_zcash_conf(path: &Path) -> Result<ZcashConf> {
     Ok(conf)
 }
 
-/// Whether `text` contains a TOML `[section]` (or `[[array-of-tables]]`) header — evidence the
+/// Whether `text` contains a TOML `[section]` (or `[[array-of-tables]]`) header: evidence the
 /// file is a zebrad TOML config rather than an ini-style `zcash.conf`, whose `key=value` lines
 /// never start with `[`.
 fn looks_like_toml(text: &str) -> bool {
@@ -1457,8 +1457,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Sets environment variables and removes them again on drop — even when an assertion between
-    /// set and cleanup panics — so a failed test cannot leak its vars into sibling tests.
+    /// Sets environment variables and removes them again on drop (even when an assertion between
+    /// set and cleanup panics), so a failed test cannot leak its vars into sibling tests.
     struct EnvVarGuard {
         keys: Vec<&'static str>,
     }

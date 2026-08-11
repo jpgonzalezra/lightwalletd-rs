@@ -68,7 +68,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             server = server.tls_config(ServerTlsConfig::new().identity(identity))?;
         }
         config::TlsConfig::Disabled => {
-            tracing::warn!("running without TLS (plaintext) — do not use in production");
+            tracing::warn!("running without TLS (plaintext): do not use in production");
         }
     }
 
@@ -76,7 +76,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         // Mock chain: serve both `CompactTxStreamer` (from the in-memory state) and the
         // `DarksideStreamer` control plane. No real node, no ingestor; the cache stays empty so
         // every block read falls back to the mock node.
-        tracing::warn!("running in darkside mode — mock chain, never use in production");
+        tracing::warn!("running in darkside mode: mock chain, never use in production");
         tracing::info!(grpc_bind = %config.grpc_bind, "lightwalletd-rs darkside starting");
 
         let (streamer, darkside_service, _state, shutdown) =
@@ -86,7 +86,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             .with_donation_address(config.donation_address.clone());
 
         // Auto-shutdown so a forgotten or leaked darkside process (e.g. a CI job that fails to
-        // tear it down) never serves indefinitely — matches the Go reference's fixed 30-minute
+        // tear it down) never serves indefinitely, matching the Go reference's fixed 30-minute
         // darkside timeout, which has no way to be disabled (see ADR 0022). Unlike Go's abrupt
         // `Log.Fatal`/process exit, this drives the same graceful-shutdown `Notify` the `Stop` RPC
         // uses, so in-flight requests still drain before the process exits `run` normally.
@@ -113,7 +113,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
         // Query the chain (retrying until the node is reachable): its name keys the cache file, and
         // its Sapling activation height is the default place to start ingesting from. Both backends
-        // need the RPC reachable — readstate keeps it for tx submission and the mempool.
+        // need the RPC reachable: readstate keeps it for tx submission and the mempool.
         let chain_info = connect_with_retry(&rpc_client).await;
 
         let node: Arc<dyn NodeRpc> = match &config.backend {
@@ -142,7 +142,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
         // `--nocache` opens the cache in a throwaway temp dir instead of under `--data-dir` and
         // skips the ingestor below, so the cache never gains a single block and every read falls
-        // through to the node — for debugging only, since it forfeits all caching benefit. The
+        // through to the node, for debugging only, since it forfeits all caching benefit. The
         // `TempDir` guard is bound for the rest of `run` so its directory is not removed while the
         // cache is still open.
         let (cache, cache_location, _nocache_tempdir) = if config.nocache {
@@ -238,7 +238,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             if !snapshot_config.bind.ip().is_loopback() {
                 tracing::warn!(
                     snapshot_bind = %snapshot_config.bind,
-                    "publishing snapshots on a non-loopback address — anyone who can reach it can \
+                    "publishing snapshots on a non-loopback address: anyone who can reach it can \
                      download the whole cache, at whatever bandwidth this host will give them"
                 );
             }
@@ -389,7 +389,7 @@ pub fn reflection_service() -> anyhow::Result<
 /// Build the `readstate` backend (ADR 0023): open a read-only secondary instance of the zebrad
 /// state and keep it at the true chain tip with `TrustedChainSync` over the indexer gRPC. The
 /// JSON-RPC client is kept inside the backend for the node-only surfaces (submission, mempool,
-/// `getinfo`). Fails fast — with a pointer back to `--backend rpc` — when the state directory is
+/// `getinfo`). Fails fast, with a pointer back to `--backend rpc`, when the state directory is
 /// missing or written by an incompatible zebra version.
 #[cfg(feature = "readstate")]
 async fn readstate_node(
@@ -425,12 +425,12 @@ async fn readstate_node(
     // `TrustedChainSync` retries a lost indexer connection internally (its sync loop re-subscribes
     // forever), so the task only completes if it panics or the runtime shuts down. Supervise it
     // anyway: if it ever does die, the tip would freeze while the server keeps serving increasingly
-    // stale data — that must be an `error` in the logs, not silence.
+    // stale data; that must be an `error` in the logs, not silence.
     tokio::spawn(async move {
         let result = sync_task.await;
         tracing::error!(
             ?result,
-            "zebra state sync task exited; the readstate tip will no longer advance — restart the \
+            "zebra state sync task exited; the readstate tip will no longer advance. Restart the \
              server (or switch to --backend rpc)"
         );
     });
