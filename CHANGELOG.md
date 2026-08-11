@@ -5,19 +5,21 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-11
+
 ### Added
-- `/metrics` reports `grpc_server_connections_current`, the number of client connections open right
-  now. It counts accepted sockets, which puts gRPC, gRPC-web and TLS in one number, under the name
+- `/metrics` reports `grpc_server_connections_current`, the number of client connections open at that
+  moment. It counts accepted sockets, which puts gRPC, gRPC-web and TLS in one number, under the name
   lightwalletd deployments already scrape, so existing dashboards pick it up unchanged (ADR 0032).
 
 ### Fixed
-- `GetLightdInfo` reports `lightwalletProtocolVersion`, previously left empty. The field was added to
-  `LightdInfo` in lightwallet-protocol v0.4.0, in the same release as `BlockRange.poolTypes`, and is
-  the signal a client is required to check before requesting non-default pool types. Empty is
+- `GetLightdInfo` fills in `lightwalletProtocolVersion`, which 0.1.0 left empty. The field was added
+  to `LightdInfo` in lightwallet-protocol v0.4.0, in the same release as `BlockRange.poolTypes`, and
+  is the signal a client is required to check before requesting non-default pool types. Empty is
   indistinguishable from a pre-v0.4.0 server, so a correctly-behaving client could not tell that this
-  server serves transparent and Ironwood data inside compact blocks, and had to fall back to
-  shielded-only scanning. The value is a constant tracking the vendored `proto/` set, currently
-  `v0.5.0`, independent of the crate version and not overwritten by the build (ADR 0031).
+  server serves transparent and Ironwood data inside compact blocks, and fell back to shielded-only
+  scanning. The value is a constant tracking the vendored `proto/` set, currently `v0.5.0`,
+  independent of the crate version and not overwritten by the build (ADR 0031).
 
 ## [0.1.0] - 2026-08-09
 
