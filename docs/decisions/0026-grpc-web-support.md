@@ -9,7 +9,7 @@ usual answer is to put a translating proxy (Envoy, `grpcwebproxy`) in front of t
 an operator who wants to serve browser wallets has to run and configure a second process.
 
 `tonic-web` implements the translation as a `tower` layer inside the server, so the capability is a
-few lines of wiring away. Two things kept it from being simply switched on:
+few lines of wiring away. Two things kept it from being just switched on:
 
 - gRPC-web over a plaintext port needs the server to accept HTTP/1.1, since a browser does not use
   prior-knowledge HTTP/2 on cleartext connections. That changes what the listener answers, and every

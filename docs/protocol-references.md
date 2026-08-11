@@ -2,7 +2,7 @@
 
 The Zcash and Bitcoin specifications this implementation relies on, grouped by protocol layer. Each entry links a
 spec to the place in this repository where it is implemented, so the code can be read against the rules it follows.
-This is reference material for working on the code, not an explanation of the cryptography — each spec is the
+This is reference material for working on the code, not an explanation of the cryptography: each spec is the
 authority on its own subject.
 
 `Where:` pointers name a `module::function` or symbol when a line number would drift; stable structural anchors

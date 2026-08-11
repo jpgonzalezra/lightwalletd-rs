@@ -107,7 +107,7 @@ CPU% is per-interval utime+stime delta; 100% = one core.
 Interpretation: over the same 300 s the Rust ingestor moved 5.2x the blocks at
 5.7x the mean CPU and ~15x the mean RSS. Per block ingested the CPU cost is
 comparable (206%/36.5 ≈ 5.6 vs 36.4%/7.0 ≈ 5.2 CPU-%·s per block); Rust
-simply keeps ~2 cores busy by pipelining while Go's serial ingestor waits on
+keeps ~2 cores busy by pipelining while Go's serial ingestor waits on
 the node. The RSS gap is real but bounded: peak 801 MiB reflects up to 64
 huge sandblasting blocks in flight plus redb's write buffers (this range has
 multi-MiB blocks; on light ranges Phase 1 measured Rust peak RSS at

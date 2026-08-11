@@ -29,5 +29,5 @@ make verify   # fmt + clippy -D warnings + build + test
 
 ## Security issues
 
-Do not open a public issue for a security vulnerability — see [`SECURITY.md`](SECURITY.md) for how
+Do not open a public issue for a security vulnerability; see [`SECURITY.md`](SECURITY.md) for how
 to report it privately.
