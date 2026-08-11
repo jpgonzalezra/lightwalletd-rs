@@ -38,8 +38,9 @@ implements, [`docs/protocol-references.md`](docs/protocol-references.md).
 - An on-disk compact-block cache (`redb`), filled by a background ingestor that rolls back reorgs and
   recovers from corruption or gaps on its own.
 - TLS by default. Plaintext requires an explicit opt-in flag.
-- Prometheus metrics (per-method request counts and latency histograms) on `127.0.0.1:9068` unless
-  disabled, plus gRPC Server Reflection so `grpcurl` works without a local `.proto` checkout.
+- Prometheus metrics (per-method request counts, latency histograms, and a gauge of open client
+  connections) on `127.0.0.1:9068` unless disabled, plus gRPC Server Reflection so `grpcurl` works
+  without a local `.proto` checkout.
 - Input validation up front, per-connection stream and keepalive limits, and a graceful drain on
   `SIGINT`/`SIGTERM`.
 - A darkside mode serving a controllable in-memory mock chain for deterministic wallet tests.
@@ -192,15 +193,18 @@ from a browser; use the unary `GetTaddressBalance`. All server-streaming methods
 
 ## Observability
 
-Prometheus metrics (per-method request counts and latency histograms) are served on `/metrics` at
-`127.0.0.1:9068` **by default**; override the address with `--metrics-bind` or turn it off entirely with
-`--no-metrics`:
+Prometheus metrics are served on `/metrics` at `127.0.0.1:9068` **by default**; override the address with
+`--metrics-bind` or turn it off entirely with `--no-metrics`:
 
 ```sh
 lightwalletd-rs ...                        # metrics on 127.0.0.1:9068
 lightwalletd-rs ... --metrics-bind 127.0.0.1:9100
 lightwalletd-rs ... --no-metrics
 ```
+
+What it reports: request counts by method and gRPC status (`grpc_server_handled_total`), a latency
+histogram (`grpc_server_handling_seconds`), and how many client connections are open right now
+(`grpc_server_connections_current`). The per-method series need traffic before they appear.
 
 Because metrics are on by default, two instances on the same host collide on `:9068`: the second
 instance logs an `error` for the failed bind and keeps serving **without metrics** rather than

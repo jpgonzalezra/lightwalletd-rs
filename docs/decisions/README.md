@@ -38,3 +38,4 @@ choice stays discoverable after the fact. The living overview is
 | [0029](0029-mixnet-transport-scope.md) | Keep a mixnet transport out of the crate, behind a sidecar |
 | [0030](0030-subtree-index-range.md) | Bound the subtree index range at the service boundary |
 | [0031](0031-lightwallet-protocol-version.md) | Report the served lightwallet-protocol version as a constant |
+| [0032](0032-connection-gauge-at-the-listener.md) | Count connections at the listener |

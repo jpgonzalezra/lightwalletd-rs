@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+### Added
+- `/metrics` reports `grpc_server_connections_current`, the number of client connections open right
+  now. It counts accepted sockets, which puts gRPC, gRPC-web and TLS in one number, under the name
+  lightwalletd deployments already scrape, so existing dashboards pick it up unchanged (ADR 0032).
+
 ### Fixed
 - `GetLightdInfo` reports `lightwalletProtocolVersion`, previously left empty. The field was added to
   `LightdInfo` in lightwallet-protocol v0.4.0, in the same release as `BlockRange.poolTypes`, and is
