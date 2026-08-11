@@ -9,7 +9,7 @@ through a verbose `getblock`, but verbose responses are large and add load propo
 
 Compute transaction IDs locally from the raw block bytes via `librustzcash`, including v5 / Orchard
 IDs (ZIP-244). A single non-verbose `getblock` per block then supplies all transaction data; one extra
-verbose call per block is still made — for the note-commitment tree sizes (`ChainMetadata`), which are
+verbose call per block is still made, for the note-commitment tree sizes (`ChainMetadata`), which are
 not part of the raw block, and for the canonical block hash, which the raw fetch is keyed by so both
 calls refer to the same block even across a reorg.
 

@@ -2,9 +2,9 @@
 
 ## Context
 
-Relying on proto3 defaults turns a missing field into a degenerate-but-successful response — a
+Relying on proto3 defaults turns a missing field into a degenerate-but-successful response (a
 `GetBlockRange` with no bounds would stream from height 0, a `GetBlock` with `height == 0` would return
-genesis — instead of an error the caller can act on.
+genesis) instead of an error the caller can act on.
 
 ## Decision
 

@@ -25,8 +25,8 @@ Both are policy an operator should choose, not side effects of an upgrade.
 Serve gRPC-web from the gRPC port, off by default, enabled with `--grpc-web`.
 
 - `--grpc-web` adds two layers around the router and turns on `accept_http1`. Over TLS the flag is
-  redundant for the browser's sake — ALPN settles on HTTP/2 there, and gRPC-web rides that just as
-  well — but it stays the single switch for the transport either way.
+  redundant for the browser's sake (ALPN settles on HTTP/2 there, and gRPC-web rides that just as
+  well), but it stays the single switch for the transport either way.
 - `--grpc-web-allow-origin <ORIGIN>`, repeatable, restricts the transport to an allowlist. With none
   given, any origin is allowed and startup logs why that is a choice: CORS bounds which origins a
   browser hands the response to, and is not an authentication mechanism. A public instance serving
@@ -40,8 +40,8 @@ Serve gRPC-web from the gRPC port, off by default, enabled with `--grpc-web`.
   preflight is an `OPTIONS` with no gRPC content type, which the gRPC-web layer answers with `400`.
   It is the CORS layer that short-circuits the preflight before anything else sees it.
 - `grpc-status`, `grpc-message` and `grpc-status-details-bin` are exposed to JavaScript. gRPC puts
-  the outcome of a trailers-only response — every early rejection: `Unimplemented`, `InvalidArgument`,
-  an expired deadline — in HTTP headers, and a browser gives a page only the headers the server
+  the outcome of a trailers-only response (every early rejection: `Unimplemented`, `InvalidArgument`,
+  an expired deadline) in HTTP headers, and a browser gives a page only the headers the server
   exposed. Without this, such calls reach the client with their reason stripped off.
 - Preflights are cached for an hour (`Access-Control-Max-Age`), since the policy is static for the
   life of the process and a wallet calls many methods.

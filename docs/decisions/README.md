@@ -1,7 +1,7 @@
 # Architecture decision records
 
 Short records of the architectural decisions that shape `lightwalletd-rs`. Each ADR captures one
-decision in a fixed format — **Context**, **Decision**, **Consequences** — so the reasoning behind a
+decision in a fixed format (**Context**, **Decision**, **Consequences**), so the reasoning behind a
 choice stays discoverable after the fact. The living overview is
 [`../ARCHITECTURE.md`](../ARCHITECTURE.md); these records explain *why* it looks the way it does.
 

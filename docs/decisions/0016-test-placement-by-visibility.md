@@ -14,8 +14,8 @@ Place each test where its required visibility is satisfied:
   descendants, such as `collect_utxos`, `MAX_TADDRESS_TXIDS`, `node_tree_state_to_proto`) are grouped
   by method family under `src/service/tests/`, one file per family, mirroring the submodule split
   ([0009](0009-service-per-method-family-modules.md)).
-- Tests that reach a module's private items — e.g. `validate_block_range` / `MAX_BLOCK_RANGE` in
-  `blocks`, `push_bounded` in `address`, `refresh` in `mempool_monitor` — stay in an inline
+- Tests that reach a module's private items (e.g. `validate_block_range` / `MAX_BLOCK_RANGE` in
+  `blocks`, `push_bounded` in `address`, `refresh` in `mempool_monitor`) stay in an inline
   `#[cfg(test)] mod tests` in that module's own file.
 
 ## Consequences

@@ -18,5 +18,5 @@ single crate rather than a multi-crate workspace.
 
 - Integration tests link against the crate's API and drive the real server in-process (see
   [0015](0015-layered-testing-strategy.md)).
-- The public surface is kept deliberately small — internal-only modules stay private — so the library
+- The public surface is kept deliberately small (internal-only modules stay private), so the library
   API is intentional, not incidental.

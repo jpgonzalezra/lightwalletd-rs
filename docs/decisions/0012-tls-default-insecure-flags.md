@@ -10,7 +10,7 @@ in production.
 
 Run the wallet-facing gRPC server over TLS by default, requiring a certificate and key. Plaintext is
 available only behind `--no-tls-very-insecure`, which logs a warning on startup. Dangerous or
-testing-only features follow the same convention — off by default, opt-in through a flag whose name
+testing-only features follow the same convention: off by default, opt-in through a flag whose name
 carries a `-very-insecure` suffix, and never configurable from `zcash.conf`: `--darkside-very-insecure`
 (the mock chain) and `--ping-very-insecure` (the client-controlled `Ping`, a DoS vector if left open).
 

@@ -25,7 +25,7 @@ non-default cargo feature `readstate`:
   the read-only secondary with `TrustedChainSync` over the zebrad indexer gRPC for true-tip
   fidelity.
 - Writes and node-only data (`sendrawtransaction`, mempool, `getinfo`) keep using the JSON-RPC
-  client inside the same backend — a hybrid, by design.
+  client inside the same backend, a hybrid by design.
 - Raw block bytes are produced by `ZcashSerialize` from the state's `Block` and fed to the existing,
   golden-fixture-verified parser; the txid cross-check reads `TransactionIdsForBlock`. Wire output
   is byte-identical by construction and verified by parity tests.

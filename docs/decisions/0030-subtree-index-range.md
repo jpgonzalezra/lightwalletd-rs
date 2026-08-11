@@ -33,7 +33,7 @@ Bound the range in the handler, before any node round-trip, per [0011](0011-up-f
   bug behind a plausible-looking answer.
 - A `maxEntries` above `u16::MAX` is mapped to the unlimited `0` rather than rejected. The asymmetry
   is deliberate: an index is a position, so out of range means it does not exist, while a limit is a
-  ceiling, so out of range means "all of them" — a request `0` already expresses by omitting the
+  ceiling, so out of range means "all of them", which a request `0` already expresses by omitting the
   limit. Clamping to `u16::MAX` would instead cap the count one short of the 65,536 subtrees a full
   pool can hold (indexes 0 through 65,535).
 - Both checks run before the darkside branch, so the mock and node-backed backends answer an
