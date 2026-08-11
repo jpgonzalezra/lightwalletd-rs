@@ -512,7 +512,7 @@ const MAX_EPOCH_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// worth buffering from a peer nothing has verified yet.
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Idle timeout between reads from the snapshot peer, which is what detects a stalled transfer.
+/// Idle timeout between reads from the snapshot peer; this is how a stalled transfer is detected.
 ///
 /// Deliberately not a total deadline: an epoch body runs to [`MAX_EPOCH_BYTES`], so any fixed total
 /// would silently impose a floor on the link speed a bootstrap needs. At 300 seconds the 1.21 GB
@@ -670,7 +670,7 @@ const LOOKUP_BATCH: usize = 250;
 /// Look up every height's block hash, in batches, with at most `concurrency` requests in flight.
 ///
 /// A fixed pool of workers pulling batches off a shared counter. Batch size matters more than
-/// concurrency here, since what dominates is round trips rather than the node's own work.
+/// concurrency here, since what dominates is round trips, not the node's own work.
 async fn fetch_block_hashes(
     node: &Arc<dyn NodeRpc>,
     epoch: u64,

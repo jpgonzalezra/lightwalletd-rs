@@ -2,7 +2,7 @@
 //! a plain HTTP client rather than a generated gRPC client.
 //!
 //! The framing is asserted by hand on purpose. A generated client would hide exactly the parts a
-//! browser depends on — the length-prefixed frames, the trailer frame carrying `grpc-status`, and
+//! browser depends on: the length-prefixed frames, the trailer frame carrying `grpc-status`, and
 //! the CORS headers without which a browser refuses to hand the response to JavaScript.
 
 mod common;
@@ -250,7 +250,7 @@ async fn a_call_exposes_the_grpc_status_headers_to_javascript() {
     .await;
 
     let headers = response.headers().clone();
-    // Without these a trailers-only error — every early rejection — reaches the browser with its
+    // Without these a trailers-only error (every early rejection) reaches the browser with its
     // reason stripped off, and nothing in the symptom mentions CORS.
     for header in ["grpc-status", "grpc-message", "grpc-status-details-bin"] {
         assert!(

@@ -98,7 +98,7 @@ pub fn to_compact_block(raw: &[u8]) -> Result<CompactBlock, ParseError> {
     })
 }
 
-/// Double SHA-256, in protocol (little-endian) byte order — the on-wire block hash.
+/// Double SHA-256, in protocol (little-endian) byte order: the on-wire block hash.
 fn sha256d(data: &[u8]) -> Vec<u8> {
     Sha256::digest(Sha256::digest(data)).to_vec()
 }
@@ -643,7 +643,7 @@ mod property_tests {
 
     /// A real block with random mutations: byte flips, a random truncation point, and trailing junk.
     /// Flips run before truncation (indices are valid against the full block); the result may or may
-    /// not still parse, which is the point — it drives the fuzzer past the header into the tx loop.
+    /// not still parse, which is the point: it drives the fuzzer past the header into the tx loop.
     fn mutated_block() -> impl Strategy<Value = Vec<u8>> {
         let base = testdata_blocks()
             .into_iter()
@@ -667,7 +667,7 @@ mod property_tests {
     }
 
     proptest! {
-        // (a) arbitrary bytes — must return Ok or Err, never panic.
+        // (a) arbitrary bytes: must return Ok or Err, never panic.
         #[test]
         fn to_compact_block_never_panics_on_arbitrary_bytes(
             raw in prop::collection::vec(any::<u8>(), 0..2048),
@@ -682,7 +682,7 @@ mod property_tests {
             let _ = split_block(&raw);
         }
 
-        // (b) mutated valid block — exercises the header_end math and the tx-slice arithmetic.
+        // (b) mutated valid block: exercises the header_end math and the tx-slice arithmetic.
         #[test]
         fn to_compact_block_never_panics_on_mutated_block(raw in mutated_block()) {
             let _ = to_compact_block(&raw);

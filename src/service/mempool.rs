@@ -22,11 +22,11 @@ use super::{Streamer, decode_hex};
 /// O(suffixes × mempool entries) exclusion scan per request.
 const MAX_EXCLUDE_TXID_SUFFIXES: usize = 10_000;
 
-/// How often an open `GetMempoolStream` re-checks staleness while idle — i.e. while no new snapshot
+/// How often an open `GetMempoolStream` re-checks staleness while idle, i.e. while no new snapshot
 /// has been published, the common case when the node is down and the monitor has stopped publishing
 /// (`tokio::sync::watch::Receiver::changed` only wakes on an actual publish, so a stream waiting on it
 /// alone would never notice time passing). Aliases the monitor's own refresh cadence, so a stalled
-/// stream notices staleness about as promptly as a healthy poll would — and the two can never drift.
+/// stream notices staleness about as promptly as a healthy poll would, and the two can never drift.
 const STALENESS_POLL_INTERVAL: Duration = super::mempool_monitor::REFRESH_INTERVAL;
 
 /// The status served instead of a snapshot older than the staleness cutoff
@@ -153,7 +153,7 @@ pub(super) async fn get_mempool_stream(
             sent = snapshot.entries.len();
             // Wake on whichever comes first: a new snapshot, or a staleness-poll tick. A plain
             // `receiver.changed().await` would hang forever once the node goes down, since the
-            // monitor stops publishing on a failed refresh (mempool_monitor::start) — so an already
+            // monitor stops publishing on a failed refresh (mempool_monitor::start), so an already
             // open stream would keep serving the same increasingly stale snapshot with no signal,
             // exactly the failure mode the staleness contract closes
             // (docs/decisions/0021-mempool-staleness-contract.md).
@@ -265,7 +265,7 @@ mod tests {
     use super::MAX_EXCLUDE_TXID_SUFFIXES;
 
     /// A `Streamer` whose mempool is served from `handle`, over a `FakeNode` that panics on any
-    /// RPC — so a passing test proves the snapshot path issues zero node calls.
+    /// RPC, so a passing test proves the snapshot path issues zero node calls.
     fn streamer_with_handle(handle: MempoolHandle) -> (tempfile::TempDir, Streamer) {
         let (dir, cache) = temp_cache();
         let node = Arc::new(FakeNode::default());
@@ -291,7 +291,7 @@ mod tests {
         }
     }
 
-    /// A snapshot fresh as of now, so it serves normally regardless of paused time — until a test
+    /// A snapshot fresh as of now, so it serves normally regardless of paused time, until a test
     /// explicitly advances the clock past `STALENESS_CUTOFF`.
     fn snapshot_of(entries: Vec<MempoolEntry>) -> MempoolSnapshot {
         MempoolSnapshot::fresh("aa".to_string(), entries)
@@ -488,7 +488,7 @@ mod tests {
         let first = stream.next().await.unwrap().unwrap();
         assert_eq!(first.height, 0);
 
-        // No new block, no new tx — the node just stops answering. The monitor never publishes
+        // No new block, no new tx: the node just stops answering. The monitor never publishes
         // again, so `watch::Receiver::changed` alone would hang forever; the stream must still notice
         // via its staleness poll and end with `Unavailable` instead of hanging open silently.
         let status = stream.next().await.unwrap().unwrap_err();

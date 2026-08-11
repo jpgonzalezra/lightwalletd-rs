@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
 /// An explicit `RUST_LOG` environment variable always wins over `--log-level`, matching the usual
 /// `tracing-subscriber` convention (and documented on the flag itself). With `--log-file` unset,
 /// output is the existing human-readable text on stderr; with it set, output is JSON lines
-/// appended to that file — matching the Go reference, which switches its logrus output to JSON
+/// appended to that file, matching the Go reference, which switches its logrus output to JSON
 /// when `--log-file` is given.
 fn init_logging(log_level: &str, log_file: Option<&Path>) -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_default_env()

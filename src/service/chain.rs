@@ -18,7 +18,7 @@ pub(super) async fn get_latest_block(streamer: &Streamer) -> Result<Response<Blo
 }
 
 /// Consensus branch ID of the Sapling upgrade. The `upgrades` map is keyed by branch ID, which is
-/// stable across node versions — unlike the human-readable name — so the activation height is looked
+/// stable across node versions (unlike the human-readable name), so the activation height is looked
 /// up by this key. Absent on regtest, where it defaults to 0.
 const SAPLING_BRANCH_ID: &str = "76b809bb";
 

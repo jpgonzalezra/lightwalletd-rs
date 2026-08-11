@@ -52,8 +52,8 @@ pub struct MempoolSnapshot {
 }
 
 impl MempoolSnapshot {
-    /// The snapshot published before the first refresh completes: no tip, no entries, and — since it
-    /// was never actually fetched — already stale.
+    /// The snapshot published before the first refresh completes: no tip, no entries, and, since it
+    /// was never actually fetched, already stale.
     fn empty() -> Self {
         Self {
             tip_hash: String::new(),
@@ -89,12 +89,12 @@ pub struct MempoolHandle {
 }
 
 impl MempoolHandle {
-    /// The current snapshot, with no RPC — for `GetMempoolTx`.
+    /// The current snapshot, with no RPC; for `GetMempoolTx`.
     pub fn current(&self) -> Arc<MempoolSnapshot> {
         self.sender.borrow().clone()
     }
 
-    /// A fresh subscription whose first `borrow_and_update` sees the current value — for
+    /// A fresh subscription whose first `borrow_and_update` sees the current value; for
     /// `GetMempoolStream`.
     pub fn subscribe(&self) -> watch::Receiver<Arc<MempoolSnapshot>> {
         self.sender.subscribe()
@@ -109,7 +109,7 @@ impl MempoolHandle {
     }
 
     /// Publish a new snapshot on a handle built with [`Self::fixed`], simulating the monitor's next
-    /// successful refresh — for tests exercising recovery after staleness.
+    /// successful refresh; for tests exercising recovery after staleness.
     #[cfg(test)]
     pub(crate) fn publish(&self, snapshot: MempoolSnapshot) {
         self.sender.send_replace(Arc::new(snapshot));

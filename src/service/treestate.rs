@@ -8,7 +8,7 @@ use crate::proto::{BlockId, TreeState};
 
 use super::Streamer;
 
-/// A `BlockID`'s hash is a fixed 32-byte protocol-order (little-endian) block hash — same width as
+/// A `BlockID`'s hash is a fixed 32-byte protocol-order (little-endian) block hash, the same width as
 /// every other hash field on the wire (`TxFilter.hash`, `SubtreeRoot.completing_block_hash`, ...).
 const HASH_LEN: usize = 32;
 
@@ -35,8 +35,8 @@ pub(super) async fn get_tree_state(
 /// back through the chain until it lands on a block with a non-empty Sapling tree. That loop is a
 /// zcashd-only affordance: `z_gettreestate`'s `SkipHash` lets a caller cheaply find the first
 /// post-Sapling-activation block without walking heights one at a time. zebrad's `z_gettreestate`
-/// response has no `SkipHash` field (see `zebra-rpc` `trees.rs`) — it always answers directly for the
-/// requested height or hash — so there is nothing to walk here, and the loop is intentionally not
+/// response has no `SkipHash` field (see `zebra-rpc` `trees.rs`); it always answers directly for the
+/// requested height or hash, so there is nothing to walk here, and the loop is intentionally not
 /// replicated. `node_tree_state_to_proto` still rejects a pre-Sapling response's empty frontier with
 /// `InvalidArgument`, matching Go's end state for that case.
 fn treestate_id(block_id: &BlockId) -> Result<String, Status> {
@@ -74,7 +74,7 @@ pub(super) async fn get_latest_tree_state(
 }
 
 /// Build the gRPC `TreeState` from a node `z_gettreestate` response and the network name. A response
-/// with an empty frontier for every pool — a height before Sapling activation — is rejected with
+/// with an empty frontier for every pool (a height before Sapling activation) is rejected with
 /// `InvalidArgument` rather than returned as a malformed, empty `TreeState`. An empty Ironwood
 /// frontier alone is normal (every height before NU6.3 activation) and maps to an empty string.
 pub(super) fn node_tree_state_to_proto(

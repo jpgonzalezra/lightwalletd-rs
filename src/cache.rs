@@ -117,7 +117,7 @@ impl Cache {
     }
 
     /// Store a run of consecutive compact blocks in a single transaction, appending onto the cache
-    /// tip. One commit — and thus one fsync — covers the whole batch, which is what makes windowed
+    /// tip. One commit (and thus one fsync) covers the whole batch, which is what makes windowed
     /// catch-up cheap. The [`Self::add`] guards apply to the batch as a whole: the first block must
     /// extend the current tip by exactly one, and the heights must be consecutive. An empty batch
     /// is a no-op.
@@ -142,7 +142,7 @@ impl Cache {
     /// The base height of an imported snapshot, if this cache was bootstrapped from one.
     ///
     /// There is no matching setter: the value is only ever written by [`Self::add_decoded_batch`],
-    /// which is what keeps it from being recorded without the blocks it describes.
+    /// which keeps it from being recorded without the blocks it describes.
     pub fn snapshot_base_height(&self) -> Result<Option<u64>, CacheError> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(META)?;
@@ -241,7 +241,7 @@ impl Cache {
     }
 
     /// Read every cached block in `range` under a single read transaction, keyed by height. Heights
-    /// the cache does not hold are simply absent from the result.
+    /// the cache does not hold are absent from the result.
     ///
     /// Reading a whole range in one transaction is what makes a served range self-consistent: `redb`
     /// reads are MVCC, so the blocks come from one point in time even if the ingestor truncates a
@@ -363,7 +363,7 @@ impl Cache {
     }
 
     /// A cheap open-time consistency check. On a non-empty cache it decodes the tip and verifies the
-    /// height range has no gaps. O(log n) — it touches only the first and last entries, so the happy
+    /// height range has no gaps. O(log n): it touches only the first and last entries, so the happy
     /// path stays scan-free. A detected symptom is localized and truncated by [`Self::reorg`].
     pub fn validate_light(&self) -> Result<(), CacheError> {
         let txn = self.db.begin_read()?;
@@ -415,7 +415,7 @@ impl Cache {
     /// `reorg(corrupt.saturating_sub(1))`, dropping the corruption so re-ingestion refills it.
     ///
     /// Realistic corruption in this transactional, strict-append store is a contiguous suffix (an
-    /// interrupted final write) or a schema-wide decode failure visible at the tip — not an isolated
+    /// interrupted final write) or a schema-wide decode failure visible at the tip, not an isolated
     /// mid-cache block. Localization matches that: a gap is found by scanning up from the lowest
     /// cached height, a decode/height symptom by walking down from the tip. An isolated mid-cache
     /// corruption (which redb's page checksums and transactionality make practically impossible) is
@@ -436,7 +436,7 @@ impl Cache {
 
         // Gap symptom: present blocks can sit above the hole (the last entry always does), so a
         // present→missing boundary search would land on a present height. Scan up from `first` for
-        // the lowest missing height instead — O(n) is fine on this rare, cold recovery path.
+        // the lowest missing height instead; O(n) is fine on this rare, cold recovery path.
         if len != last - first + 1 {
             for height in first..=last {
                 if table.get(height)?.is_none() {
@@ -673,7 +673,7 @@ mod tests {
         let (_dir, cache) = temp_cache();
         cache.add(100, &block(100, 1)).unwrap();
 
-        // Does not extend the tip, so the whole transaction aborts — including the base height.
+        // Does not extend the tip, so the whole transaction aborts, including the base height.
         let batch = vec![block(500, 1), block(501, 2)];
         assert!(
             cache

@@ -26,7 +26,7 @@ pub(super) const MAX_STREAMED_ADDRESSES: usize = 10_000;
 pub(super) const MAX_TADDRESS_TXIDS: usize = 10_000;
 
 /// Max height span a single `GetTaddressTransactions`/`GetTaddressTxids` request may scan.
-/// Deliberately generous — beyond a full-history scan of the current chain — so it never rejects a
+/// Deliberately generous (beyond a full-history scan of the current chain), so it never rejects a
 /// legitimate wallet request, while still rejecting an `end` near `u64::MAX`.
 pub(super) const MAX_TADDRESS_BLOCK_SPAN: u64 = 10_000_000;
 

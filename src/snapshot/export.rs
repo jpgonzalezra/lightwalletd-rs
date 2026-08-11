@@ -67,8 +67,8 @@ pub fn write_epoch(
 /// Compute and store the digests for the lowest complete epoch that lacks them, returning which
 /// epoch that was, or `None` when there is nothing left to do.
 ///
-/// One call is one unit of maintenance work, which is what makes the walk throttleable and
-/// resumable: an interrupted backfill simply continues from the lowest epoch still missing.
+/// One call is one unit of maintenance work, which makes the walk throttleable and
+/// resumable: an interrupted backfill continues from the lowest epoch still missing.
 pub fn store_next_epoch_digest(cache: &Cache, chain: &str) -> Result<Option<u64>, SnapshotError> {
     let Some(index) = next_pending_epoch(cache)? else {
         return Ok(None);

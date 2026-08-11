@@ -1,8 +1,8 @@
 //! The `readstate` backend: serve reads from a co-located zebrad's state, in-process.
 //!
 //! [`ZebraStateNode`] is a second [`NodeRpc`] implementation (ADR 0023). Reads go to zebra's
-//! [`ReadStateService`] — a read-only secondary RocksDB instance kept at the true chain tip by
-//! `zebra-rpc`'s `TrustedChainSync` over the zebrad indexer gRPC — while transaction submission,
+//! [`ReadStateService`] (a read-only secondary RocksDB instance kept at the true chain tip by
+//! `zebra-rpc`'s `TrustedChainSync` over the zebrad indexer gRPC), while transaction submission,
 //! the mempool, and `getinfo` stay on the JSON-RPC client (the node-only surfaces).
 //!
 //! Absent blocks/transactions are reported with the same JSON-RPC error codes zebrad would use
@@ -46,7 +46,7 @@ impl TipSource for zebra_state::LatestChainTip {
     fn best_tip(&self) -> Option<(u64, String)> {
         use zebra_chain::chain_tip::ChainTip;
         // One atomic read: two separate height/hash reads could straddle a tip advance and pair
-        // height N with the hash of N+1 — wallet-visible via GetLatestBlock.
+        // height N with the hash of N+1, wallet-visible via GetLatestBlock.
         let (height, hash) = self.best_tip_height_and_hash()?;
         Some((height.0 as u64, hash.to_string()))
     }
@@ -165,13 +165,13 @@ where
     }
 }
 
-/// A response variant the request cannot produce — a bug in the mapping, not a node condition.
+/// A response variant the request cannot produce: a bug in the mapping, not a node condition.
 fn unexpected(response: &ReadResponse) -> NodeError {
     NodeError::State(format!("unexpected read response: {response:?}").into())
 }
 
 /// A wire height (u64) in zebra's height domain, or `None` when it exceeds
-/// [`block::Height::MAX`] and therefore cannot exist in the state — callers must not let such a
+/// [`block::Height::MAX`] and therefore cannot exist in the state; callers must not let such a
 /// height wrap around an `as u32` cast into some other block's height.
 fn state_height(height: u64) -> Option<block::Height> {
     u32::try_from(height)
@@ -190,7 +190,7 @@ fn upgrade_name(upgrade: NetworkUpgrade) -> String {
         .unwrap_or_else(|| format!("{upgrade}"))
 }
 
-/// Whether `upgrade` is active at `height` — gates which pools `get_treestate` includes, matching
+/// Whether `upgrade` is active at `height`: gates which pools `get_treestate` includes, matching
 /// zebrad's `z_gettreestate` (which omits a pool entirely before its activation instead of
 /// serializing an empty frontier). Verified by the live parity sweep.
 fn pool_active(network: &Network, upgrade: NetworkUpgrade, height: block::Height) -> bool {
@@ -436,7 +436,7 @@ where
         let (tip, _) = self.best_tip()?;
         // Replicate zebrad's `build_height_range` (zebra-rpc): both bounds clamp to the chain tip
         // (an `end` of 0 means the tip), and a start past the clamped end is the same error zebrad
-        // returns verbatim — not a silently-empty inverted state read. The `-1` code is zebrad's
+        // returns verbatim, not a silently-empty inverted state read. The `-1` code is zebrad's
         // wire code for this case (verified against a live node), not the JSON-RPC spec's -32602.
         let tip = state_height(tip).unwrap_or(block::Height::MAX);
         let start = state_height(start).map_or(tip, |height| height.min(tip));
@@ -1010,7 +1010,7 @@ mod tests {
     #[tokio::test]
     async fn get_treestate_omits_every_pool_inactive_at_the_blocks_height() {
         // On mainnet the testdata block (380640) predates Sapling activation: all three pools
-        // must be omitted (empty final_state) even though the state has trees to serve —
+        // must be omitted (empty final_state) even though the state has trees to serve,
         // matching zebrad, which omits a pool rather than serializing an empty frontier.
         let (_raw, block) = first_testdata_block();
         let (node, _) = node_with(
@@ -1035,7 +1035,7 @@ mod tests {
     async fn get_treestate_serializes_only_the_pools_active_at_the_blocks_height() {
         // The same block on a regtest where Sapling and NU5 are active from height 1 (and NU6.3
         // never activates): sapling and orchard serialize their trees through `to_rpc_bytes`,
-        // ironwood stays omitted — the activation boundary in one response.
+        // ironwood stays omitted: the activation boundary in one response.
         let (_raw, block) = first_testdata_block();
         let expected_hash = block.hash().to_string();
         let sapling_tree = SaplingTree::default();
@@ -1123,7 +1123,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_subtrees_clamps_an_oversized_max_entries_instead_of_truncating() {
-        // 65536 as u16 would truncate to a limit of 0 — an empty response where the rpc backend
+        // 65536 as u16 would truncate to a limit of 0: an empty response where the rpc backend
         // returns data. It must clamp to u16::MAX instead.
         let (node, read_state) = node_with(
             vec![ReadResponse::SaplingSubtrees(Default::default())],
