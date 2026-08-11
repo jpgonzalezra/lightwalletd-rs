@@ -17,14 +17,14 @@ node and light wallets:
    wallets)                            - proxies the rest
 ```
 
-It does three things:
+The ingestor polls the node for new blocks, parsing each raw block into a `CompactBlock`: a pruned form
+that drops the zk proofs and keeps only what a shielded wallet needs to detect payments/spends and update
+its note-commitment witnesses. This is the whole point: a block shrinks from ~2 MB to a few KB.
 
-1. **Ingest** — polls the node for new blocks, parses each raw block and converts it into a `CompactBlock`: a
-   pruned form that drops the zk proofs and keeps only what a shielded wallet needs to detect payments/spends and
-   update its note-commitment witnesses. This is the whole point: a block shrinks from ~2 MB to a few KB.
-2. **Cache** — stores compact blocks on disk to serve them quickly and to handle chain reorgs.
-3. **Serve gRPC** — implements the `CompactTxStreamer` service. It streams compact block ranges and **proxies**
-   the remaining calls (send transaction, tree state, mempool, transparent-address balances) to the full node.
+Compact blocks are cached on disk, both to serve them quickly and to handle chain reorgs.
+
+The gRPC side implements the `CompactTxStreamer` service. It streams compact block ranges and proxies the
+remaining calls (send transaction, tree state, mempool, transparent-address balances) to the full node.
 
 The gRPC contract is the standard Zcash light-client `.proto` set, so real wallets can talk to this server.
 
@@ -33,10 +33,10 @@ The gRPC contract is the standard Zcash light-client `.proto` set, so real walle
 The backend is **`zebrad`**. The connection is plain HTTP `POST` JSON-RPC (no TLS) with HTTP Basic auth, reading
 `rpcuser`/`rpcpassword` from flags or a `zcash.conf` file. Default ports: 8232 (mainnet), 18232 (testnet/regtest).
 
-`--backend` selects between two `NodeRpc` implementations. The default, `rpc`, is `NodeClient` above — every
+`--backend` selects between two `NodeRpc` implementations. The default, `rpc`, is `NodeClient` above: every
 call, read or write, goes over JSON-RPC. `readstate` (ADR [0023](decisions/0023-zebra-readstate-backend.md),
-non-default `readstate` cargo feature) is a hybrid: `ZebraStateNode` (`src/node/readstate.rs`) serves reads —
-blocks, tree states, subtrees, the transparent-address index, mined transactions, tip/chain info — from an
+non-default `readstate` cargo feature) is a hybrid: `ZebraStateNode` (`src/node/readstate.rs`) serves reads
+(blocks, tree states, subtrees, the transparent-address index, mined transactions, tip/chain info) from an
 in-process `zebra_state::ReadStateService` attached as a read-only secondary to a co-located zebrad's RocksDB
 state, while writes and node-only surfaces (`sendrawtransaction`, the mempool, `getinfo`) still go through an
 inner `NodeClient` over JSON-RPC. Because zebra's finalized state alone lags the best tip by up to
@@ -100,13 +100,13 @@ The 20 `CompactTxStreamer` methods (two of them the deprecated `*Nullifiers` var
 `--donation-address` and carried through `Config`/`Streamer`. The flag is decoded as a unified address
 at startup (Bech32m + checksum), so a malformed or truncated value aborts the server instead of being
 served; wallets read the field to offer the user a donation to whoever runs this server. It is an
-advisory string only — no payment logic.
+advisory string only, with no payment logic.
 
 It also reports `lightwalletProtocolVersion`, the version of the light-client protocol this server
 serves (currently `v0.5.0`, the version of the vendored `proto/` set). A wallet is required to check it
 before requesting non-default `poolTypes`, so this is what tells a client that transparent and Ironwood
 data can be requested inside compact blocks. It tracks the protocol, not the release, and so is neither
-the crate version nor a build stamp — see [0031](decisions/0031-lightwallet-protocol-version.md).
+the crate version nor a build stamp; see [0031](decisions/0031-lightwallet-protocol-version.md).
 
 ### Node errors → gRPC status codes
 
@@ -124,7 +124,7 @@ so each method family applies its own mapper. Anything unrecognized keeps the sa
 
 ### Input validation
 
-Each method rejects malformed input with the appropriate `Status` before doing any work — a node
+Each method rejects malformed input with the appropriate `Status` before doing any work, whether a node
 round-trip or opening a stream. For the streaming methods the check runs synchronously in the handler
 before the stream is built, so the error surfaces as the RPC status rather than partway through the
 stream.
@@ -141,12 +141,12 @@ stream.
 - `GetMempoolTx`, `GetBlockRange`, and `GetBlockRangeNullifiers` reject an invalid pool type
   (`PoolType::Invalid`) in the requested pools, through the shared `filter::validate_pool_types`;
   `GetMempoolTx` additionally rejects an exclude-suffix longer than 32 bytes.
-- The transparent-address methods validate the address shape locally — a `t` followed by 34
-  alphanumeric characters — before reaching the node, and `GetTaddressTransactions`/`GetTaddressTxids`
+- The transparent-address methods validate the address shape locally (a `t` followed by 34
+  alphanumeric characters) before reaching the node, and `GetTaddressTransactions`/`GetTaddressTxids`
   additionally require a block `range` with a `start` height.
 - `GetSubtreeRoots` rejects an unrecognized `shieldedProtocol` (not Sapling, Orchard, or Ironwood) with
   `InvalidArgument`; `GetTreeState`/`GetLatestTreeState` reject a height before Sapling activation (an
-  all-empty note-commitment frontier — an empty Ironwood tree alone is normal before NU6.3 and is served
+  all-empty note-commitment frontier; an empty Ironwood tree alone is normal before NU6.3 and is served
   as an empty string) with `InvalidArgument`.
 - `Ping` is disabled by default, returning `FailedPrecondition` unless `--ping-very-insecure` is set.
 
@@ -162,49 +162,49 @@ headline ones:
 
 Data flow and storage:
 
-- [0001](decisions/0001-backend-zebrad-over-zcashd.md) — the backend node is `zebrad` (the only supported one), reached over plain-HTTP JSON-RPC with Basic auth.
-- [0002](decisions/0002-parse-blocks-with-librustzcash.md) — transactions are parsed with `librustzcash`; only the block header and framing are hand-parsed.
-- [0003](decisions/0003-compute-txids-locally.md) — transaction IDs (including v5 / Orchard [ZIP-244](protocol-references.md#transaction-format--identifiers)) are computed locally, so one non-verbose `getblock` per block suffices, with one extra verbose call per block for the note-commitment tree sizes (`ChainMetadata`) and the block hash.
-- [0004](decisions/0004-redb-block-cache.md) — compact blocks are cached on disk with `redb`, one per height; a reorg is a truncate-from-N.
-- [0014](decisions/0014-cache-ingestor-resilience.md) — the cache and ingestor recover from corruption and reorgs locally (truncate-from-N, reorg-by-hash, capped-backoff startup).
-- [0005](decisions/0005-shared-mempool-monitor.md) — in live mode a single background task (`src/service/mempool_monitor.rs`) refreshes the mempool at most every ~2 s and fans a parsed-once snapshot out via `tokio::sync::watch`, so node load is independent of the connected-wallet count; darkside keeps the per-request path.
-- [0024](decisions/0024-snapshot-bootstrap.md) — a fresh cache can be bootstrapped from a peer's epoch-chunked snapshot over HTTP instead of ingesting the whole range, with every block verified against the importer's own node.
-- [0028](decisions/0028-mvcc-chunked-cache-reads.md) — a range reads the cache in 64-height chunks, one MVCC read transaction each, released before any node request: the cached blocks in a chunk come from one consistent snapshot even while the ingestor truncates a reorg.
+- [0001](decisions/0001-backend-zebrad-over-zcashd.md): the backend node is `zebrad` (the only supported one), reached over plain-HTTP JSON-RPC with Basic auth.
+- [0002](decisions/0002-parse-blocks-with-librustzcash.md): transactions are parsed with `librustzcash`; only the block header and framing are hand-parsed.
+- [0003](decisions/0003-compute-txids-locally.md): transaction IDs (including v5 / Orchard [ZIP-244](protocol-references.md#transaction-format--identifiers)) are computed locally, so one non-verbose `getblock` per block suffices, with one extra verbose call per block for the note-commitment tree sizes (`ChainMetadata`) and the block hash.
+- [0004](decisions/0004-redb-block-cache.md): compact blocks are cached on disk with `redb`, one per height; a reorg is a truncate-from-N.
+- [0014](decisions/0014-cache-ingestor-resilience.md): the cache and ingestor recover from corruption and reorgs locally (truncate-from-N, reorg-by-hash, capped-backoff startup).
+- [0005](decisions/0005-shared-mempool-monitor.md): in live mode a single background task (`src/service/mempool_monitor.rs`) refreshes the mempool at most every ~2 s and fans a parsed-once snapshot out via `tokio::sync::watch`, so node load is independent of the connected-wallet count; darkside keeps the per-request path.
+- [0024](decisions/0024-snapshot-bootstrap.md): a fresh cache can be bootstrapped from a peer's epoch-chunked snapshot over HTTP instead of ingesting the whole range, with every block verified against the importer's own node.
+- [0028](decisions/0028-mvcc-chunked-cache-reads.md): a range reads the cache in 64-height chunks, one MVCC read transaction each, released before any node request: the cached blocks in a chunk come from one consistent snapshot even while the ingestor truncates a reorg.
 
 Protocol upgrades:
 
-- [0018](decisions/0018-parse-time-branch-id-hardcoded.md) — the parse-time consensus branch ID stays hardcoded at `Nu5`: it is only consulted for pre-v5 transactions (where it does not affect the legacy txid); v5/v6 read the branch ID from the wire.
-- [0019](decisions/0019-pin-librustzcash-prereleases-nu63.md) — NU6.3 support rides the exact-pinned librustzcash pre-release cohort, re-bumped when the finals are published; the crates move together (`cargo tree -d` must show one `zcash_protocol`/`zcash_address`).
-- [0020](decisions/0020-windowed-ingest-batched-commits.md) — catch-up ingests windows of blocks concurrently (`--ingest-window`/`--ingest-concurrency`) committed in one cache transaction per window, with a fetch-time txid cross-check against the node.
-- [0021](decisions/0021-mempool-staleness-contract.md) — mempool snapshots carry a refresh timestamp; snapshots older than a 60 s cutoff make `GetMempoolTx`/`GetMempoolStream` return `Unavailable` instead of serving last-known-good data during a node outage.
-- [0022](decisions/0022-ops-surface-parity.md) — operational-surface parity with the Go reference: gRPC reflection always on, Prometheus metrics on by default at `127.0.0.1:9068`, `--log-level`/`--log-file` (JSON to file), `--gen-cert-very-insecure`, a darkside auto-shutdown timeout, and `--nocache`; the `./lightwalletd-rs-data` default data dir is kept as a deliberate divergence from Go's root-owned `/var/lib/lightwalletd`.
-- [0023](decisions/0023-zebra-readstate-backend.md) — reads come from an in-process zebra `ReadStateService` (read-only secondary + `TrustedChainSync` over the indexer gRPC) behind `--backend readstate`; writes/mempool stay on JSON-RPC.
+- [0018](decisions/0018-parse-time-branch-id-hardcoded.md): the parse-time consensus branch ID stays hardcoded at `Nu5`: it is only consulted for pre-v5 transactions (where it does not affect the legacy txid); v5/v6 read the branch ID from the wire.
+- [0019](decisions/0019-pin-librustzcash-prereleases-nu63.md): NU6.3 support rides the exact-pinned librustzcash pre-release cohort, re-bumped when the finals are published; the crates move together (`cargo tree -d` must show one `zcash_protocol`/`zcash_address`).
+- [0020](decisions/0020-windowed-ingest-batched-commits.md): catch-up ingests windows of blocks concurrently (`--ingest-window`/`--ingest-concurrency`) committed in one cache transaction per window, with a fetch-time txid cross-check against the node.
+- [0021](decisions/0021-mempool-staleness-contract.md): mempool snapshots carry a refresh timestamp; snapshots older than a 60 s cutoff make `GetMempoolTx`/`GetMempoolStream` return `Unavailable` instead of serving last-known-good data during a node outage.
+- [0022](decisions/0022-ops-surface-parity.md): operational-surface parity with the Go reference: gRPC reflection always on, Prometheus metrics on by default at `127.0.0.1:9068`, `--log-level`/`--log-file` (JSON to file), `--gen-cert-very-insecure`, a darkside auto-shutdown timeout, and `--nocache`; the `./lightwalletd-rs-data` default data dir is kept as a deliberate divergence from Go's root-owned `/var/lib/lightwalletd`.
+- [0023](decisions/0023-zebra-readstate-backend.md): reads come from an in-process zebra `ReadStateService` (read-only secondary + `TrustedChainSync` over the indexer gRPC) behind `--backend readstate`; writes/mempool stay on JSON-RPC.
 
 Structure and seams:
 
-- [0007](decisions/0007-noderpc-seam.md) — the `NodeRpc` trait is the single node-access seam; `service`, `ingestor`, and `fetch` depend on the `dyn NodeRpc` trait object rather than the concrete client.
-- [0008](decisions/0008-library-plus-binary.md) — the crate ships as a library plus a thin binary, exposing `run` so integration tests can drive the server in-process.
-- [0009](decisions/0009-service-per-method-family-modules.md) — the service is split into per-method-family submodules with a thin dispatcher in `mod.rs`.
-- [0006](decisions/0006-darkside-mock-via-noderpc-seam.md) — darkside injects the mock chain at the `NodeRpc` seam, reusing the cache and `CompactTxStreamer` path unchanged.
+- [0007](decisions/0007-noderpc-seam.md): the `NodeRpc` trait is the single node-access seam; `service`, `ingestor`, and `fetch` depend on the `dyn NodeRpc` trait object rather than the concrete client.
+- [0008](decisions/0008-library-plus-binary.md): the crate ships as a library plus a thin binary, exposing `run` so integration tests can drive the server in-process.
+- [0009](decisions/0009-service-per-method-family-modules.md): the service is split into per-method-family submodules with a thin dispatcher in `mod.rs`.
+- [0006](decisions/0006-darkside-mock-via-noderpc-seam.md): darkside injects the mock chain at the `NodeRpc` seam, reusing the cache and `CompactTxStreamer` path unchanged.
 
 Wallet-facing contract and hardening:
 
-- [0010](decisions/0010-node-error-grpc-mapping.md) — node errors map to per-method gRPC status codes, keyed primarily to the numeric JSON-RPC code rather than message text.
-- [0011](decisions/0011-up-front-input-validation.md) — malformed requests are rejected up front, before any node round-trip or stream is opened.
-- [0012](decisions/0012-tls-default-insecure-flags.md) — TLS is on by default; dangerous/testing features are gated behind off-by-default `*-very-insecure` flags.
-- [0013](decisions/0013-resource-limits.md) — the server bounds the resources a client can hold or accumulate (configurable stream/keepalive limits plus per-request caps).
-- [0026](decisions/0026-grpc-web-support.md) — gRPC-web is served from the gRPC port behind an off-by-default `--grpc-web`, with an origin allowlist, so a browser wallet needs no translating proxy.
-- [0029](decisions/0029-mixnet-transport-scope.md) — a mixnet transport stays out of the crate: carrying the service over one is nearly free in code, but a silent stream-failure rate measured between 2% and 51%, seconds of latency and a dependency larger than this project put it behind a sidecar rather than a Cargo feature.
-- [0025](decisions/0025-taddress-range-bounds.md) — an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
-- [0027](decisions/0027-block-range-continuity.md) — consecutive blocks in a served range must connect by hash, whichever source each came from; a discontinuity ends the stream with `Aborted` and reports the height so the ingestor truncates and re-ingests it.
-- [0030](decisions/0030-subtree-index-range.md) — subtree indexes are bounded to the node's `u16` range before any round-trip: an out-of-range start index is `InvalidArgument`, an out-of-range limit means no limit.
-- [0031](decisions/0031-lightwallet-protocol-version.md) — `GetLightdInfo` reports the served lightwallet-protocol version as a constant, independent of the crate version and of the build stamps, moving only once the server serves everything the named version specifies.
-- [0015](decisions/0015-layered-testing-strategy.md) — testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.
-- [0016](decisions/0016-test-placement-by-visibility.md) — tests are placed by visibility: handler tests grouped by family under `service/tests/`, private internals tested inline in their own module.
+- [0010](decisions/0010-node-error-grpc-mapping.md): node errors map to per-method gRPC status codes, keyed primarily to the numeric JSON-RPC code rather than message text.
+- [0011](decisions/0011-up-front-input-validation.md): malformed requests are rejected up front, before any node round-trip or stream is opened.
+- [0012](decisions/0012-tls-default-insecure-flags.md): TLS is on by default; dangerous/testing features are gated behind off-by-default `*-very-insecure` flags.
+- [0013](decisions/0013-resource-limits.md): the server bounds the resources a client can hold or accumulate (configurable stream/keepalive limits plus per-request caps).
+- [0026](decisions/0026-grpc-web-support.md): gRPC-web is served from the gRPC port behind an off-by-default `--grpc-web`, with an origin allowlist, so a browser wallet needs no translating proxy.
+- [0029](decisions/0029-mixnet-transport-scope.md): a mixnet transport stays out of the crate: carrying the service over one is nearly free in code, but a silent stream-failure rate measured between 2% and 51%, seconds of latency and a dependency larger than this project put it behind a sidecar rather than a Cargo feature.
+- [0025](decisions/0025-taddress-range-bounds.md): an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
+- [0027](decisions/0027-block-range-continuity.md): consecutive blocks in a served range must connect by hash, whichever source each came from; a discontinuity ends the stream with `Aborted` and reports the height so the ingestor truncates and re-ingests it.
+- [0030](decisions/0030-subtree-index-range.md): subtree indexes are bounded to the node's `u16` range before any round-trip: an out-of-range start index is `InvalidArgument`, an out-of-range limit means no limit.
+- [0031](decisions/0031-lightwallet-protocol-version.md): `GetLightdInfo` reports the served lightwallet-protocol version as a constant, independent of the crate version and the build stamps, moving only once the server serves everything the named version specifies.
+- [0015](decisions/0015-layered-testing-strategy.md): testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.
+- [0016](decisions/0016-test-placement-by-visibility.md): tests are placed by visibility: handler tests grouped by family under `service/tests/`, private internals tested inline in their own module.
 
 Measurement:
 
-- [0017](decisions/0017-benchmark-methodology.md) — the hot read-path is benchmarked against the Go reference in `contrib/bench/`: a frozen dataset served by an idle mock, matched limits/plaintext/logging, a dual client + server source of truth, and results reported as relative rather than absolute.
+- [0017](decisions/0017-benchmark-methodology.md): the hot read-path is benchmarked against the Go reference in `contrib/bench/`: a frozen dataset served by an idle mock, matched limits/plaintext/logging, a dual client + server source of truth, and results reported as relative rather than absolute.
 
 ## Resource limits
 
@@ -213,8 +213,8 @@ a public-facing deployment is not at the mercy of a few abusive peers. The lever
 concurrent long-lived streams (`GetBlockRange`, `GetMempoolStream`), connections held open by dead
 peers, and unbounded per-request accumulation.
 
-The shared `server_builder` in `src/lib.rs` — used by both the live and darkside serve paths, and by
-the integration tests — sets:
+The shared `server_builder` in `src/lib.rs` (used by both the live and darkside serve paths, and by
+the integration tests) sets:
 
 - `concurrency_limit_per_connection` and `max_concurrent_streams`, both set from
   `--max-concurrent-streams` (default 256), bounding the in-flight requests and HTTP/2 streams a
@@ -229,7 +229,7 @@ Three per-request caps bound the work a single request can accumulate or trigger
 - `GetTaddressBalanceStream` drains a client-streamed list of addresses into a `Vec`; it stops at
   `MAX_STREAMED_ADDRESSES` (10,000) and rejects a longer stream with `ResourceExhausted`.
 - `GetBlockRange`/`GetBlockRangeNullifiers` cap the requested span at `MAX_BLOCK_RANGE` (10,000
-  blocks) — see [Input validation](#input-validation).
+  blocks); see [Input validation](#input-validation).
 - `GetTaddressTransactions`/`GetTaddressTxids` cap the number of matching txids at
   `MAX_TADDRESS_TXIDS` (10,000): the txid list is fetched first and a wider result is rejected with
   `ResourceExhausted` before any per-txid fetch, so one request cannot pin the node on an unbounded
@@ -272,7 +272,7 @@ cargo run -- --rpc-url http://127.0.0.1:8232 --start-height 3375600 --data-dir /
 ```
 
 Probe it with `grpcurl`. The server always registers gRPC Server Reflection ([ADR 0022](decisions/0022-ops-surface-parity.md)),
-so `grpcurl` can discover the schema straight from the running server — no local `.proto` checkout needed
+so `grpcurl` can discover the schema straight from the running server, with no local `.proto` checkout needed
 (plaintext, since the server above uses `--no-tls-very-insecure`):
 
 ```sh
@@ -304,13 +304,13 @@ wallet↔server traffic is unencrypted and the server is not authenticated, whic
 allows impersonation. The `-very-insecure` suffix follows the upstream convention for dangerous flags.
 
 As a middle ground, `--gen-cert-very-insecure` generates an in-memory self-signed certificate for
-`"localhost"` at startup (via `rcgen`) instead of reading `--tls-cert`/`--tls-key` from disk — still
-insecure (the certificate is trusted by nothing) but lets `grpcurl -insecure` exercise the TLS code path
-without hand-rolling a cert first. Mutually exclusive with `--tls-cert`/`--tls-key` and
+`"localhost"` at startup (via `rcgen`) instead of reading `--tls-cert`/`--tls-key` from disk. Still
+insecure (the certificate is trusted by nothing), but it lets `grpcurl -insecure` exercise the TLS code
+path without hand-rolling a cert first. Mutually exclusive with `--tls-cert`/`--tls-key` and
 `--no-tls-very-insecure` ([ADR 0022](decisions/0022-ops-surface-parity.md)).
 
 This TLS protects the **wallet ↔ server** hop. The **server ↔ node** (`zebrad`) connection is plain HTTP on
-purpose — it is local and never crosses the open network.
+purpose: it is local and never crosses the open network.
 
 ## gRPC-web
 
@@ -323,8 +323,8 @@ same port, so a web wallet reaches this server directly instead of through Envoy
 lightwalletd-rs ... --grpc-web --grpc-web-allow-origin https://wallet.example
 ```
 
-The flag is **off by default**, because enabling it also makes the listener accept HTTP/1.1 — which a
-browser needs on a plaintext port, and which changes what the server answers. Over TLS, ALPN settles on
+The flag is **off by default**, because enabling it also makes the listener accept HTTP/1.1, which a
+browser needs on a plaintext port and which changes what the server answers. Over TLS, ALPN settles on
 HTTP/2 and gRPC-web rides that just as well.
 
 `--grpc-web-allow-origin` is repeatable and restricts the transport to an allowlist of browser origins;
@@ -334,7 +334,7 @@ would surface as an opaque CORS error naming nothing. `grpc-status`, `grpc-messa
 `grpc-status-details-bin` are exposed to JavaScript: gRPC carries a trailers-only response's outcome in
 HTTP headers, and a browser gives a page only the headers the server exposed.
 
-**Client streaming does not work over gRPC-web** — the protocol has no way to send a request stream — so
+**Client streaming does not work over gRPC-web**: the protocol has no way to send a request stream, so
 `GetTaddressBalanceStream` is unreachable from a browser (its unary sibling `GetTaddressBalance` is not).
 All eight server-streaming methods work.
 
@@ -346,8 +346,8 @@ the preflight it decides to send, and the response headers it lets a page read.
 
 A `tower` layer on the gRPC server records per-method request counts, a latency histogram, and an in-flight
 gauge automatically (no per-handler instrumentation), served in the Prometheus text format at `/metrics`.
-Metrics are served **by default** at `127.0.0.1:9068` — matching the Go reference, which always serves
-Prometheus on that port — configurable with `--metrics-bind <addr>` and disabled entirely with
+Metrics are served **by default** at `127.0.0.1:9068`, matching the Go reference, which always serves
+Prometheus on that port; the address is configurable with `--metrics-bind <addr>` and disabled entirely with
 `--no-metrics` ([ADR 0022](decisions/0022-ops-surface-parity.md)).
 
 ```sh
@@ -365,11 +365,11 @@ request, so `/metrics` returns nothing until there has been some traffic.
 
 `--log-level` (default `info`) sets a `tracing_subscriber::EnvFilter`; an explicit `RUST_LOG` environment
 variable always takes precedence, the usual `tracing-subscriber` convention. By default output is
-human-readable text on stderr; `--log-file <path>` switches it to JSON lines appended to that file instead
-— matching the Go reference's `--log-file`, which switches its logrus output to JSON
+human-readable text on stderr; `--log-file <path>` switches it to JSON lines appended to that file instead,
+matching the Go reference's `--log-file`, which switches its logrus output to JSON
 ([ADR 0022](decisions/0022-ops-surface-parity.md)). `--log-level`/`--log-file` also read from
 `LWD_LOG_LEVEL`/`LWD_LOG_FILE` when the flag is not given, and `--ingest-window`/`--ingest-concurrency`
-similarly read `LWD_INGEST_WINDOW`/`LWD_INGEST_CONCURRENCY` — an explicit flag always beats the
+similarly read `LWD_INGEST_WINDOW`/`LWD_INGEST_CONCURRENCY`. An explicit flag always beats the
 environment variable, which in turn beats the default.
 
 ```sh
@@ -380,15 +380,15 @@ tail -f /var/log/lightwalletd-rs.log   # JSON lines
 ## Darkside mode
 
 Darkside mode replaces the real node with a controllable, in-memory mock chain, so wallet behaviour can be
-exercised deterministically — reorgs, confirmations, and edge cases are scripted by the test rather than
+exercised deterministically: reorgs, confirmations, and edge cases are scripted by the test rather than
 waited for on a live chain. It is enabled with `--darkside-very-insecure` and must never be used in
 production. To keep a forgotten or leaked darkside process (e.g. a stuck CI job) from serving forever, it
 auto-shuts-down after `--darkside-timeout-minutes` (default 30, matching the Go reference's fixed default
-and, like Go, with no way to disable it — see [ADR 0022](decisions/0022-ops-surface-parity.md)). Two gRPC
+and, like Go, with no way to disable it; see [ADR 0022](decisions/0022-ops-surface-parity.md)). Two gRPC
 services are served on the same port:
 
-- `CompactTxStreamer` — the normal wallet-facing service, unchanged. The wallet does not know its data is mock.
-- `DarksideStreamer` — a control plane the test drives to fabricate the chain.
+- `CompactTxStreamer`: the normal wallet-facing service, unchanged. The wallet does not know its data is mock.
+- `DarksideStreamer`: a control plane the test drives to fabricate the chain.
 
 ### How it works
 
@@ -427,8 +427,8 @@ The state keeps three transaction pools, each surfaced by a different RPC:
 
 Every wallet-facing read is served from `DarksideState` through the `NodeRpc` seam, with one exception:
 `GetSubtreeRoots` derives its response from the completing block, which the mock has no good way to fake. So
-in darkside mode the subtree roots are staged complete — with their completing block hash and height already
-set — via `SetSubtreeRoots`, and served verbatim. This is the only point in `CompactTxStreamer` that is
+in darkside mode the subtree roots are staged complete, with their completing block hash and height already
+set, via `SetSubtreeRoots`, and served verbatim. This is the only point in `CompactTxStreamer` that is
 darkside-aware, reached through an optional handle to the shared state that is `None` on the live path.
 
 ### Known limitations
@@ -437,8 +437,8 @@ darkside-aware, reached through an optional handle to the shared state that is `
   per staged tree state; this is sufficient for the standard "main" test vectors.
 - The URL-based staging RPCs (`StageBlocks`/`StageTransactions`) fetch from the given URL with `reqwest`,
   which the crate compiles without a TLS feature (the backend node is plain HTTP), so they can only fetch over
-  `http://`. For remote data served over `https://` — such as the upstream `basic-reorg` test vectors on
-  `raw.githubusercontent.com` — fetch it client-side and push it in through the streaming RPCs
+  `http://`. For remote data served over `https://` (such as the upstream `basic-reorg` test vectors on
+  `raw.githubusercontent.com`), fetch it client-side and push it in through the streaming RPCs
   (`StageBlocksStream`/`StageTransactionsStream`), as `contrib/smoke-test.sh` does.
 
 ## Block parsing
@@ -446,14 +446,14 @@ darkside-aware, reached through an optional handle to the shared state that is `
 `src/compact.rs` turns a raw block into a `CompactBlock`. The header is parsed by hand (fixed layout) to
 recover the block hash (double SHA-256, little-endian), previous hash, and time; each transaction is parsed
 with `librustzcash`, which also yields the correct transaction ID for legacy, v5 (ZIP-244), and v6 (ZIP-229)
-transactions. The compact form keeps only what a shielded wallet needs — Sapling spends/outputs, Orchard and
-Ironwood actions, and transparent inputs/outputs — and the block height is read from the coinbase (BIP34).
+transactions. The compact form keeps only what a shielded wallet needs (Sapling spends/outputs, Orchard and
+Ironwood actions, and transparent inputs/outputs), and the block height is read from the coinbase (BIP34).
 Ironwood actions (NU6.3) share the `CompactOrchardAction` encoding and are emitted in the `ironwoodActions`
 field of `CompactTx`; the parser passes a fixed `BranchId::Nu5`, which is only consulted for pre-v5
 transactions ([ADR 0018](decisions/0018-parse-time-branch-id-hardcoded.md)).
 
-The note-commitment tree sizes in `ChainMetadata` — Sapling, Orchard, and Ironwood
-(`ironwoodCommitmentTreeSize`) — are not part of the raw block; the shared `fetch::compact_block` helper
+The note-commitment tree sizes in `ChainMetadata` (Sapling, Orchard, and Ironwood via
+`ironwoodCommitmentTreeSize`) are not part of the raw block; the shared `fetch::compact_block` helper
 (used by both `GetBlock`'s cache-miss path and the ingestor) fills them in from the verbose `getblock`
 response. The node omits the `ironwood` tree key while that tree is empty (every block before NU6.3
 activation), which deserializes as size 0.
@@ -468,11 +468,11 @@ height-push boundary (`ParseError::NoHeight`), and trailing bytes after the last
 (`ParseError::TrailingData`).
 
 The hand-written framing arithmetic is additionally fuzzed with property tests (`proptest`). Both framing
-functions — `to_compact_block` and `split_block` — are fed hundreds of generated inputs under two
+functions, `to_compact_block` and `split_block`, are fed hundreds of generated inputs under two
 strategies: arbitrary byte buffers (exercising the header guards and early returns) and real blocks
 mutated by byte flips, a random truncation, and trailing junk (driving inputs past the header into the
 `tx_count` loop and the per-transaction slicing). The invariant is that any input yields `Ok` or
-`Err(ParseError)` — never a panic, out-of-range slice, or overflow; when `split_block` returns `Ok`, the
+`Err(ParseError)`: never a panic, out-of-range slice, or overflow; when `split_block` returns `Ok`, the
 recovered header and transaction slices must reassemble into the original bytes exactly. A failing case is
 shrunk to a minimal reproducer and pinned under `proptest-regressions/`.
 
@@ -484,7 +484,7 @@ Because the keys are ordered, the tip is cheap to read and a reorg is just "drop
 `redb` already provides page-level integrity (internal checksums) and transactional atomicity, so the cache
 adds only the *logical* invariants on top of it. `add` is a strict append: it rejects a block whose own height
 does not match its key, or a non-monotonic append, with a `CacheError::Corruption` rather than a panic or a
-silent bad write. On open, `validate_light` runs an O(log n) check — it decodes the tip and verifies the height
+silent bad write. On open, `validate_light` runs an O(log n) check: it decodes the tip and verifies the height
 range has no gaps (`len == last - first + 1`), touching only the first and last entries so the happy path stays
 scan-free.
 
@@ -492,10 +492,10 @@ When a symptom is detected (open-time validation, or a decode error during inges
 localizes the corruption and the cache is truncated from that height with `reorg`, after which re-ingestion
 refills it. Realistic corruption here is a contiguous suffix (an interrupted final write) or a schema-wide
 decode failure visible at the tip, so localization matches that shape: a decode/height symptom walks down from
-the tip (O(k), k ≈ 1), a gap is binary-searched (O(log n)). An isolated mid-cache corruption is out of scope —
+the tip (O(k), k ≈ 1), a gap is binary-searched (O(log n)). An isolated mid-cache corruption is out of scope:
 `redb`'s page checksums and transactional, strict-append writes make it practically impossible.
 
-Two operator levers force a re-sync at startup, for a cache that is structurally valid but *wrong* —
+Two operator levers force a re-sync at startup, for a cache that is structurally valid but *wrong*,
 e.g. a block cached during a transient node fault, which `validate_light` cannot detect.
 `--sync-from-height N` drops every cached block at or above `N` (via `Cache::truncate_from`);
 `--redownload` clears the cache entirely. In both cases the ingestor refills from the node,
@@ -503,40 +503,45 @@ re-ingesting from `--start-height` whenever the cache is left empty; `--redownlo
 over `--sync-from-height`.
 
 The ingestor (`src/ingestor.rs`) runs as a background task. Before it starts, `run` resolves the chain with
-`connect_with_retry` (`src/lib.rs`): `getblockchaininfo` is retried indefinitely with capped exponential backoff (escalating
-to `error!` logs after several attempts), so the server waits for a slow-to-start node instead of exiting. Each
-step then reads the tip height **and** hash from a single `getblockchaininfo`. If the cache is behind, it
-fetches the next **window** of up to `--ingest-window` consecutive blocks (default 64) with at most
-`--ingest-concurrency` node requests in flight (default 8); each fetched block is verified (returned height
-matches the request, bytes hash to the hash from the verbose response, and locally computed txids match the
-node's verbose txid list when provided — a cross-check against silent parser/node divergence). The results are
-walked in height order: the longest prefix whose `prevHash` links chain onto the cached tip is committed in a
-**single cache transaction** (one fsync per window, not per block — see ADR 0020), and per-height fetch
-failures past a non-empty prefix only shrink the window rather than failing the step. If the *first* block of
-the window does not chain, a reorg replaced our tip: roll back one block. If the cache is
-already at the tip height, it compares the tip *hash*: an equal hash means synced, a differing hash is an
-in-place tip reorg and rolls back one block. If the cache is *ahead* of the node's reported tip, the node's
-tip hash is compared with the cached block at that height: an equal hash means the node is merely behind
-(restarted or re-syncing) and the step idles with the cache intact; a differing hash is a genuine reorg onto a
-shorter chain and rolls back one block. Every rollback is floored at `--start-height`: a reorg that would
-cross the floor is deeper than the entire cache, so the cache is **emptied** and re-ingestion resumes from
-`--start-height` on the node's chain (an empty cache chains onto anything) rather than wedging against the
-floor; the `truncate_from` operator levers above may still empty the cache on purpose. A
-cache-corruption error truncates from the corrupt point and
-retries immediately (bounded, so recovery can never spin), while node/transport errors back off. When the cache
-reaches the tip it polls every couple of seconds. The cache persists across restarts, so the ingestor resumes
-from where it left off.
+`connect_with_retry` (`src/lib.rs`): `getblockchaininfo` is retried indefinitely with capped exponential
+backoff (escalating to `error!` logs after several attempts), so the server waits for a slow-to-start node
+instead of exiting. Each step then reads the tip height **and** hash from a single `getblockchaininfo`.
+
+While the cache is behind, each step fetches the next **window** of up to `--ingest-window` consecutive
+blocks (default 64) with at most `--ingest-concurrency` node requests in flight (default 8). Each fetched
+block is verified: the returned height matches the request, the bytes hash to the hash from the verbose
+response, and locally computed txids match the node's verbose txid list when provided (a cross-check against
+silent parser/node divergence). The results are walked in height order, and the longest prefix whose
+`prevHash` links chain onto the cached tip is committed in a **single cache transaction** (one fsync per
+window, not per block; see ADR 0020). Per-height fetch failures past a non-empty prefix only shrink the
+window rather than failing the step.
+
+A reorg surfaces in three shapes, all answered by rolling back one block and letting the next step retry.
+If the *first* block of a window does not chain, a reorg replaced our tip. If the cache is already at the
+tip height, the step compares the tip *hash*: an equal hash means synced, a differing hash is an in-place
+tip reorg. If the cache is *ahead* of the node's reported tip, the node's tip hash is compared with the
+cached block at that height: an equal hash means the node is merely behind (restarted or re-syncing) and the
+step idles with the cache intact, while a differing hash is a genuine reorg onto a shorter chain.
+
+Every rollback is floored at `--start-height`. A reorg that would cross the floor is deeper than the entire
+cache, so the cache is **emptied** and re-ingestion resumes from `--start-height` on the node's chain (an
+empty cache chains onto anything) rather than wedging against the floor; the `truncate_from` operator levers
+above may still empty the cache on purpose.
+
+A cache-corruption error truncates from the corrupt point and retries immediately (bounded, so recovery can
+never spin), while node/transport errors back off. When the cache reaches the tip it polls every couple of
+seconds, and because the cache persists across restarts, the ingestor resumes from where it left off.
 
 `GetBlock` and `GetBlockRange` read from the cache and fall back to the node on a miss. `GetBlockRange` streams
 the range (ascending if `start <= end`, otherwise descending) and prunes each block to the requested
-`poolTypes` — an empty list means the legacy default of shielded-only data (Sapling, Orchard, and Ironwood;
+`poolTypes`: an empty list means the legacy default of shielded-only data (Sapling, Orchard, and Ironwood;
 transparent inputs/outputs stripped).
 
 A range is read from the cache in chunks of 64 consecutive heights, one `redb` read transaction per chunk,
 released before any node request is awaited ([ADR 0028](decisions/0028-mvcc-chunked-cache-reads.md)); the
 heights a chunk did not contain are fetched from the node. Consecutive blocks are then verified to connect,
 whichever source each came from: ascending, the next block's `prev_hash` must equal the previous block's
-`hash`; descending, the reverse ([ADR 0027](decisions/0027-block-range-continuity.md)). This matters while the
+`hash`; descending, the reverse ([ADR 0027](decisions/0027-block-range-continuity.md)). The check matters while the
 ingestor is repairing a reorg, when the cache still holds the abandoned fork below the point it has rolled back
 to and the node already serves the new chain: splicing them would describe a chain that never existed. A
 mismatch ends the stream with `Aborted` and, when the cache served at least one side of the seam, reports its
@@ -548,7 +553,7 @@ window, so a node the cache cannot reconcile with cannot drive an endless trunca
 
 `--nocache` bypasses all of the above: the ingestor is not spawned and the cache is opened in a throwaway
 `tempfile::tempdir()` instead of `--data-dir`, so it starts (and stays) empty and every read falls through
-to the node. Debugging only — matches Go's `--nocache` (see [ADR 0022](decisions/0022-ops-surface-parity.md)).
+to the node. Debugging only; it matches Go's `--nocache` (see [ADR 0022](decisions/0022-ops-surface-parity.md)).
 
 ## Snapshot bootstrap
 
@@ -603,7 +608,7 @@ seam: `service`, `ingestor`, and `fetch` depend on `Arc<dyn NodeRpc>`, so a test
 (`src/testutil.rs`) with canned responses to characterize the RPC↔gRPC translation, reorg handling, and
 block assembly. The `NodeClient` HTTP/JSON layer itself is covered separately with a `wiremock` mock
 server, and the parser is pinned byte-for-byte by the golden fixtures in `testdata/`. Darkside reuses the
-same seam — its stage/apply engine and `DarksideNode` reads are unit-tested directly, and the end-to-end
+same seam: its stage/apply engine and `DarksideNode` reads are unit-tested directly, and the end-to-end
 path is checked by driving the real `Streamer` (`GetBlockRange`, `GetSubtreeRoots`, `GetMempoolTx`) against a
 `DarksideNode` with an empty cache.
 
@@ -612,24 +617,25 @@ order) as the single pre-commit check.
 
 ## Capabilities
 
-All `CompactTxStreamer` gRPC methods are implemented. Grouped by area:
+All 20 `CompactTxStreamer` gRPC methods are implemented:
 
-- **Chain info** — `GetLightdInfo` (from `getinfo` + `getblockchaininfo`) and `GetLatestBlock`.
-- **Blocks** — `src/compact.rs` parses raw blocks into `CompactBlock`s. `GetBlock` (by height; verbose
+- Chain info: `GetLightdInfo` (from `getinfo` + `getblockchaininfo`) and `GetLatestBlock`.
+- Blocks: `src/compact.rs` parses raw blocks into `CompactBlock`s. `GetBlock` (by height; verbose
   `getblock` for hash + tree sizes, raw `getblock` for the bytes) and `GetBlockRange` serve from a `redb`-backed
   cache (`src/cache.rs`) filled by a background ingestor (`src/ingestor.rs`) with reorg handling, falling back to
   the node; `GetBlockRange` streams with `poolTypes` filtering. Lookup by hash is not yet supported.
-- **Transactions** — `GetTransaction` and `SendTransaction`.
-- **Tree state** — `GetTreeState`/`GetLatestTreeState` and `GetSubtreeRoots` (`z_getsubtreesbyindex` plus the
+- Transactions: `GetTransaction` and `SendTransaction`.
+- Tree state: `GetTreeState`/`GetLatestTreeState` and `GetSubtreeRoots` (`z_getsubtreesbyindex` plus the
   completing block from the cache).
-- **Transparent addresses** — `GetTaddressBalance(+Stream)`, `GetAddressUtxos(+Stream)`,
+- Transparent addresses: `GetTaddressBalance(+Stream)`, `GetAddressUtxos(+Stream)`,
   `GetTaddressTxids`/`GetTaddressTransactions`.
-- **Nullifiers** — `GetBlockNullifiers`/`GetBlockRangeNullifiers`, pruned to shielded nullifiers.
-- **Mempool** — `GetMempoolTx` and `GetMempoolStream` (a poll loop that ends when a new block is mined).
-- **Operations** — TLS by default, Prometheus metrics, Docker, graceful shutdown, and per-method input
-  validation (rejecting malformed arguments up front, see [Input validation](#input-validation)). `Ping` is a
-  benchmark RPC, disabled unless `--ping-very-insecure`.
-- **Testing** — darkside mode (`--darkside-very-insecure`): a `DarksideStreamer` control plane over an in-memory
-  mock chain served through the `NodeRpc` seam, for deterministic wallet tests. The crate is split into a library
-  (`src/lib.rs`, exposing `run`) and a thin binary, with the gRPC client generated alongside the server, so it can
-  be driven in-process by integration tests.
+- Nullifiers: `GetBlockNullifiers`/`GetBlockRangeNullifiers`, pruned to shielded nullifiers.
+- Mempool: `GetMempoolTx` and `GetMempoolStream` (a poll loop that ends when a new block is mined).
+
+Beyond the RPC surface, the server runs TLS by default, serves Prometheus metrics, ships a Docker stack,
+shuts down gracefully, and validates every method's input up front (see
+[Input validation](#input-validation)); `Ping` is a benchmark RPC, disabled unless `--ping-very-insecure`.
+Darkside mode (`--darkside-very-insecure`) serves a `DarksideStreamer` control plane over an in-memory mock
+chain through the `NodeRpc` seam, for deterministic wallet tests. The crate is split into a library
+(`src/lib.rs`, exposing `run`) and a thin binary, with the gRPC client generated alongside the server, so it
+can be driven in-process by integration tests.
