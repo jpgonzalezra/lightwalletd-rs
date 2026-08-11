@@ -135,7 +135,7 @@ async fn epoch(State(state): State<SnapshotState>, Path(index): Path<u64>) -> Re
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
-    // Refuse rather than queue: a queued slow client would hold a slot for as long as it liked.
+    // Refuse, don't queue: a queued slow client would hold a slot for as long as it liked.
     let Ok(permit) = Arc::clone(&state.downloads).try_acquire_owned() else {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -187,7 +187,7 @@ async fn epoch(State(state): State<SnapshotState>, Path(index): Path<u64>) -> Re
 
 /// A [`Write`] that hands buffered chunks to the response stream.
 ///
-/// Blocks when the channel is full, which is what makes a slow client slow the export down instead
+/// Blocks when the channel is full, which makes a slow client slow the export down instead
 /// of letting an epoch pile up in memory.
 struct ChunkWriter {
     sender: mpsc::Sender<Bytes>,

@@ -2,8 +2,8 @@
 
 ## Context
 
-Deterministic wallet tests need a controllable chain — scripted reorgs, confirmations, and edge cases
-— without waiting on a live node. The wallet-facing service must behave identically whether the data
+Deterministic wallet tests need a controllable chain (scripted reorgs, confirmations, and edge cases)
+without waiting on a live node. The wallet-facing service must behave identically whether the data
 is real or mock.
 
 ## Decision

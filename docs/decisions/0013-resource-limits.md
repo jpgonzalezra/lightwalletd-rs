@@ -11,8 +11,8 @@ accumulation.
 Set two kinds of limit. The shared server builder caps in-flight requests and HTTP/2 streams per
 connection and applies TCP / HTTP-2 keepalive, all configurable at startup
 (`--max-concurrent-streams`, `--keepalive-interval-secs`, `--keepalive-timeout-secs`, defaulting to
-256 / 60 s / 20 s). Three per-request caps bound accumulation — `MAX_BLOCK_RANGE`,
-`MAX_STREAMED_ADDRESSES`, and `MAX_TADDRESS_TXIDS` (all 10,000) — and remain module-local constants
+256 / 60 s / 20 s). Three per-request caps (`MAX_BLOCK_RANGE`, `MAX_STREAMED_ADDRESSES`, and
+`MAX_TADDRESS_TXIDS`, all 10,000) bound accumulation and remain module-local constants
 with generous defaults.
 
 ## Consequences

@@ -11,8 +11,8 @@ use super::{Streamer, block_at, decode_hex};
 
 /// Substring zebrad's `z_get_subtrees_by_index` puts in its JSON-RPC error message when asked for a
 /// pool it doesn't recognize (`zebra-rpc` `methods.rs`: `"invalid pool name, must be one of: [...]"`).
-/// A pre-NU6.3 node doesn't know the `"ironwood"` pool and answers with exactly this error — that's
-/// not a server failure, the Ironwood subtree literally cannot exist yet on that node — so it is
+/// A pre-NU6.3 node doesn't know the `"ironwood"` pool and answers with exactly this error (that's
+/// not a server failure; the Ironwood subtree literally cannot exist yet on that node), so it is
 /// matched here and turned into a clean empty stream instead of propagating as an RPC error. Matching
 /// on the message (rather than the JSON-RPC error code, which zebrad reports as the generic `Misc`
 /// code shared by many unrelated errors) keeps this narrowly scoped to the unrecognized-pool case.

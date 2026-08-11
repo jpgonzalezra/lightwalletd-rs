@@ -29,7 +29,7 @@ use zcash_protocol::consensus::NetworkType;
 pub struct TestServer {
     pub compact: CompactTxStreamerClient<Channel>,
     pub darkside: DarksideStreamerClient<Channel>,
-    /// gRPC Server Reflection client, connected to the same server — lets tests verify reflection
+    /// gRPC Server Reflection client, connected to the same server, letting tests verify reflection
     /// is registered (see `tests/reflection.rs`) without spawning a separate real binary.
     pub reflection: ServerReflectionClient<Channel>,
     /// Address the server is listening on, for tests that drive the transport by hand rather than

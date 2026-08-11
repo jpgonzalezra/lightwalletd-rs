@@ -37,7 +37,7 @@ async fn ironwood_subtree_roots_with_no_subtrees_is_an_empty_stream() {
 
 // A pre-NU6.3 node rejects `z_getsubtreesbyindex ironwood ...` outright, because it doesn't
 // recognize the pool name at all (zebra-rpc's `POOL_LIST` is `["sapling", "orchard"]` before the
-// Ironwood RPC support lands). That's not a server failure — the subtree can't exist yet — so the
+// Ironwood RPC support lands). That's not a server failure (the subtree can't exist yet), so the
 // stream must still end cleanly with zero items, exactly like the "recognized but empty" case above.
 #[tokio::test]
 async fn pre_ironwood_node_error_yields_an_empty_stream() {

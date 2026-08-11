@@ -1,4 +1,4 @@
-//! Pruning a compact block — or a single compact transaction — down to the requested value pools.
+//! Pruning a compact block (or a single compact transaction) down to the requested value pools.
 //!
 //! Reusable at block level (`GetBlockRange`) and at transaction level (mempool streaming).
 
@@ -76,7 +76,7 @@ pub fn filter_tx_to_pools(tx: &mut CompactTx, pools: Pools) {
 }
 
 /// Strip `PoolType::Transparent` from a `pool_types` filter. `GetBlockRangeNullifiers` never returns
-/// transparent data — a wallet wanting that uses `GetBlockRange` instead — so a transparent request is
+/// transparent data (a wallet wanting that uses `GetBlockRange` instead), so a transparent request is
 /// dropped rather than honored, matching Go's explicit removal (`frontend/service.go`
 /// `GetBlockRangeNullifiers`) before it delegates to the same pool-filtering path as `GetBlockRange`.
 fn drop_transparent(pool_types: &[i32]) -> Vec<i32> {
@@ -88,15 +88,15 @@ fn drop_transparent(pool_types: &[i32]) -> Vec<i32> {
 }
 
 /// `GetBlockRangeNullifiers`'s transform: prune to the requested (shielded) value pools exactly as
-/// `GetBlockRange` does — including dropping any transaction the pool filter leaves with no
-/// components — then reduce what survives to nullifiers only.
+/// `GetBlockRange` does (including dropping any transaction the pool filter leaves with no
+/// components), then reduce what survives to nullifiers only.
 ///
 /// The order matters and mirrors Go (`frontend/service.go` `GetBlockRangeNullifiers`, which delegates
 /// pool filtering to the same `common.GetBlockRange`/`filterBlockPool` used by the plain range call,
 /// then reduces the surviving transactions to nullifiers): the emptiness check runs on the
 /// *pre-nullifier-reduction* transaction, using the same fields `GetBlockRange` checks (spends,
 /// outputs, actions, ironwood actions, vin, vout). The nullifier reduction that follows only clears
-/// fields *within* the transactions that survive that check — it does not run the drop again, so a
+/// fields *within* the transactions that survive that check; it does not run the drop again, so a
 /// transaction can (as in Go) end up in the response with only its `index`/`txid`/`fee` set if the
 /// pool filter kept it for a component (e.g. a Sapling output) that the nullifier reduction then
 /// clears. This is intentional parity with Go, not an oversight.
@@ -281,7 +281,7 @@ mod tests {
     fn range_nullifiers_pool_filter_always_drops_transparent() {
         // Requesting `TRANSPARENT` alone strips it to an empty pool-types list (transparent is
         // dropped, unconditionally, from every `GetBlockRangeNullifiers` request), which then falls
-        // back to the legacy shielded-only default — the same as an empty request. A
+        // back to the legacy shielded-only default, the same as an empty request. A
         // transparent-only transaction has no shielded component to fall back to, so it is dropped.
         let transparent_only = CompactTx {
             vin: vec![CompactTxIn::default()],
@@ -343,7 +343,7 @@ mod tests {
         // Same emptiness check as `filter_block_to_pools`/`GetBlockRange`: a transaction that has only
         // transparent data (dropped here unconditionally) or only components outside the requested
         // pool ends up with none of spends/outputs/actions/ironwood_actions/vin/vout, and is dropped
-        // from `vtx` — Go's `filterBlockPool` retains only transactions with a surviving component.
+        // from `vtx`: Go's `filterBlockPool` retains only transactions with a surviving component.
         let transparent_only = CompactTx {
             vin: vec![CompactTxIn::default()],
             vout: vec![TxOut::default()],
@@ -365,8 +365,8 @@ mod tests {
 
     #[test]
     fn range_nullifiers_keeps_tx_with_sapling_output_but_no_spend_even_though_it_ends_up_empty() {
-        // A shielding transaction (Sapling output, no spend) survives the pool filter — it has a
-        // surviving component (the output) — but the nullifier reduction that follows unconditionally
+        // A shielding transaction (Sapling output, no spend) survives the pool filter, since it has
+        // a surviving component (the output), but the nullifier reduction that follows unconditionally
         // clears Sapling outputs (only spend nullifiers are kept). Go performs this same two-stage
         // process without re-checking emptiness after the second stage, so the transaction reaches the
         // client with none of spends/outputs/actions/ironwood_actions/vin/vout populated. This is

@@ -2,7 +2,7 @@
 //!
 //! The generic `From` impls give the safe default (`Unavailable` for a node/transport failure,
 //! `Internal` for a parse/decode failure). The per-method helpers below upgrade specific JSON-RPC
-//! error codes to the status a wallet expects. The numeric code — not the message — is authoritative,
+//! error codes to the status a wallet expects. The numeric code, not the message, is authoritative,
 //! since the node's error messages are not stable across versions.
 
 use tonic::Status;

@@ -72,7 +72,7 @@ pub enum FetchError {
 pub async fn compact_block(node: &dyn NodeRpc, height: u64) -> Result<CompactBlock, FetchError> {
     let verbose = node.get_block_verbose(height).await?;
     let raw = node.get_block_raw(&verbose.hash).await?;
-    // Parsing runs librustzcash deserialization and txid hashing over the whole block — CPU work
+    // Parsing runs librustzcash deserialization and txid hashing over the whole block: CPU work
     // that would otherwise stall the async runtime during a full-speed catch-up.
     let mut block = tokio::task::spawn_blocking(move || compact::to_compact_block(&raw)).await??;
     // A wrong-height block stays on the node/transport backoff instead of being mislabeled as cache
@@ -83,7 +83,7 @@ pub async fn compact_block(node: &dyn NodeRpc, height: u64) -> Result<CompactBlo
             got: block.height,
         });
     }
-    // The returned bytes must hash to the hash we fetched them by — a near-free integrity check (the
+    // The returned bytes must hash to the hash we fetched them by: a near-free integrity check (the
     // parser already computed the hash) that catches the node serving wrong bytes for a hash.
     let computed_hash = encoding::wire_to_display_hex(&block.hash);
     if computed_hash != verbose.hash {
@@ -93,7 +93,7 @@ pub async fn compact_block(node: &dyn NodeRpc, height: u64) -> Result<CompactBlo
         });
     }
     // Cross-check the locally computed txids against the node's list (when the node provides one):
-    // a silent divergence — e.g. a consensus rule librustzcash and the node disagree on — must fail
+    // a silent divergence (e.g. a consensus rule librustzcash and the node disagree on) must fail
     // loudly here rather than corrupt wallet spend detection downstream.
     if !verbose.tx.is_empty() {
         if verbose.tx.len() != block.vtx.len() {
@@ -293,7 +293,7 @@ mod tests {
         let height = compact::to_compact_block(&raw).unwrap().height;
 
         // The verbose hash names a different block than the raw bytes hash to; the height is correct
-        // so the hash mismatch — not the height check — is what rejects it.
+        // so the hash mismatch, not the height check, is what rejects it.
         let fake = FakeNode {
             block_verbose: Some(
                 serde_json::from_value(json!({

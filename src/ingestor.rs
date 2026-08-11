@@ -120,7 +120,7 @@ pub async fn run(
                     tokio::time::sleep(ERROR_BACKOFF).await;
                 }
             }
-            // Node/transport errors — and corruption past the recovery bound — back off.
+            // Node/transport errors (and corruption past the recovery bound) back off.
             Err(error) => {
                 if consecutive_recoveries >= MAX_CONSECUTIVE_RECOVERIES {
                     tracing::error!(%error, "corruption recovery limit reached; backing off");
@@ -138,7 +138,7 @@ pub async fn run(
 /// it, so the next steps re-ingest from the node's chain.
 ///
 /// Truncation is charged to [`RepairBudget`], and a report the budget refuses is put back so it is
-/// acted on once the window rolls over rather than lost.
+/// acted on once the window rolls over, not lost.
 fn repair_reported(
     cache: &Cache,
     height: u64,
@@ -194,7 +194,7 @@ enum Progress {
 
 /// Whether a failed step should truncate-and-recover (then retry immediately) rather than back off: a
 /// cache corruption/decode error, but only while consecutive recoveries stay under
-/// [`MAX_CONSECUTIVE_RECOVERIES`] — the backstop against a sleepless truncate→re-add→detect loop.
+/// [`MAX_CONSECUTIVE_RECOVERIES`], the backstop against a sleepless truncate→re-add→detect loop.
 fn should_recover(error: &StepError, consecutive_recoveries: u32) -> bool {
     error.is_corruption() && consecutive_recoveries < MAX_CONSECUTIVE_RECOVERIES
 }
@@ -280,7 +280,7 @@ async fn step(
         // A gap below `height` means that task died (panic or cancellation) without leaving a
         // per-height result: the chained prefix ends here. Without this check, a dead task at
         // the window's first height would make the next result fail the prev-hash test below and
-        // be misread as a reorg — rolling back a good block and dropping the panic before the
+        // be misread as a reorg, rolling back a good block and dropping the panic before the
         // accounting after this loop ever sees it.
         if height != expected_height {
             break;
@@ -381,13 +381,13 @@ async fn fetch_window(
             // A panicked fetch is a bug, but the ingestor task's handle is detached (lib.rs), so
             // resuming the unwind would kill ingestion silently while the server keeps serving a
             // frozen cache. Surface it loudly instead and let the step fail so the run loop backs
-            // off — a deterministic panic then shows up as a repeating error, not a hang.
+            // off: a deterministic panic then shows up as a repeating error, not a hang.
             Err(join_error) if join_error.is_panic() => {
                 tracing::error!(%join_error, "ingest fetch task panicked");
                 panicked.get_or_insert(join_error);
             }
-            // Cancelled (runtime shutdown mid-window): the missing height simply ends the chained
-            // prefix, and the next step — if any — refetches from there.
+            // Cancelled (runtime shutdown mid-window): the missing height ends the chained
+            // prefix, and the next step, if any, refetches from there.
             Err(join_error) => {
                 tracing::warn!(%join_error, "ingest fetch task cancelled; skipping");
             }
@@ -397,7 +397,7 @@ async fn fetch_window(
 }
 
 /// Roll the cache back to `target` (keeping `target` itself). A rollback that would cross the
-/// `start_height` floor — or that could not lower the tip (the genesis-saturation case) — empties
+/// `start_height` floor (or that could not lower the tip, the genesis-saturation case) empties
 /// the cache instead of wedging against the floor: an empty cache chains onto anything, so the next
 /// step resumes ingesting the node's chain from `start_height`.
 fn reorg_to_floor(cache: &Cache, target: u64, start_height: u64) -> Result<(), CacheError> {
@@ -623,7 +623,7 @@ mod tests {
     async fn step_keeps_the_chained_prefix_on_a_mid_window_chain_mismatch() {
         // Corrupt the third block's prevHash so it no longer chains onto the second. Its own hash
         // (recomputed by the fake from the mutated bytes) stays self-consistent, so only the chain
-        // check can reject it — the step must commit the first two blocks and stop there.
+        // check can reject it: the step must commit the first two blocks and stop there.
         let mut raws = testdata_blocks();
         raws[2][4..36].fill(0xee);
         let first = crate::compact::to_compact_block(&raws[0]).unwrap().height;
@@ -672,7 +672,7 @@ mod tests {
 
     #[tokio::test]
     async fn step_idles_when_the_node_is_behind_but_on_the_same_chain() {
-        // Cache [100..=102]; the node reports tip 101 with exactly the hash we cached at 101 — a
+        // Cache [100..=102]; the node reports tip 101 with exactly the hash we cached at 101: a
         // node that is merely behind (restart, re-sync). The cache must be left intact.
         let (_dir, cache) = temp_cache();
         cache.add(100, &tip_block(100, vec![0xaa; 32])).unwrap();
@@ -692,7 +692,7 @@ mod tests {
     #[tokio::test]
     async fn step_idles_when_the_node_tip_is_below_the_cached_range() {
         // The node re-synced from scratch and is still below our cache floor: nothing to compare,
-        // so wait rather than drain.
+        // so wait, don't drain.
         let (_dir, cache) = temp_cache();
         cache.add(100, &tip_block(100, vec![0xaa; 32])).unwrap();
 
@@ -709,7 +709,7 @@ mod tests {
     #[tokio::test]
     async fn step_rolls_back_when_the_node_is_behind_on_a_different_chain() {
         // Cache [100..=102]; the node reports tip 101 with a hash that disagrees with our cached
-        // block 101 — a genuine reorg onto a shorter chain. Roll back one block per detection.
+        // block 101: a genuine reorg onto a shorter chain. Roll back one block per detection.
         let (_dir, cache) = temp_cache();
         cache.add(100, &tip_block(100, vec![0xaa; 32])).unwrap();
         cache.add(101, &tip_block(101, vec![0xbb; 32])).unwrap();
@@ -773,7 +773,7 @@ mod tests {
         cache.add(0, &tip_block(0, vec![0xaa; 32])).unwrap();
 
         // Node reports the same height 0 with a different tip hash → in-place tip reorg branch,
-        // whose target saturates to 0 — a rollback that cannot lower the tip. The cache must empty
+        // whose target saturates to 0: a rollback that cannot lower the tip. The cache must empty
         // (making real progress possible next step) rather than run a no-op reorg in a hot loop.
         let fake = FakeNode {
             blockchain_info: Some(blockchain_info(0, &"cc".repeat(32))),
@@ -819,7 +819,7 @@ mod tests {
     }
 
     /// A node that panics on `get_block_verbose` for one specific height and delegates everything
-    /// else — a deterministic stand-in for a fetch task dying mid-window.
+    /// else: a deterministic stand-in for a fetch task dying mid-window.
     struct PanicAtHeight {
         inner: FakeNode,
         panic_height: u64,
@@ -907,7 +907,7 @@ mod tests {
     async fn step_with_a_dead_first_fetch_surfaces_the_error_instead_of_rolling_back() {
         // Four consecutive real blocks: the cache holds the first, the window is the remaining
         // three, and the fetch for the window's *first* height dies. The later heights still
-        // arrive, but their prev-hashes cannot chain onto the cached tip across the gap — that
+        // arrive, but their prev-hashes cannot chain onto the cached tip across the gap; that
         // must be read as "the prefix ends at the gap", never as a reorg. A misread here rolls
         // back (here: empties) a perfectly good cache and drops the panic, oscillating
         // rollback/advance at full speed instead of reaching the error backoff.
@@ -937,9 +937,9 @@ mod tests {
         let (_dir, cache) = temp_cache();
 
         // Only `get_blockchain_info` is configured, so the window's fetch task panics inside the
-        // fake ("get_block_verbose not configured"). The panic must come back as a step failure —
-        // driving the run loop's backoff — rather than unwinding into (and silently killing) the
-        // detached ingestor task, and rather than being absorbed as an empty window.
+        // fake ("get_block_verbose not configured"). The panic must come back as a step failure
+        // (driving the run loop's backoff) rather than unwinding into (and silently killing) the
+        // detached ingestor task, and must not be absorbed as an empty window.
         let fake = FakeNode {
             blockchain_info: Some(blockchain_info(100, &"00".repeat(32))),
             ..Default::default()

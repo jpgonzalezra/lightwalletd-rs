@@ -105,7 +105,7 @@ pub(super) async fn get_block_range_nullifiers(
 ) -> Result<Response<BoxStream<CompactBlock>>, Status> {
     let range = request.into_inner();
     // An invalid pool type is rejected up front, for parity with `get_block_range`. The requested
-    // pools are otherwise honored (transparent is always dropped — see
+    // pools are otherwise honored (transparent is always dropped; see
     // `filter::filter_block_to_pools_nullifiers_only`): this is not the legacy "ignore pool_types
     // entirely" behavior.
     filter::validate_pool_types(&range.pool_types)?;

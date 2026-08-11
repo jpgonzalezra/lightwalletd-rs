@@ -6,11 +6,11 @@
 left it at its default: the empty string.
 
 The field is not informational. `BlockRange.poolTypes` and this field were introduced together, in
-lightwallet-protocol v0.4.0, and the protocol ties them explicitly — `proto/service.proto:35-38` makes
+lightwallet-protocol v0.4.0, and the protocol ties them explicitly: `proto/service.proto:35-38` makes
 checking the server's version a client requirement before setting `poolTypes` to a non-empty value.
-The version string is the means by which a client discharges that requirement.
+The version string is how a client meets that requirement.
 
-An empty value is therefore not "unknown", it is indistinguishable from a pre-v0.4.0 server. This
+An empty value is therefore not "unknown": it is indistinguishable from a pre-v0.4.0 server. This
 server prunes to the requested pools ([0011](0011-up-front-input-validation.md) validates the field,
 `src/filter.rs` applies it), returns transparent `vin`/`vout` when `TRANSPARENT` is requested, serves
 `ironwoodActions`, `ironwoodTree` and Ironwood subtree roots. A client honoring the requirement could
@@ -29,17 +29,17 @@ Report `v0.5.0` from `LIGHTWALLET_PROTOCOL_VERSION` in `src/service/chain.rs`.
   `CARGO_PKG_VERSION`). Those describe the binary; this describes the protocol served. A value the
   build could overwrite would defeat the purpose, since the protocol version does not move when the
   build does.
-- It is **not derived from the crate version** either. The two are independent: a release can add
+- Nor is it **derived from the crate version**. The two are independent: a release can add
   caching or operational surface without touching the wire contract, and the protocol can move without
   a release of ours.
 - It moves **only once the server actually serves everything the named version specifies**, in lockstep
-  with the `proto/` set. Vendoring a newer `.proto` is not enough on its own — the claim is what a
+  with the `proto/` set. Vendoring a newer `.proto` is not enough on its own; the claim is what a
   client acts on.
 - The reported string keeps the upstream tag's leading `v`, matching the tag names in
   lightwallet-protocol and the value the Go implementation reports, so clients comparing across servers
   see one form rather than two.
 
-The remaining unset `LightdInfo` fields — `branch`, `buildDate`, `buildUser` — are left alone. They
+The remaining unset `LightdInfo` fields (`branch`, `buildDate`, `buildUser`) are left alone. They
 describe a build, not the protocol, and nothing in the contract depends on them.
 
 ## Consequences

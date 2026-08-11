@@ -32,7 +32,7 @@ First public release (beta). A caching proxy in front of a `zebrad` node that im
   `GetBlockRange` serve from it and fall back to the node.
 - **Windowed concurrent ingest** (ADR 0020): catch-up fetches up to `--ingest-window` blocks (default
   64) with `--ingest-concurrency` concurrent node requests (default 8) and commits each window in a
-  single cache transaction — one fsync per window instead of per block — closing the initial-sync
+  single cache transaction, one fsync per window instead of per block. This closed the initial-sync
   throughput gap with the Go reference. Block parsing moved off the async runtime (`spawn_blocking`).
 - Fetch-time txid cross-check: locally computed txids are verified against the node's verbose
   `getblock` txid list; a divergence rejects the block instead of silently corrupting wallet spend
@@ -61,7 +61,7 @@ First public release (beta). A caching proxy in front of a `zebrad` node that im
   than derivable from its contents. A failed or unreachable peer is not fatal, and the import stops
   at the operator's own node tip rather than downloading a range that node cannot verify yet. Epoch
   bodies are compressed only in transit, so the digests stay portable across servers.
-- `--snapshot-url` is validated at startup rather than at import time, since a bootstrap failure
+- `--snapshot-url` is validated at startup, not at import time, since a bootstrap failure
   degrades to a full ingest and a typo would otherwise cost hours before anyone noticed. A plaintext
   URL is accepted with a warning: the block contents a snapshot carries are the one part no
   verification layer ties back to the operator's node. An import stops cleanly on `SIGTERM`, keeping
@@ -69,10 +69,10 @@ First public release (beta). A caching proxy in front of a `zebrad` node that im
 - After a successful import the ingestor floors at the snapshot's base height, so a deep reorg cannot
   empty the cache and silently re-sync from Sapling activation. `--redownload` clears that floor with
   the blocks.
-- `getblockhash` lookups are issued in batches, which is what makes verifying every height affordable.
+- `getblockhash` lookups are issued in batches, which keeps verifying every height affordable.
 
 ### Block range continuity
-- **A served block range is verified to be one chain** (ADR 0027). `GetBlockRange` and
+- A served block range is verified to be one chain (ADR 0027). `GetBlockRange` and
   `GetBlockRangeNullifiers` resolve each height from the cache or the node, and during a reorg repair those
   two disagree: the cache can still hold the abandoned fork while the node already serves the new one, so a
   range spanning the boundary could splice them into a chain that never existed. Consecutive blocks are
@@ -85,7 +85,7 @@ First public release (beta). A caching proxy in front of a `zebrad` node that im
   range but leaves the cache alone. The read path only reports; the ingestor remains the cache's single
   writer, and truncations are bounded at five per ten-minute window so a node the cache cannot reconcile
   with cannot drive an endless truncate/re-ingest cycle.
-- **Ranges read the cache in MVCC chunks** (ADR 0028): 64 consecutive heights per `redb` read transaction,
+- Ranges read the cache in MVCC chunks (ADR 0028): 64 consecutive heights per `redb` read transaction,
   released before any node request is awaited, instead of one transaction per height. The cached blocks in a
   chunk come from a single consistent snapshot, so a truncation landing mid-range can no longer be
   straddled, and a long range does less transaction setup.
@@ -98,7 +98,7 @@ First public release (beta). A caching proxy in front of a `zebrad` node that im
 ### Tree state, subtrees & nullifiers
 - `GetTreeState` and `GetLatestTreeState`.
 - `GetSubtreeRoots` (`z_getsubtreesbyindex`, with the completing block looked up from the cache).
-- **`GetSubtreeRoots` bounds the subtree index range at the service boundary** (ADR 0030). The node
+- `GetSubtreeRoots` bounds the subtree index range at the service boundary (ADR 0030). The node
   addresses subtrees with a `u16`, so a `startIndex` above 65,535 can never succeed and is rejected
   with `InvalidArgument` before any node round-trip, instead of surfacing the node's `Invalid params`
   as a retryable `Unavailable` that a wallet would loop on. A `maxEntries` above that range is a
@@ -135,22 +135,22 @@ First public release (beta). A caching proxy in front of a `zebrad` node that im
 
 ### Backends
 - **`--backend readstate`** (ADR [0023](docs/decisions/0023-zebra-readstate-backend.md), non-default
-  `readstate` cargo feature): a second `NodeRpc` implementation that serves reads — blocks, tree
-  states, subtrees, the transparent-address index, mined transactions, tip/chain info — from an
+  `readstate` cargo feature): a second `NodeRpc` implementation that serves reads (blocks, tree
+  states, subtrees, the transparent-address index, mined transactions, tip/chain info) from an
   in-process `zebra_state::ReadStateService` attached to a co-located zebrad's state, paired with
   `zebra_rpc::sync::TrustedChainSync` over the node's indexer gRPC for true-tip fidelity. Writes and
-  node-only surfaces (`sendrawtransaction`, the mempool, `getinfo`) stay on JSON-RPC — a hybrid, by
+  node-only surfaces (`sendrawtransaction`, the mempool, `getinfo`) stay on JSON-RPC, a hybrid by
   design. `rpc` remains the default and the only supported backend for remote nodes. New flags:
   `--backend {rpc,readstate}`, `--zebra-state-dir`, `--zebra-indexer-url` (required with
   `--backend readstate`); a state-format mismatch against the running zebrad fails fast at startup.
-- **Wire parity verified against a live mainnet node**: 5,997 compact blocks byte-identical across
+- Wire parity was verified against a live mainnet node: 5,997 compact blocks byte-identical across
   three windows and both pool-type modes, plus clean passes on subtrees, the full address surface,
   `GetTransaction`, and error mapping (80/80 checks after fixes). Two real wire differences were found
   and fixed: an empty (not-yet-active) commitment tree serialized as `""` (rpc) vs `"000000"`
   (readstate), and `GetLightdInfo.upgradeName` rendered as `"NU6.3"` (rpc) vs `"Nu6_3"` (readstate).
-- **Measured performance envelope** (2026-07 mainnet benchmarks,
-  `contrib/bench/results/rss-bench-2026-07.md`): read surfaces win decisively — `GetTreeState` 4.1x
-  faster, `GetTaddressTxids` up to 7.3x faster, time-to-tip on light recent blocks ~25% faster — but
+- Measured performance envelope (2026-07 mainnet benchmarks,
+  `contrib/bench/results/rss-bench-2026-07.md`): read surfaces win decisively (`GetTreeState` 4.1x
+  faster, `GetTaddressTxids` up to 7.3x faster, time-to-tip on light recent blocks ~25% faster), but
   ingest is parse-bound and loses on heavy historical blocks: sandblasting-era ingest is ~38% slower,
   and a full genesis→tip sync is ~19% slower overall (1h 38m vs 1h 22m), because the in-process path
   pays zebra's structured-`Block` deserialize plus a re-serialize plus the compact-block parse on one
@@ -165,7 +165,7 @@ First public release (beta). A caching proxy in front of a `zebrad` node that im
 ### RPC compliance (vs the Go reference)
 - `GetTreeState` serves by-hash requests (height takes precedence when both are set, matching
   Go); a wrong-length hash is rejected up front with `InvalidArgument`. Go's `SkipHash` retry-walk is
-  deliberately not replicated — it is a zcashd-only affordance with no zebrad equivalent.
+  deliberately not replicated: it is a zcashd-only affordance with no zebrad equivalent.
 - `GetSubtreeRoots` against a pre-NU6.3 node returns a clean empty stream when the node rejects the
   `ironwood` pool name ("no roots yet"), instead of surfacing a node error during the rollout window.
 - `GetBlockRangeNullifiers` honors the requested `pool_types` (transparent stripped first, matching
@@ -187,7 +187,7 @@ First public release (beta). A caching proxy in front of a `zebrad` node that im
 - `GetTaddressBalanceStream` validates each address as it arrives instead of after the whole
   client stream has been received, so a stream is refused at the first malformed address rather than
   after the server has consumed every message (GHSA-x4m7-3gpp-xc36).
-- **`GetTaddressTransactions`/`GetTaddressTxids` never scan the address index open-endedly**
+- `GetTaddressTransactions`/`GetTaddressTxids` never scan the address index open-endedly
   (ADR [0025](docs/decisions/0025-taddress-range-bounds.md)). A range with no `end` (or an `end` of
   zero, which is how an omitted bound reaches the server) is pinned to the chain tip at request time,
   a span wider than 10,000,000 blocks is rejected with `InvalidArgument` before the node is
@@ -199,27 +199,27 @@ First public release (beta). A caching proxy in front of a `zebrad` node that im
 ### Operations & hardening
 - gRPC server runs over TLS by default (`--tls-cert`/`--tls-key`), with `--no-tls-very-insecure` to run
   plaintext for local development.
-- **`--gen-cert-very-insecure`** generates an in-memory self-signed TLS certificate at startup
+- `--gen-cert-very-insecure` generates an in-memory self-signed TLS certificate at startup
   (via `rcgen`) instead of requiring `--tls-cert`/`--tls-key` on disk. Insecure and mutually
   exclusive with `--tls-cert`/`--tls-key` and `--no-tls-very-insecure`; logs a loud warning on use.
-- **Prometheus metrics on by default** (ADR 0022, ops-surface parity with the Go reference):
+- Prometheus metrics on by default (ADR 0022, ops-surface parity with the Go reference):
   per-method request counts and latency histograms via a gRPC `tower` layer, served at `/metrics` on
   `127.0.0.1:9068` (matching the Go reference's fixed port); `--metrics-bind` overrides the address,
   `--no-metrics` disables the metrics server entirely.
-- **gRPC Server Reflection** is always registered (both live and darkside modes), so
+- gRPC Server Reflection is always registered (both live and darkside modes), so
   `grpcurl -plaintext <addr> list`/`describe` work against a running server with no local `.proto`
   checkout needed.
-- **`--log-level <level>`** (default `info`) sets the tracing filter; an explicit `RUST_LOG`
-  environment variable still takes precedence. **`--log-file <path>`** switches output to JSON lines
+- `--log-level <level>` (default `info`) sets the tracing filter; an explicit `RUST_LOG`
+  environment variable still takes precedence. `--log-file <path>` switches output to JSON lines
   appended to that file instead of human-readable stderr text, matching the Go reference's
   `--log-file`/logrus-JSON behavior.
-- **`--darkside-timeout-minutes`** (default 30, matching Go's fixed default): darkside mode
+- `--darkside-timeout-minutes` (default 30, matching Go's fixed default): darkside mode
   auto-shuts-down after this long, so a forgotten or leaked mock server (e.g. a stuck CI job) never
   serves indefinitely.
-- **`--nocache`** runs without the on-disk block cache (opened in a throwaway temp dir instead, and
-  the ingestor is not spawned), so every block read falls through to the node — matching Go's
+- `--nocache` runs without the on-disk block cache (opened in a throwaway temp dir instead, and
+  the ingestor is not spawned), so every block read falls through to the node, matching Go's
   `--nocache`. Debugging only.
-- **Env-var fallbacks**: `--ingest-window`/`--ingest-concurrency` and `--log-level`/`--log-file`
+- Env-var fallbacks: `--ingest-window`/`--ingest-concurrency` and `--log-level`/`--log-file`
   also read `LWD_INGEST_WINDOW`/`LWD_INGEST_CONCURRENCY`/`LWD_LOG_LEVEL`/`LWD_LOG_FILE` when the flag
   is not given; an explicit flag still wins over the environment variable, which wins over the
   default.

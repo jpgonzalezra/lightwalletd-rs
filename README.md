@@ -7,7 +7,7 @@ A Rust lightwalletd for Zcash: a caching proxy that serves compact blockchain da
 wallets over gRPC.
 
 > **Beta software.** lightwalletd-rs is under active development and has not been security-audited.
-> Expect breaking changes, and run it at your own risk — it is provided "as is", without warranty of
+> Expect breaking changes, and run it at your own risk: it is provided "as is", without warranty of
 > any kind (see [LICENSE](LICENSE)).
 
 ## Overview
@@ -23,31 +23,31 @@ wallets over gRPC.
    wallets)                            - proxies the rest
 ```
 
-It ingests blocks from the node and converts each into a `CompactBlock` — a pruned form with the zk proofs
-stripped, so a block shrinks from ~2 MB to a few KB — caches them on disk, and streams them to wallets over
-the standard Zcash light-client gRPC. The remaining calls (send transaction, tree state, mempool,
-transparent-address balances) are proxied to the node.
+It ingests blocks from the node and converts each into a `CompactBlock`, a pruned form with the zk proofs
+stripped that shrinks a block from ~2 MB to a few KB. Compact blocks are cached on disk and streamed to
+wallets over the standard Zcash light-client gRPC. The remaining calls (send transaction, tree state,
+mempool, transparent-address balances) are proxied to the node.
 
 For the full design see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); for the specifications it
 implements, [`docs/protocol-references.md`](docs/protocol-references.md).
 
 ## Features
 
-- **All 20 `CompactTxStreamer` methods** — blocks, transactions, tree state, subtrees, nullifiers,
+- All 20 `CompactTxStreamer` methods: blocks, transactions, tree state, subtrees, nullifiers,
   transparent-address balances and txids, and mempool streaming.
-- **On-disk compact-block cache** (`redb`) filled by a background ingestor, with reorg rollback and
-  automatic recovery from corruption or gaps.
-- **TLS by default** — plaintext requires an explicit opt-in flag.
-- **Prometheus metrics on by default** (`127.0.0.1:9068`) and gRPC Server Reflection — per-method request
-  counts/latency histograms, and `grpcurl`-discoverable services with no local `.proto` checkout.
-- **Hardened by default** — up-front input validation, per-connection stream and keepalive limits, and a
-  graceful drain on `SIGINT`/`SIGTERM`.
-- **Darkside test mode** — a controllable in-memory mock chain for deterministic wallet tests.
+- An on-disk compact-block cache (`redb`), filled by a background ingestor that rolls back reorgs and
+  recovers from corruption or gaps on its own.
+- TLS by default. Plaintext requires an explicit opt-in flag.
+- Prometheus metrics (per-method request counts and latency histograms) on `127.0.0.1:9068` unless
+  disabled, plus gRPC Server Reflection so `grpcurl` works without a local `.proto` checkout.
+- Input validation up front, per-connection stream and keepalive limits, and a graceful drain on
+  `SIGINT`/`SIGTERM`.
+- A darkside mode serving a controllable in-memory mock chain for deterministic wallet tests.
 
 ## Requirements
 
 - **Rust** (stable, 2024 edition).
-- **`protoc`**, the Protocol Buffers compiler, on `PATH` — the `.proto` contract is compiled at build time.
+- **`protoc`**, the Protocol Buffers compiler, on `PATH`; the `.proto` contract is compiled at build time.
   Install it with `brew install protobuf` (macOS) or `apt-get install -y protobuf-compiler` (Debian/Ubuntu).
 - A reachable **`zebrad`** node with JSON-RPC enabled (mainnet, testnet, or regtest), synced far enough to
   serve the range you need.
@@ -72,8 +72,8 @@ Run it against a local `zebrad`, in plaintext (local development only):
 
 On first start it ingests from Sapling activation (or `--start-height`) and fills the on-disk cache under
 `--data-dir`; later starts resume from the cache. Once it is serving, point a wallet at
-`127.0.0.1:9067` — it speaks the standard Zcash light-client gRPC, so Zcash light wallets connect
-unchanged.
+`127.0.0.1:9067`. The server speaks the standard Zcash light-client gRPC, so Zcash light wallets
+connect unchanged.
 
 For anything beyond local testing, serve over [TLS](#tls) instead of `--no-tls-very-insecure`.
 
@@ -113,13 +113,13 @@ Run `lightwalletd-rs --help` for the full list, including cache resync (`--sync-
 
 `--backend` selects how lightwalletd-rs reaches chain data:
 
-- **`rpc`** (default) — every read and write goes over `zebrad`'s JSON-RPC. Works with any reachable
+- **`rpc`** (default): every read and write goes over `zebrad`'s JSON-RPC. Works with any reachable
   node, local or remote, and is the only supported choice for a remote node.
-- **`readstate`** — reads (blocks, tree states, subtrees, the transparent-address index, mined
+- **`readstate`**: reads (blocks, tree states, subtrees, the transparent-address index, mined
   transactions, tip/chain info) are served in-process from a co-located `zebrad`'s state via
   `zebra_state::ReadStateService`, paired with `zebra_rpc::sync::TrustedChainSync` over the node's
   indexer gRPC for true-tip fidelity. Writes and node-only surfaces (`sendrawtransaction`, the
-  mempool, `getinfo`) still go over JSON-RPC — a hybrid, by design. See
+  mempool, `getinfo`) still go over JSON-RPC; the split is deliberate. See
   [ADR 0023](docs/decisions/0023-zebra-readstate-backend.md) and the
   [design doc](docs/design/zebra-readstate-backend.md) for the full rationale.
 
@@ -129,7 +129,7 @@ Run `lightwalletd-rs --help` for the full list, including cache resync (`--sync-
   `zebrad.toml` (the indexer gRPC ships in default release binaries; only the listen address needs
   configuring).
 - Built with the non-default `readstate` cargo feature: `cargo build --release --features readstate`
-  (pulls in RocksDB and the zebra crate tree, so the default build stays lean — ADR 0012).
+  (pulls in RocksDB and the zebra crate tree, so the default build stays lean; ADR 0012).
 - `--zebra-indexer-url <host:port>` pointing at that indexer gRPC (required with
   `--backend readstate`); `--zebra-state-dir` only if the cache directory isn't zebra's own default.
 - A state-format mismatch against the running zebrad fails fast at startup with a message pointing
@@ -138,26 +138,25 @@ Run `lightwalletd-rs --help` for the full list, including cache resync (`--sync-
 **Measured envelope** (2026-07 mainnet benchmarks,
 [`contrib/bench/results/rss-bench-2026-07.md`](contrib/bench/results/rss-bench-2026-07.md); wire
 parity in [`rss-parity-2026-07.md`](contrib/bench/results/rss-parity-2026-07.md)): `readstate` wins
-decisively on read surfaces — `GetTreeState` 4.1x faster, `GetTaddressTxids` up to 7.3x, time-to-tip
-on light recent blocks ~25% faster — but ingest is parse-bound and loses on heavy historical blocks:
-sandblasting-era ingest is ~38% slower, and a full genesis→tip sync is ~19% slower overall (1h 38m vs
+decisively on read surfaces (`GetTreeState` 4.1x faster, `GetTaddressTxids` up to 7.3x, time-to-tip
+on light recent blocks ~25% faster) but ingest is parse-bound and loses on heavy historical blocks.
+Sandblasting-era ingest is ~38% slower, and a full genesis→tip sync is ~19% slower overall (1h 38m vs
 1h 22m), because the in-process path pays zebra's structured-`Block` deserialize plus a re-serialize
 plus the compact-block parse on one process's cores, where the JSON-RPC path pipelines block
 serialization into zebrad's own process instead. Wire output between the two backends is
-byte-identical by construction (5,997 blocks byte-compared, plus treestates/subtrees/addresses/
-transactions/errors — see the parity report for the two wire differences found and fixed).
+byte-identical by construction: 5,997 blocks byte-compared, plus treestates, subtrees, addresses,
+transactions and errors. See the parity report for the two wire differences found and fixed.
 
 **Recipe:** `rpc` remains the default and the recommended choice for most deployments. For the
 fastest possible cold sync followed by the fastest steady-state serving, sync once with
-`--backend rpc`, then restart against the same `--data-dir` with `--backend readstate` — the
-on-disk compact-block cache is byte-identical between backends, so switching does not require a
-re-sync.
+`--backend rpc`, then restart against the same `--data-dir` with `--backend readstate`. The on-disk
+compact-block cache is byte-identical between backends, so switching does not require a re-sync.
 
 ## TLS
 
 The gRPC server runs over TLS by default: `--tls-cert` and `--tls-key` are required unless you pass
-`--no-tls-very-insecure` (plaintext — development only, never in production) or `--gen-cert-very-insecure`
-(an in-memory self-signed certificate generated at startup — also development only). For local testing you
+`--no-tls-very-insecure` (plaintext: development only, never in production) or `--gen-cert-very-insecure`
+(an in-memory self-signed certificate generated at startup, also development only). For local testing you
 can instead generate a self-signed pair yourself:
 
 ```sh
@@ -183,7 +182,7 @@ on many origins. Origins are validated at startup against the exact `scheme://ho
 browser sends, so a trailing slash or a stray path fails loudly instead of denying the origin it was
 meant to allow.
 
-Note that gRPC-web cannot carry a client-streamed request, so `GetTaddressBalanceStream` is unreachable
+gRPC-web cannot carry a client-streamed request, so `GetTaddressBalanceStream` is unreachable
 from a browser; use the unary `GetTaddressBalance`. All server-streaming methods work.
 
 [`contrib/grpc-web-smoke.html`](contrib/grpc-web-smoke.html) is a dependency-free page that calls
@@ -193,7 +192,7 @@ from a browser; use the unary `GetTaddressBalance`. All server-streaming methods
 
 ## Observability
 
-Prometheus metrics — per-method request counts and latency histograms — are served on `/metrics` at
+Prometheus metrics (per-method request counts and latency histograms) are served on `/metrics` at
 `127.0.0.1:9068` **by default**; override the address with `--metrics-bind` or turn it off entirely with
 `--no-metrics`:
 
@@ -284,14 +283,12 @@ against the ingestor, and publishes each epoch as it becomes available, so consu
 before that finishes. `GET /snapshot/manifest` lists what is available and `GET /snapshot/epoch/{index}`
 serves one epoch body, compressed if the client asks.
 
-Three limits to know:
-
-- **A server can only serve the range it holds.** An instance started with `--start-height` above Sapling
-  activation publishes a snapshot starting there, which only helps a consumer that wants the same window.
-- **The chain must match.** A testnet snapshot is rejected by a mainnet consumer at the manifest check,
-  before any epoch is fetched.
-- **A full mainnet snapshot is on the order of 50 GB**, most of it in the heavily shielded 2022-2023 range,
-  which does not compress. Serving it is a real bandwidth commitment.
+A server can only serve the range it holds: an instance started with `--start-height` above Sapling
+activation publishes a snapshot starting there, which only helps a consumer that wants the same window.
+The chain has to match too; a testnet snapshot is rejected by a mainnet consumer at the manifest check,
+before any epoch is fetched. Finally, a full mainnet snapshot is on the order of 50 GB, most of it in
+the heavily shielded 2022-2023 range, which does not compress. Serving it is a real bandwidth
+commitment.
 
 **Security note:** `--snapshot-bind` defaults to loopback. Binding it to a public address lets anyone who
 can reach it download the entire cache at whatever bandwidth the host will give them; the server warns at
@@ -304,7 +301,7 @@ See [ADR 0024](docs/decisions/0024-snapshot-bootstrap.md) for the trust model an
 
 `--darkside-very-insecure` serves a controllable, in-memory mock chain instead of proxying a real node, for
 deterministic wallet tests (reorgs, confirmations, edge cases). It exposes a `DarksideStreamer` control
-plane alongside the normal `CompactTxStreamer`. Testing only — never use it in production. It shuts itself
+plane alongside the normal `CompactTxStreamer`. Testing only, never in production. It shuts itself
 down after `--darkside-timeout-minutes` (default 30) so a forgotten or leaked mock server does not run
 forever. See [`docs/ARCHITECTURE.md#darkside-mode`](docs/ARCHITECTURE.md#darkside-mode).
 
@@ -323,8 +320,8 @@ denial-of-service surface.
 
 ## Performance
 
-A reproducible harness in [`contrib/bench/`](contrib/bench/) measures the hot read-path — serving
-compact blocks from a warm cache with the node idle — for both this implementation and the reference Go
+A reproducible harness in [`contrib/bench/`](contrib/bench/) measures the hot read-path (serving
+compact blocks from a warm cache with the node idle) for both this implementation and the reference Go
 [`lightwalletd`](https://github.com/zcash/lightwalletd), under identical resource limits, plus a separate
 ingest/full-sync comparison against a real mainnet node. The comparison here is a deliberate,
 method-first exception to this project's usual no-comparison stance; the read-path methodology is
@@ -339,7 +336,7 @@ pre-windowed-ingestor OLD Rust baseline `3885827` (used only for the ingest A/B/
 comparison; `ghz v0.121.0`; Docker 29.0.0 / Compose v2.40.3. The read-path harness still caps both
 proxies at 2 vCPU / 2 GiB inside Docker Compose, but this run used native Linux Docker rather than the
 harness's original Docker-Desktop-on-macOS-arm64 target, so it carries no VM overhead. **Two `zebrad`
-nodes (mainnet + testnet) ran throughout every measurement** — nontrivial background CPU/disk load
+nodes (mainnet + testnet) ran throughout every measurement**: nontrivial background CPU/disk load
 shared by both implementations under test. Read every number below as relative, not absolute.
 
 ### Read path (contrib/bench)
@@ -351,7 +348,7 @@ below are the **median over 5 reps** (warm-up discarded) at each concurrency, fr
 documented default curve (concurrency 1–64, `REPS=5`, `DURATION=8s`; tables from `scripts/aggregate.py`,
 charts from `scripts/plot.py`).
 
-At a glance: once concurrency exceeds 2, Rust dominates `GetBlockRange` throughput on both profiles
+Once concurrency exceeds 2, Rust dominates `GetBlockRange` throughput on both profiles
 (dense: ~330k blocks/s plateau vs Go's 60k–140k; light: ~105k–146k vs Go's 7k–80k) and holds flat
 `GetBlock` p99s under load, where Go's p99 blows out to 33–55 ms at concurrency ≥ 16. Go wins
 low-concurrency (c = 1–2) dense range streaming and `GetBlock` p50 at moderate concurrency. Rust's `redb`
@@ -361,9 +358,9 @@ charts use a 1,000-block `GetBlockRange` window per request (W = 1000); the harn
 
 ### dense (post-NU5)
 
-![dense — GetBlockRange throughput (W=1000): Rust climbs from ~29k blocks/s at concurrency 1 to a ~319-324k plateau from concurrency 8 on, while Go stays essentially flat in the 55-87k range across the same curve.](contrib/bench/charts/dense-throughput.svg)
+![dense GetBlockRange throughput (W=1000): Rust climbs from ~29k blocks/s at concurrency 1 to a ~319-324k plateau from concurrency 8 on, while Go stays roughly flat in the 55-87k range across the same curve.](contrib/bench/charts/dense-throughput.svg)
 
-![dense — GetBlock p99 latency (log scale): Rust's tail latency stays under 2.7 ms through concurrency 64, while Go tracks it closely through concurrency 8 then climbs sharply — 5.9 ms at 16, and past 53 ms at 32-64.](contrib/bench/charts/dense-latency.svg)
+![dense GetBlock p99 latency (log scale): Rust's tail latency stays under 2.7 ms through concurrency 64, while Go tracks it closely through concurrency 8 then climbs sharply: 5.9 ms at 16, and past 53 ms at 32-64.](contrib/bench/charts/dense-latency.svg)
 
 | impl | peak RSS (MiB) | cache on disk (MiB) | max CPU (cores) |
 |---|---|---|---|
@@ -371,9 +368,9 @@ charts use a 1,000-block `GetBlockRange` window per request (W = 1000); the harn
 | go | 250.5 | 19.5 | 2.03 |
 
 <details>
-<summary>Full numbers — GetBlock latency and GetBlockRange throughput (W = 1000)</summary>
+<summary>Full numbers: GetBlock latency and GetBlockRange throughput (W = 1000)</summary>
 
-`GetBlock` latency — median p50 / p99 (µs):
+`GetBlock` latency, median p50 / p99 (µs):
 
 | concurrency | rust p50 | rust p99 | go p50 | go p99 |
 |---|---|---|---|---|
@@ -385,7 +382,7 @@ charts use a 1,000-block `GetBlockRange` window per request (W = 1000); the harn
 | 32 | 669 | 1284 | 392 | 55552 |
 | 64 | 1496 | 2657 | 807 | 53214 |
 
-`GetBlockRange` throughput — median blocks/s (W = 1000):
+`GetBlockRange` throughput, median blocks/s (W = 1000):
 
 | concurrency | rust | go |
 |---|---|---|
@@ -402,14 +399,14 @@ charts use a 1,000-block `GetBlockRange` window per request (W = 1000); the harn
 ### light (pre-Sapling)
 
 Because pre-Sapling blocks carry no Sapling/Orchard data, `GetBlockRange` (shielded-only by default)
-serves near-empty blocks here — this profile measures the framing/overhead floor of the wallet-sync path.
+serves near-empty blocks here; this profile measures the framing/overhead floor of the wallet-sync path.
 The full blocks still carry heavy transparent transaction data (many `vin`/`vout` plus per-transaction
 overhead) and this range averages 4.18 txids/block, so **`GetBlock` (which returns the full compact
 block) and the on-disk footprint are larger than on `dense`**, not smaller.
 
-![light — GetBlockRange throughput (W=1000): Rust holds a ~110-118k blocks/s plateau from concurrency 4 on, roughly a 5-8x lead over Go's 7-25k blocks/s across the same curve.](contrib/bench/charts/light-throughput.svg)
+![light GetBlockRange throughput (W=1000): Rust holds a ~110-118k blocks/s plateau from concurrency 4 on, roughly a 5-8x lead over Go's 7-25k blocks/s across the same curve.](contrib/bench/charts/light-throughput.svg)
 
-![light — GetBlock p99 latency (log scale): Rust's tail latency stays under ~11.2 ms throughout; Go tracks close (even below Rust at concurrency 4) through concurrency 8, then climbs to 34-36 ms at concurrency 16-32, still ~34 ms at 64.](contrib/bench/charts/light-latency.svg)
+![light GetBlock p99 latency (log scale): Rust's tail latency stays under ~11.2 ms throughout; Go tracks close (even below Rust at concurrency 4) through concurrency 8, then climbs to 34-36 ms at concurrency 16-32, still ~34 ms at 64.](contrib/bench/charts/light-latency.svg)
 
 | impl | peak RSS (MiB) | cache on disk (MiB) | max CPU (cores) |
 |---|---|---|---|
@@ -417,9 +414,9 @@ block) and the on-disk footprint are larger than on `dense`**, not smaller.
 | go | 262.9 | 109.2 | 2.04 |
 
 <details>
-<summary>Full numbers — GetBlock latency and GetBlockRange throughput (W = 1000)</summary>
+<summary>Full numbers: GetBlock latency and GetBlockRange throughput (W = 1000)</summary>
 
-`GetBlock` latency — median p50 / p99 (µs):
+`GetBlock` latency, median p50 / p99 (µs):
 
 | concurrency | rust p50 | rust p99 | go p50 | go p99 |
 |---|---|---|---|---|
@@ -431,7 +428,7 @@ block) and the on-disk footprint are larger than on `dense`**, not smaller.
 | 32 | 1555 | 5098 | 2076 | 36411 |
 | 64 | 2870 | 11162 | 3953 | 33827 |
 
-`GetBlockRange` throughput — median blocks/s (W = 1000):
+`GetBlockRange` throughput, median blocks/s (W = 1000):
 
 | concurrency | rust | go |
 |---|---|---|
@@ -448,22 +445,22 @@ block) and the on-disk footprint are larger than on `dense`**, not smaller.
 ### Read-path notes
 
 - **Fairness (identical blocks).** `populate.sh` verifies this on every run and refuses to proceed on a
-  mismatch: the `GetBlockRange` stream over each full range — 12,000 blocks per profile, 24,000 total —
+  mismatch: the `GetBlockRange` stream over each full range (12,000 blocks per profile, 24,000 total)
   hashes identically between Rust and Go (content identity: the responses decode to the same messages,
   not a wire-byte claim). The unary `GetBlock` path was additionally spot-checked at sampled heights.
 - **Dual source of truth.** Client-side (`ghz`) and server-side (`grpc_server_handling_seconds`) both
   corroborate the same ordering; for streaming `GetBlockRange` the two servers time the handler
   differently (tonic returns the stream lazily and records only stream setup; `grpc_prometheus` times the
-  full drain), so the client-side throughput above — where `ghz` drains the whole stream identically for
-  both — is the comparable measure.
+  full drain), so the client-side throughput above, where `ghz` drains the whole stream identically for
+  both, is the comparable measure.
 - **Saturation.** Both proxies approach their 2-vCPU cap at high concurrency (measured ~2.0–2.16 cores;
-  cgroup CPU accounting reads a few percent over the cap — e.g. light Rust's 2.16 — from sampling
-  jitter), so the upper curve is a saturation regime, not linear scaling.
+  cgroup CPU accounting reads a few percent over the cap from sampling jitter, e.g. light Rust's 2.16),
+  so the upper curve is a saturation regime, not linear scaling.
 - **Cache on disk.** Measured after population. The Rust `redb` cache is larger than Go's flat
-  append-only files on both profiles (~2.3×) — B-tree overhead, most visible on the transparent-heavy
+  append-only files on both profiles (~2.3×): B-tree overhead, most visible on the transparent-heavy
   `light` profile. The dense Rust figure (45.8 MiB) carries some churn from interrupted first-populate
   attempts under this run; a pristine single-pass ingest may land somewhat smaller.
-- **Fidelity.** The smaller `GetBlockRange` window (W = 100) is noisier than W = 1000 / 10000 — see the
+- **Fidelity.** The smaller `GetBlockRange` window (W = 100) is noisier than W = 1000 / 10000; see the
   ± spread in the raw `aggregate.py` output. The harness records the full curve (W ∈ {100, 1000, 10000});
   reproduce with `run-bench.sh`, then `aggregate.py` (tables) and `plot.py` (charts).
 
@@ -479,7 +476,7 @@ the ingestor runs flat out.
 
 ![ingest throughput by mainnet range for OLD Rust, NEW Rust, and Go, plus the genesis-to-tip wall-clock comparison: NEW Rust reaches tip in 1h 22m against Go's extrapolated 9.5-10h.](contrib/bench/charts/ingest-sync.svg)
 
-**A/B/C — blocks ingested in a fixed 480 s window, one implementation at a time:**
+**A/B/C: blocks ingested in a fixed 480 s window, one implementation at a time.**
 
 | range | start height | NEW Rust blocks (b/s) | OLD Rust blocks (b/s) | Go blocks (b/s) |
 |---|---|---|---|---|
@@ -487,7 +484,7 @@ the ingestor runs flat out.
 | R2 sandblasting | 1,780,000 | **17,856 (37.2)** | 2,701 (5.6) | 3,170 (6.6) |
 | R3 recent | 3,300,000 | 111,353 (232.0)\* | 26,701 (55.6) | 111,367 (232.0)\* |
 
-\* R3 is **tip-capped** for NEW Rust and Go — both fully caught up to the live chain tip inside the
+\* R3 is **tip-capped** for NEW Rust and Go: both fully caught up to the live chain tip inside the
 480 s window and then idled (NEW Rust's effective catch-up before tip was ≈297 blocks/s, Go's ≈281
 blocks/s); the OLD baseline was nowhere near tip-capped. NEW vs OLD Rust: 9.0× (R1), 6.6× (R2), 4.2×+
 (R3, capped). NEW Rust vs Go: 1.41× (R1), 5.6× (R2, the sandblasting era's heavy shielded blocks), parity
@@ -497,37 +494,38 @@ on R3 only because both were tip-capped. Zero txid/hash-mismatch errors across a
 689 blocks/s overall, 42.0 GiB final cache (13.2 KB/block). Go did **not** finish inside an 8-hour cap:
 stopped at **2,046,039 / 3,412,340 (59.9%)**, 71.0 blocks/s to that point, 25.6 GiB cache
 (13.4 KB/block); extrapolating its own measured post-spam rates over the remaining, entirely-post-spam
-chain gives **≈34,000–36,000 s (≈9.5–10 h)** total. Both runs were error-free. **The windowed ingestor is
-worth ≈7× on a full sync**, and nearly the entire gap sits in the sandblasting segment (1.5M→2.0M):
-Rust crossed it at 148 blocks/s (3,370 s) against Go's 22 blocks/s (23,181 s) — 6.9× — while Rust's own
-non-spam segments ran 1,000–2,400 blocks/s and Go's pre-spam segments ran 310–374 blocks/s, both
-fundamentally node-bound per request.
+chain gives **≈34,000–36,000 s (≈9.5–10 h)** total. Both runs were error-free.
+
+**The windowed ingestor is worth ≈7× on a full sync**, and nearly the entire gap sits in the
+sandblasting segment (1.5M→2.0M): Rust crossed it at 148 blocks/s (3,370 s) against Go's 22 blocks/s
+(23,181 s), a 6.9× gap. Rust's own non-spam segments ran 1,000–2,400 blocks/s, and Go's pre-spam
+segments 310–374 blocks/s; both are node-bound per request.
 
 **Tuning `--ingest-window` / `--ingest-concurrency`.** A 12-cell sweep at the sandblasting start height
-(node-bound — client-side pipelining matters most here) found concurrency is the dominant knob and keeps
+(node-bound, where client-side pipelining matters most) found concurrency is the dominant knob and keeps
 paying past 8: at the default window 64, going 8→16 concurrency is +37% and 16→32 is another +6%; at
-window 256 the same steps are +48% and +5%. Window size alone (at fixed concurrency) is nearly free —
-16→256 moves throughput only ±10% — because it mostly acts as a ceiling on useful concurrency (at window
-16, the 16→32 concurrency step is exactly flat, since a 16-block window can never have more than 16
-fetches in flight). The **default 64/8 is conservative but sound** (within 3% of the concurrency-8
+window 256 the same steps are +48% and +5%. Window size alone (at fixed concurrency) is nearly free,
+moving throughput only ±10% from 16→256, because it mostly acts as a ceiling on useful concurrency (at
+window 16, the 16→32 concurrency step is exactly flat, since a 16-block window can never have more than
+16 fetches in flight). The **default 64/8 is conservative but sound** (within 3% of the concurrency-8
 ceiling); an operator catching up through a spam-era range on a well-provisioned node can get **~1.6× the
-default throughput at 256/32** (59.7 vs 36.3 blocks/s) — at the cost of higher peak RSS and 4× the
+default throughput at 256/32** (59.7 vs 36.3 blocks/s), at the cost of higher peak RSS and 4× the
 outstanding RPC load on the node.
 
 **Read-path latency under active sync (B2).** `GetBlock` at concurrency 4 while the ingestor runs flat
-out stays sub-millisecond for both implementations — p50 0.157 ms / p99 1.547 ms for Rust, p50 0.157 ms /
+out stays sub-millisecond for both implementations: p50 0.157 ms / p99 1.547 ms for Rust, p50 0.157 ms /
 p99 1.391 ms for Go, both around 13k req/s. Idle (no ingest activity), Rust is fastest overall: p50
 0.098 ms, 23,144 req/s, ~14% above idle Go (p50 0.111 ms, 20,335 req/s). Active sync costs both
-implementations about the same (~1.6× on p50, ~2× on p99 vs idle) — consistent with shared CPU/RPC-node
-contention with a flat-out ingestor, not a serving-path stall; Rust's `spawn_blocking` read path holds up
-under load as designed.
+implementations about the same (~1.6× on p50, ~2× on p99 vs idle), consistent with shared CPU/RPC-node
+contention with a flat-out ingestor rather than a serving-path stall; Rust's `spawn_blocking` read path
+holds up under load as designed.
 
 **Caveats.**
 - **Shared-host load.** Every ingest and read-path number above was captured with two `zebrad` nodes
   (mainnet + testnet) syncing/gossiping in the background, and Part B's node was simultaneously serving
   the ingestor under test. Comparisons are like-for-like under identical load, but absolute rates include
   this noise.
-- **Go's full-sync total is extrapolated**, not measured — it hit the 8-hour cutoff at 59.9% of the
+- **Go's full-sync total is extrapolated**, not measured: it hit the 8-hour cutoff at 59.9% of the
   chain. The extrapolation uses Go's own measured post-spam rates (all directly observed elsewhere in
   this same benchmark run), and 95% of the remaining work sits in ranges where that rate was directly
   measured, but it is still a projection, not a completed run.
@@ -536,7 +534,7 @@ under load as designed.
   for that range.
 - Aggressive tuning has a resource cost the throughput numbers alone don't show: over a 300 s sandblasting
   sample, Rust's default 64/8 settings held ~2 cores and up to 801 MiB peak RSS against Go's ~0.4 cores
-  and 37 MiB — raising concurrency further trades more memory and RPC load for more throughput.
+  and 37 MiB. Raising concurrency further trades more memory and RPC load for more throughput.
 - Reproduce with `contrib/bench/scripts/plot.py contrib/bench/results contrib/bench/charts` for the
   read-path charts (see [`contrib/bench/README.md`](contrib/bench/README.md)); the ingest/full-sync
   numbers are hand-transcribed from `contrib/bench/results/mainnet-2026-07-summary.md` and
@@ -545,19 +543,19 @@ under load as designed.
 
 ## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — what it is, how data flows, and the responsibility of
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): what it is, how data flows, and the responsibility of
   each module.
-- [`docs/decisions/`](docs/decisions/README.md) — architecture decision records: the *why* behind the design.
-- [`docs/protocol-references.md`](docs/protocol-references.md) — the ZIPs, BIPs, and spec sections each
+- [`docs/decisions/`](docs/decisions/README.md): architecture decision records, the *why* behind the design.
+- [`docs/protocol-references.md`](docs/protocol-references.md): the ZIPs, BIPs, and spec sections each
   module implements.
-- [`CHANGELOG.md`](CHANGELOG.md) — release notes.
-- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability.
+- [`CHANGELOG.md`](CHANGELOG.md): release notes.
+- [`SECURITY.md`](SECURITY.md): how to report a vulnerability.
 
 ## Acknowledgments
 
 lightwalletd-rs is inspired by and indebted to the original Go
 [`lightwalletd`](https://github.com/zcash/lightwalletd). Its protocol, behavior, and years of accumulated
-design decisions were the reference this implementation followed — this project would not have been
+design decisions were the reference this implementation followed; this project would not have been
 possible without it. Thanks to the Zcash community that built and maintains it.
 
 ## License

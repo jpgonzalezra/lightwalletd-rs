@@ -19,7 +19,7 @@ subscriber wants the current mempool, not a replay of every past change.
   parsed once per refresh, and wallets see at most ~2 s of staleness while the node is healthy.
 - The refresh tolerates partial node failures: a transaction that disappears between the
   `getrawmempool` listing and its `getrawtransaction` fetch is logged and skipped, and a failed
-  listing retains the last good snapshot until the node recovers — but only up to a point: past a
+  listing retains the last good snapshot until the node recovers, but only up to a point: past a
   60 s cutoff the snapshot is no longer served as if current, and both RPCs return `Unavailable`
   instead. See [0021](0021-mempool-staleness-contract.md) for that bound and why "retains the last
   good snapshot" needed one.

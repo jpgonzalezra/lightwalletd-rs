@@ -30,7 +30,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Every outbound HTTP client in the crate must come from here. `reqwest` is built with
 /// `rustls-no-provider`, so the binary carries one crypto stack (`ring`, the one `tonic` and `rcgen`
-/// already use) instead of two — but it then **panics when a client is constructed** without a
+/// already use) instead of two, but it then **panics when a client is constructed** without a
 /// provider, even a plaintext one that will never negotiate TLS. Installing returns `Err` only if
 /// something already did it, which is the outcome we want anyway.
 pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
@@ -359,7 +359,7 @@ impl NodeRpc for NodeClient {
     ) -> Result<Vec<String>, NodeError> {
         // zebrad tolerates `"end": 0`, but zcashd-style backends reject a request with
         // `start > 0` and `end == 0` (an open-ended range). Match the Go reference
-        // (ZcashdRpcRequestGetaddresstxids's `End uint64 \`json:"end,omitempty"\`) and simply
+        // (ZcashdRpcRequestGetaddresstxids's `End uint64 \`json:"end,omitempty"\`) and
         // omit the key when the caller didn't set an upper bound.
         let mut params = serde_json::json!({ "addresses": addresses, "start": start });
         if end != 0 {

@@ -6,12 +6,12 @@ The shared mempool monitor ([0005](0005-shared-mempool-monitor.md)) refreshes th
 once every 2 s and fans the result out to `GetMempoolTx` and `GetMempoolStream` through a
 `tokio::sync::watch`. When the node RPC fails, `mempool_monitor::start`'s loop logs and retries on
 the next tick, deliberately keeping the last good snapshot published so a single transient failure
-(one bad tick, a brief restart) does not interrupt service — the failure-isolation and single-poller
+(one bad tick, a brief restart) does not interrupt service; the failure-isolation and single-poller
 design must stay (review finding H3's fix is not a rollback of it).
 
 The gap: nothing bounds how long "keep the last good snapshot" is allowed to mean. If the node stays
 down, the monitor keeps retrying forever, the watch channel keeps serving the same value forever, and
-both RPCs keep answering with a well-formed, successful response — no error, no staleness signal —
+both RPCs keep answering with a well-formed, successful response (no error, no staleness signal)
 while the underlying data is arbitrarily old. A wallet cannot distinguish "the mempool is genuinely
 quiet" from "the backend has been unreachable for an hour." The Go reference does not have this gap:
 it polls the node per request, so a node outage surfaces as an RPC error to the caller immediately.
@@ -39,7 +39,7 @@ Define a cutoff, `mempool_monitor::STALENESS_CUTOFF = 60 s`, and `MempoolSnapsho
 `GetMempoolTx` checks the snapshot it is about to serve and returns `Status::unavailable` instead of
 the stale data. `GetMempoolStream` checks the same way at subscribe time, and again on every loop
 iteration while the stream is open. The loop iteration needed a second change beyond the check itself:
-it previously only woke on `watch::Receiver::changed()`, which fires solely on a new publish — exactly
+it previously only woke on `watch::Receiver::changed()`, which fires solely on a new publish: exactly
 what stops happening once the node is down, since a failed refresh tick is never published. An
 already-open stream would therefore hang on `changed()` forever, having gone stale with no signal,
 which is the same failure mode as the initial gap just shifted one layer down. The loop now races
@@ -55,9 +55,9 @@ which is synchronous with the staged state by construction.
 - While the node is healthy, behavior is unchanged: snapshots are always well under the cutoff, so
   every check is a no-op single comparison, the 2 s refresh throttle is untouched, and stream
   semantics (one entry per tx, ends on a tip change) are unchanged.
-- A prolonged node outage now surfaces to wallets as `Unavailable` on both mempool RPCs — consistent
-  with how the rest of the service reports a node it cannot reach ([0010](0010-node-error-grpc-mapping.md))
-  — instead of silently aging the last-known-good data forever.
+- A prolonged node outage now surfaces to wallets as `Unavailable` on both mempool RPCs, consistent
+  with how the rest of the service reports a node it cannot reach ([0010](0010-node-error-grpc-mapping.md)),
+  instead of silently aging the last-known-good data forever.
 - Recovery is automatic: the very next successful refresh republishes a freshly stamped snapshot, and
   both RPCs immediately resume serving normally with no separate reset step.
 - A client connecting in the narrow window before the monitor's first successful refresh now gets
