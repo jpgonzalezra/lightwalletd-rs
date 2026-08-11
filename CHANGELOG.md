@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+### Fixed
+- `GetLightdInfo` reports `lightwalletProtocolVersion`, previously left empty. The field was added to
+  `LightdInfo` in lightwallet-protocol v0.4.0, in the same release as `BlockRange.poolTypes`, and is
+  the signal a client is required to check before requesting non-default pool types. Empty is
+  indistinguishable from a pre-v0.4.0 server, so a correctly-behaving client could not tell that this
+  server serves transparent and Ironwood data inside compact blocks, and had to fall back to
+  shielded-only scanning. The value is a constant tracking the vendored `proto/` set, currently
+  `v0.5.0`, independent of the crate version and not overwritten by the build (ADR 0031).
+
 ## [0.1.0] - 2026-08-09
 
 First public release (beta). A caching proxy in front of a `zebrad` node that implements all 20

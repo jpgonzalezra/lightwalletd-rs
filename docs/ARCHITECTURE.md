@@ -102,6 +102,12 @@ at startup (Bech32m + checksum), so a malformed or truncated value aborts the se
 served; wallets read the field to offer the user a donation to whoever runs this server. It is an
 advisory string only — no payment logic.
 
+It also reports `lightwalletProtocolVersion`, the version of the light-client protocol this server
+serves (currently `v0.5.0`, the version of the vendored `proto/` set). A wallet is required to check it
+before requesting non-default `poolTypes`, so this is what tells a client that transparent and Ironwood
+data can be requested inside compact blocks. It tracks the protocol, not the release, and so is neither
+the crate version nor a build stamp — see [0031](decisions/0031-lightwallet-protocol-version.md).
+
 ### Node errors → gRPC status codes
 
 `src/service/errors.rs` translates a backend JSON-RPC error into the gRPC `Status` a wallet expects,
@@ -192,6 +198,7 @@ Wallet-facing contract and hardening:
 - [0025](decisions/0025-taddress-range-bounds.md) — an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
 - [0027](decisions/0027-block-range-continuity.md) — consecutive blocks in a served range must connect by hash, whichever source each came from; a discontinuity ends the stream with `Aborted` and reports the height so the ingestor truncates and re-ingests it.
 - [0030](decisions/0030-subtree-index-range.md) — subtree indexes are bounded to the node's `u16` range before any round-trip: an out-of-range start index is `InvalidArgument`, an out-of-range limit means no limit.
+- [0031](decisions/0031-lightwallet-protocol-version.md) — `GetLightdInfo` reports the served lightwallet-protocol version as a constant, independent of the crate version and of the build stamps, moving only once the server serves everything the named version specifies.
 - [0015](decisions/0015-layered-testing-strategy.md) — testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.
 - [0016](decisions/0016-test-placement-by-visibility.md) — tests are placed by visibility: handler tests grouped by family under `service/tests/`, private internals tested inline in their own module.
 
