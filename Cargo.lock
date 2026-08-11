@@ -2427,6 +2427,7 @@ dependencies = [
  "clap",
  "hex",
  "http",
+ "prometheus",
  "proptest",
  "prost 0.14.4",
  "rcgen",

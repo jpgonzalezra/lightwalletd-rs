@@ -1,11 +1,15 @@
 //! lightwalletd-rs: a Rust lightwalletd for Zcash, usable as a library.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use http::{HeaderName, Method, header};
+use tokio::net::TcpStream;
+use tokio_stream::Stream;
+use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic_web::GrpcWebLayer;
 use tower::layer::util::{Identity as NoLayer, Stack};
@@ -15,6 +19,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 pub mod cache;
 pub mod config;
 pub mod darkside;
+pub mod metrics;
 pub mod node;
 pub mod proto;
 pub mod repair;
@@ -26,7 +31,6 @@ mod encoding;
 mod fetch;
 mod filter;
 mod ingestor;
-mod metrics;
 #[cfg(test)]
 mod testutil;
 
@@ -105,7 +109,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             .add_service(CompactTxStreamerServer::new(streamer))
             .add_service(DarksideStreamerServer::new(darkside_service))
             .add_service(reflection_service()?)
-            .serve_with_shutdown(config.grpc_bind, darkside_shutdown(shutdown))
+            .serve_with_incoming_shutdown(
+                bind_grpc(config.grpc_bind, &config.limits)?,
+                darkside_shutdown(shutdown),
+            )
             .await?;
     } else {
         // Real node: query the chain, open the cache, spawn the ingestor, serve `CompactTxStreamer`.
@@ -279,7 +286,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         server
             .add_service(CompactTxStreamerServer::new(streamer))
             .add_service(reflection_service()?)
-            .serve_with_shutdown(config.grpc_bind, shutdown_signal())
+            .serve_with_incoming_shutdown(
+                bind_grpc(config.grpc_bind, &config.limits)?,
+                shutdown_signal(),
+            )
             .await?;
     }
     tracing::info!("server stopped");
@@ -309,20 +319,41 @@ const GRPC_WEB_PREFLIGHT_MAX_AGE: Duration = Duration::from_secs(3600);
 ///
 /// Enabling gRPC-web also enables HTTP/1.1, which a browser needs on a plaintext port; over TLS it
 /// is redundant, since ALPN settles on HTTP/2 there and gRPC-web rides that just as well.
+///
+/// Socket-level options are not set here: everything served goes through [`bind_grpc`], and the
+/// builder ignores its own `tcp_*` settings once the listener is supplied from outside.
 pub fn server_builder(
     limits: &config::ServerLimits,
     grpc_web: Option<&config::GrpcWebOrigins>,
 ) -> Server<TransportLayers> {
+    // Before the layer below records anything, so both end up in the same registry.
+    metrics::init();
     Server::builder()
         .concurrency_limit_per_connection(limits.max_concurrent_streams as usize)
         .max_concurrent_streams(Some(limits.max_concurrent_streams))
-        .tcp_keepalive(Some(limits.keepalive_interval))
         .http2_keepalive_interval(Some(limits.keepalive_interval))
         .http2_keepalive_timeout(Some(limits.keepalive_timeout))
         .accept_http1(grpc_web.is_some())
         .layer(option_layer(grpc_web.map(cors_layer)))
         .layer(tonic_prometheus_layer::MetricsLayer::new())
         .layer(option_layer(grpc_web.map(|_| GrpcWebLayer::new())))
+}
+
+/// Bind the gRPC listener and count what it accepts into `grpc_server_connections_current`.
+///
+/// Serving from a supplied listener is what makes the connection gauge possible, since the accepted
+/// socket passes through here (see [`metrics::count_connections`]). It also means tonic no longer
+/// binds the socket itself, so the two options it would have set are set here: `TCP_NODELAY`, on by
+/// default in tonic, and the keepalive from `--keepalive-interval`.
+fn bind_grpc(
+    addr: SocketAddr,
+    limits: &config::ServerLimits,
+) -> anyhow::Result<impl Stream<Item = std::io::Result<metrics::CountedConnection<TcpStream>>>> {
+    let listener = TcpIncoming::bind(addr)
+        .with_context(|| format!("binding the gRPC listener on {addr}"))?
+        .with_nodelay(Some(true))
+        .with_keepalive(Some(limits.keepalive_interval));
+    Ok(metrics::count_connections(listener))
 }
 
 /// The CORS policy the gRPC-web transport answers with.
