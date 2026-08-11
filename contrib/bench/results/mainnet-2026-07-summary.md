@@ -1,11 +1,11 @@
-# Mainnet benchmark summary — 2026-07-13
+# Mainnet benchmark summary (2026-07-13)
 
 Reproduction of the repo's benchmarks against a real, fully synced mainnet
 zebrad. Two parts:
 
-- **Part A** — the contrib/bench hot read-path harness (ADR 0017 methodology),
+- **Part A**: the contrib/bench hot read-path harness (ADR 0017 methodology),
   datasets extracted from the live mainnet node, run for both profiles.
-- **Part B** — ingest throughput A/B/C: NEW Rust (this tree) vs OLD Rust
+- **Part B**: ingest throughput A/B/C, NEW Rust (this tree) vs OLD Rust
   baseline (pre-windowed-ingestor) vs Go reference, each ingesting from the
   real mainnet zebrad over fixed 8-minute windows.
 
@@ -20,9 +20,9 @@ zebrad. Two parts:
 | Go lightwalletd (Part B, host build) | `61fee32e4d96b3f62290f813eead965d78161ae5` (v0.4.19-11-gfdf1af5 lineage, current master), Go 1.24.4 |
 | Go lightwalletd (Part A container) | pinned `fdf1af5` per go-lwd.Dockerfile |
 | Docker / Compose | 29.0.0 / v2.40.3; ghz v0.121.0 (built in-container per ghz/Dockerfile) |
-| Machine load caveat | TWO zebrad nodes (mainnet + testnet) ran throughout — nontrivial background CPU/disk load. Treat all numbers as relative, not absolute. |
+| Machine load caveat | Two zebrad nodes (mainnet + testnet) ran throughout: nontrivial background CPU/disk load. Treat all numbers as relative, not absolute. |
 
-## Part A — hot read-path harness (contrib/bench)
+## Part A: hot read-path harness (contrib/bench)
 
 Workflow followed as documented in contrib/bench/README.md: `extract-dataset.sh
 {dense,light}` against the live mainnet node, `populate.sh` per profile
@@ -44,7 +44,7 @@ scrapes live under `contrib/bench/results/{dense,light}/{rust,go}/`
 
 ### dense
 
-#### GetBlock latency — median p50 / p99 across reps (µs)
+#### GetBlock latency, median p50 / p99 across reps (µs)
 
 | concurrency | rust p50 | rust p99 | go p50 | go p99 |
 |---|---|---|---|---|
@@ -56,7 +56,7 @@ scrapes live under `contrib/bench/results/{dense,light}/{rust,go}/`
 | 32 | 669 | 1284 | 392 | 55552 |
 | 64 | 1496 | 2657 | 807 | 53214 |
 
-#### GetBlockRange W=100 throughput — median blocks/s (±stdev)
+#### GetBlockRange W=100 throughput, median blocks/s (±stdev)
 
 | concurrency | rust | go |
 |---|---|---|
@@ -68,7 +68,7 @@ scrapes live under `contrib/bench/results/{dense,light}/{rust,go}/`
 | 32 | 310,693 ±49,354 | 75,559 ±8,100 |
 | 64 | 309,842 ±46,210 | 83,808 ±8,773 |
 
-#### GetBlockRange W=1000 throughput — median blocks/s (±stdev)
+#### GetBlockRange W=1000 throughput, median blocks/s (±stdev)
 
 | concurrency | rust | go |
 |---|---|---|
@@ -80,7 +80,7 @@ scrapes live under `contrib/bench/results/{dense,light}/{rust,go}/`
 | 32 | 318,823 ±29,262 | 80,898 ±5,433 |
 | 64 | 321,345 ±28,417 | 87,159 ±6,413 |
 
-#### GetBlockRange W=10000 throughput — median blocks/s (±stdev)
+#### GetBlockRange W=10000 throughput, median blocks/s (±stdev)
 
 | concurrency | rust | go |
 |---|---|---|
@@ -101,7 +101,7 @@ scrapes live under `contrib/bench/results/{dense,light}/{rust,go}/`
 
 ### light
 
-#### GetBlock latency — median p50 / p99 across reps (µs)
+#### GetBlock latency, median p50 / p99 across reps (µs)
 
 | concurrency | rust p50 | rust p99 | go p50 | go p99 |
 |---|---|---|---|---|
@@ -113,7 +113,7 @@ scrapes live under `contrib/bench/results/{dense,light}/{rust,go}/`
 | 32 | 1555 | 5098 | 2076 | 36411 |
 | 64 | 2870 | 11162 | 3953 | 33827 |
 
-#### GetBlockRange W=100 throughput — median blocks/s (±stdev)
+#### GetBlockRange W=100 throughput, median blocks/s (±stdev)
 
 | concurrency | rust | go |
 |---|---|---|
@@ -125,7 +125,7 @@ scrapes live under `contrib/bench/results/{dense,light}/{rust,go}/`
 | 32 | 105,682 ±32,774 | 15,753 ±4,561 |
 | 64 | 105,401 ±32,975 | 19,522 ±5,823 |
 
-#### GetBlockRange W=1000 throughput — median blocks/s (±stdev)
+#### GetBlockRange W=1000 throughput, median blocks/s (±stdev)
 
 | concurrency | rust | go |
 |---|---|---|
@@ -137,7 +137,7 @@ scrapes live under `contrib/bench/results/{dense,light}/{rust,go}/`
 | 32 | 113,337 ±16,154 | 19,875 ±2,035 |
 | 64 | 118,177 ±15,900 | 24,760 ±2,544 |
 
-#### GetBlockRange W=10000 throughput — median blocks/s (±stdev)
+#### GetBlockRange W=10000 throughput, median blocks/s (±stdev)
 
 | concurrency | rust | go |
 |---|---|---|
@@ -163,7 +163,7 @@ holds flat GetBlock p99s under concurrency, where Go's p99 blows out to
 GetBlock p50 at moderate concurrency. Rust's redb cache is larger on disk
 (2.3x both profiles); Go's peak RSS is ~3x Rust's on dense.
 
-## Part B — ingest throughput vs the real mainnet node
+## Part B: ingest throughput vs the real mainnet node
 
 Method: each implementation, one at a time (never concurrent), fresh empty
 data dir, ingesting from the live mainnet zebrad for a fixed 480 s window;
@@ -185,7 +185,7 @@ tip (~3,411,35x) inside the window and then idled. NEW Rust reached tip
 (effective ≈ 281 blocks/s). The OLD baseline is nowhere near tip-capped.
 
 Takeaways:
-- NEW vs OLD Rust: 9.0x (R1), 6.6x (R2), 4.2x+ (R3, capped) — the windowed
+- NEW vs OLD Rust: 9.0x (R1), 6.6x (R2), 4.2x+ (R3, capped): the windowed
   concurrent ingestor with batched commits is the dominant factor.
 - NEW Rust vs Go: 1.41x on R1, 5.6x on R2 (sandblasting-era heavy shielded
   blocks), parity on R3 only because both were tip-capped.
@@ -204,7 +204,7 @@ deleted after each run per plan (sizes before deletion: new R1 2.9G, new R2
    absolute Part A numbers are better than the README's environment; the
    2 vCPU / 2 GiB per-proxy limits and all fidelity controls were unchanged.
 2. **Portability fix (committed to the working tree)**:
-   `scripts/extract-dataset.sh` — this host lacks `xxd` (and no root to
+   `scripts/extract-dataset.sh`: this host lacks `xxd` (and no root to
    install it); added a `hex2bin` fallback using `perl -0777 -ne 'print
    pack("H*", $_)'` when `xxd` is absent, and dropped `xxd` from the required
    tool check. No other harness script needed changes.
@@ -218,20 +218,20 @@ deleted after each run per plan (sizes before deletion: new R1 2.9G, new R2
    the dataset tip and re-ran populate.sh; the recorded runs are the fully
    verified ones (12000/12000, fairness identical, both profiles). The
    heuristic could use a real completeness probe (e.g. GetBlock at the tip
-   with DENY set) — left as a note, not changed.
+   with DENY set); left as a note, not changed.
 5. **Dense rust redb footprint** (45.8 MiB) carries some churn from the
    interrupted first populate attempts (retries/backoff while DENY was set);
    a pristine single-pass ingest may be somewhat smaller. Go's footprint is
    unaffected.
 6. **Light profile density**: 4.18 txids/block, not the ~1 tx/block the env
    comment hopes for at BASE=20000. Kept the documented BASE/SPAN unchanged
-   (instructions: no new parameters). Compact blocks in this range are still
+   rather than introducing new parameters. Compact blocks in this range are still
    pre-Sapling (no shielded data), so the profile still exercises the
    near-floor serialization path.
 7. **Part A used the documented default curve** (no trimming was needed):
    REPS=5, DURATION=8s, WARMUP=3s, CONCURRENCIES="1 2 4 8 16 32 64",
    REQUESTS="getblock range100 range1000 range10000". Both sweeps exited 0.
-8. **R3 tip-capping** (Part B) as noted above — 8-minute windows are longer
+8. **R3 tip-capping** (Part B) as noted above: 8-minute windows are longer
    than the catch-up time from 3,300,000 for NEW Rust and Go.
 9. **Background load**: two zebrad nodes (mainnet + testnet) were running and
    syncing/gossiping throughout every measurement, plus the mainnet node was
