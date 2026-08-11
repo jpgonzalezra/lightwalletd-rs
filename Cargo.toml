@@ -18,6 +18,9 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "toki
 clap = { version = "4.6.1", features = ["derive", "env"] }
 hex = "0.4.3"
 http = "1.4.0"
+# Same version `tonic_prometheus_layer` builds against, so the registry handed to it is the very
+# type it stores and `/metrics` encodes our metrics alongside its own.
+prometheus = "0.14.0"
 prost = "0.14.4"
 rcgen = "0.14.8"
 redb = "4.1.0"

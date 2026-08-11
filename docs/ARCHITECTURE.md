@@ -83,7 +83,7 @@ the `CompactTxStreamerClient` and `DarksideStreamerClient` stubs alongside the s
 | `src/snapshot/export.rs` | Reads a snapshot out of a live cache: the manifest, epoch bodies, and the walk that computes and stores epoch digests. |
 | `src/snapshot/import.rs` | Consumes a snapshot: the `EpochSource` seam, its HTTP client, and the four verification layers. |
 | `src/snapshot/serve.rs` | Publishes the cache over HTTP (`/snapshot/manifest`, `/snapshot/epoch/{index}`), with a download cap and negotiated compression. |
-| `src/metrics.rs` | Serves Prometheus metrics over an HTTP `/metrics` endpoint. |
+| `src/metrics.rs` | Serves Prometheus metrics over an HTTP `/metrics` endpoint, and counts open connections at the listener. |
 | `src/darkside/` | Darkside test harness, split by responsibility: `error` (error type), `block` (raw-block helpers and the held `ActiveBlock`), `state` (the in-memory mock chain `DarksideState`), `node` (its `NodeRpc` implementation `DarksideNode`), and `service` (the `DarksideStreamer` control plane). |
 
 ## Method classification
@@ -179,6 +179,7 @@ Protocol upgrades:
 - [0021](decisions/0021-mempool-staleness-contract.md): mempool snapshots carry a refresh timestamp; snapshots older than a 60 s cutoff make `GetMempoolTx`/`GetMempoolStream` return `Unavailable` instead of serving last-known-good data during a node outage.
 - [0022](decisions/0022-ops-surface-parity.md): operational-surface parity with the Go reference: gRPC reflection always on, Prometheus metrics on by default at `127.0.0.1:9068`, `--log-level`/`--log-file` (JSON to file), `--gen-cert-very-insecure`, a darkside auto-shutdown timeout, and `--nocache`; the `./lightwalletd-rs-data` default data dir is kept as a deliberate divergence from Go's root-owned `/var/lib/lightwalletd`.
 - [0023](decisions/0023-zebra-readstate-backend.md): reads come from an in-process zebra `ReadStateService` (read-only secondary + `TrustedChainSync` over the indexer gRPC) behind `--backend readstate`; writes/mempool stay on JSON-RPC.
+- [0032](decisions/0032-connection-gauge-at-the-listener.md): `grpc_server_connections_current` is counted around the accepted socket, the one place a connection's lifetime is visible; the server installs the Prometheus registry itself so the gauge lands in the one `/metrics` encodes.
 
 Structure and seams:
 
@@ -358,8 +359,13 @@ cargo run -- --rpc-url http://127.0.0.1:8232 --no-tls-very-insecure --metrics-bi
 ```
 
 Notable series: `grpc_server_handled_total{grpc_service,grpc_method,grpc_code}` (request count by method and
-gRPC status) and `grpc_server_handling_seconds` (latency histogram). The registry is empty until the first gRPC
-request, so `/metrics` returns nothing until there has been some traffic.
+gRPC status), `grpc_server_handling_seconds` (latency histogram), and `grpc_server_connections_current`
+(open client connections). The per-method series appear only once there has been traffic, so a freshly
+started server reports the connection gauge and little else.
+
+The connection gauge comes from a wrapper around the listener, which counts an accepted socket for as long
+as it is alive; that puts gRPC, gRPC-web and TLS in one number
+([ADR 0032](decisions/0032-connection-gauge-at-the-listener.md)).
 
 ## Logging
 
