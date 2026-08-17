@@ -1,6 +1,6 @@
 # Serving CompactTxStreamer over a mixnet: measurements
 
-Date: 2026-08-02 to 2026-08-03. Evidence for
+Date: 2026-08-02 to 2026-08-03, with a verification run on 2026-08-17. Evidence for
 [ADR 0029](../../../docs/decisions/0029-mixnet-transport-scope.md). Companion to
 [`compact-block-wire-size-2026-08.md`](compact-block-wire-size-2026-08.md), which bounds how many
 bytes a sync moves; this one measures what a mixnet does to them.
@@ -105,6 +105,7 @@ The echo side counts three stages separately, which turns a failure into a direc
 | 2026-08-03 afternoon | 1.21.5-rc.3 | 200 | 2.0% |
 | 2026-08-03 evening | 1.21.5-rc.3 | 100 | 2.0% |
 | 2026-08-04 | 1.21.5-rc.3 | 400 | **36.5%** |
+| 2026-08-17, budget 100 only | 1.21.5-rc.3 | 100 | 24.0% |
 
 The signature is consistent: the far side's `accept()` fires, the sender's `write_all` and `flush`
 both return `Ok`, and the payload never arrives. Neither end errors and neither times out; both hang
@@ -115,6 +116,20 @@ arrived.
 The rate is **not stationary**, and that matters more than its value. Within the 400-trial run,
 failures nearly tripled between the first and second halves (40 then 106). Across days at identical
 settings it moved between 2% and 36.5%.
+
+### Still there two weeks later
+
+The 2026-08-17 row is a verification run on the same version, single budget, and it gives the
+cleanest attribution of the set: the echo side accepted all 100 streams and read only 76. All 24
+failures were outbound, with nothing on the return path and no dialler errors, so there is nothing
+approximate to attribute. Latency had drifted the other way, p50 5,677 ms against 4,054 ms at the
+same budget on 2026-08-04.
+
+That run also shows how hard the acknowledgement machinery works while failing to converge. Over 100
+trials the client logged 2,625 `retransmitting normal packet`, 703 chunks arriving after their ack
+was lost, and 793 duplicate fragments. Roughly 26 retransmissions per trial, and 24 payloads still
+never arrived and never errored. Raw log:
+[`raw/2026-08-17-repro-budget100.txt`](../../nym/raw/2026-08-17-repro-budget100.txt).
 
 ### The reply-block budget shifts it, but does not fix it
 
