@@ -88,9 +88,13 @@ chain.
 
 - **[ZIP-200 — Network Upgrade Mechanism](https://zips.z.cash/zip-0200)** — consensus branch IDs and activation
   heights; why the parser pins a branch, why `--start-height` defaults to Sapling activation, and why
-  `GetLightdInfo` resolves Sapling and the next pending upgrade by branch ID.
+  `GetLightdInfo` resolves Sapling and the next pending upgrade by branch ID. Sapling activation is
+  fixed per network (mainnet 419,200, testnet 280,000) and read from `zcash_protocol`'s parameters
+  rather than from the node ([ADR 0033](decisions/0033-ingest-floor-from-network-parameters.md)).
+  Regtest configures its own, so it ingests from genesis instead of trusting a height off the wire.
   *Where:* `BranchId::Nu5` in `src/compact.rs`, `SAPLING_BRANCH_ID` in `src/service/chain.rs`,
-  `docs/ARCHITECTURE.md` "Running" (`--start-height` default).
+  `local_sapling_activation` in `src/lib.rs`, `docs/ARCHITECTURE.md` "Running"
+  (`--start-height` default).
 - **[ZIP-252 — Deployment of the NU5 Network Upgrade](https://zips.z.cash/zip-0252)** — NU5 = v5 transactions plus
   Orchard, the upgrade the parser targets. (Surrounding deployments: [ZIP-250 Heartwood](https://zips.z.cash/zip-0250),
   [ZIP-251 Canopy](https://zips.z.cash/zip-0251).)

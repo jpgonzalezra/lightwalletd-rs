@@ -15,6 +15,7 @@ use tonic_web::GrpcWebLayer;
 use tower::layer::util::{Identity as NoLayer, Stack};
 use tower::util::{Either, option_layer};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use zcash_protocol::consensus::{MAIN_NETWORK, NetworkUpgrade, Parameters, TEST_NETWORK};
 
 pub mod cache;
 pub mod config;
@@ -118,8 +119,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         // Real node: query the chain, open the cache, spawn the ingestor, serve `CompactTxStreamer`.
         let rpc_client = node::NodeClient::new(&config.node)?;
 
-        // Query the chain (retrying until the node is reachable): its name keys the cache file, and
-        // its Sapling activation height is the default place to start ingesting from. Both backends
+        // Query the chain, retrying until the node is reachable. Its name keys the cache file and
+        // picks the network whose Sapling activation is the default ingest floor. Both backends
         // need the RPC reachable: readstate keeps it for tx submission and the mempool.
         let chain_info = connect_with_retry(&rpc_client).await;
 
@@ -136,16 +137,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                  (cargo build --release --features readstate)"
             ),
         };
-        let start_height = config.start_height.unwrap_or_else(|| {
-            chain_info
-                .upgrades
-                .values()
-                .find(|u| u.name.eq_ignore_ascii_case("sapling"))
-                .map(|u| u.activationheight)
-                .unwrap_or(0)
-        });
-
         validate_chain_name(&chain_info.chain)?;
+
+        let start_height = config
+            .start_height
+            .unwrap_or_else(|| default_start_height(&chain_info));
 
         // `--nocache` opens the cache in a throwaway temp dir instead of under `--data-dir` and
         // skips the ingestor below, so the cache never gains a single block and every read falls
@@ -232,6 +228,16 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         if config.nocache {
             tracing::info!("--nocache: ingestor not started");
         } else {
+            // Without this line the state is silent: every poll finds nothing to do and looks like
+            // being caught up, in the logs and in the metrics.
+            if start_height > chain_info.blocks {
+                tracing::warn!(
+                    start_height,
+                    tip = chain_info.blocks,
+                    "the ingest floor is above the node's tip; nothing will be cached and every \
+                     read falls through until the node reaches it"
+                );
+            }
             tokio::spawn(ingestor::run(
                 node.clone(),
                 cache.clone(),
@@ -570,6 +576,53 @@ async fn bootstrap_from_snapshot(
     false
 }
 
+/// The ingest floor to use when `--start-height` is not given: Sapling activation on the network
+/// the node says it is on.
+///
+/// `getblockchaininfo` carries an activation height per upgrade, but that number is not advisory.
+/// It is where ingestion starts on an empty cache, and it is the floor a rollback may not cross:
+/// crossing it empties the cache (`ingestor::reorg_to_floor`). Reading it off the wire would let
+/// the node choose both. A floor above the tip stalls ingestion for the life of the process, and a
+/// floor above the cached range turns the next one-block reorg into a total wipe. Sapling
+/// activation is a consensus constant, so take it from the compiled-in parameters and log a node
+/// that says otherwise instead of following it.
+///
+/// Regtest sets its own activation heights, so there is no constant to prefer there, and the chain
+/// name is node-supplied too: honouring the reported height for an unrecognized name would hand the
+/// floor straight back. Those networks ingest from genesis instead. It costs one block on a real
+/// regtest chain, which activates its upgrades at height 1, and a floor of zero is one no rollback
+/// can cross, so the wipe branch cannot fire on the networks we cannot name a height for.
+fn default_start_height(chain_info: &GetBlockchainInfo) -> u64 {
+    let Some(local) = local_sapling_activation(&chain_info.chain) else {
+        return 0;
+    };
+    let reported = chain_info
+        .upgrades
+        .values()
+        .find(|upgrade| upgrade.name.eq_ignore_ascii_case("sapling"))
+        .map(|upgrade| upgrade.activationheight);
+    if let Some(reported) = reported.filter(|height| *height != local) {
+        tracing::warn!(
+            chain = %chain_info.chain,
+            reported,
+            expected = local,
+            "node reports a Sapling activation height that is not the consensus one; \
+             ignoring it and ingesting from ours"
+        );
+    }
+    local
+}
+
+/// Sapling activation from the compiled-in network parameters, for the networks where it is fixed.
+fn local_sapling_activation(chain: &str) -> Option<u64> {
+    let activation = match chain {
+        "main" => MAIN_NETWORK.activation_height(NetworkUpgrade::Sapling),
+        "test" => TEST_NETWORK.activation_height(NetworkUpgrade::Sapling),
+        _ => None,
+    };
+    activation.map(|height| u64::from(u32::from(height)))
+}
+
 /// Raise the ingest floor to the base height of an imported snapshot.
 ///
 /// A bootstrapped cache cannot be rebuilt from below the height its snapshot was based at. Leaving
@@ -710,6 +763,67 @@ mod tests {
         let interrupted = bootstrap_from_snapshot("http://127.0.0.1:1", &cache, &node, 4).await;
 
         assert_eq!((interrupted, cache.latest_height().unwrap()), (false, None));
+    }
+
+    fn chain_info(chain: &str, upgrades: serde_json::Value) -> GetBlockchainInfo {
+        serde_json::from_value(serde_json::json!({
+            "chain": chain,
+            "blocks": 4242,
+            "bestblockhash": "00",
+            "consensus": { "chaintip": "00000000" },
+            "upgrades": upgrades,
+        }))
+        .unwrap()
+    }
+
+    fn sapling_at(activationheight: u64) -> serde_json::Value {
+        serde_json::json!({
+            "76b809bb": {
+                "name": "Sapling",
+                "activationheight": activationheight,
+                "status": "active",
+            }
+        })
+    }
+
+    #[test]
+    fn a_node_claiming_a_higher_sapling_activation_does_not_raise_the_mainnet_ingest_floor() {
+        assert_eq!(
+            default_start_height(&chain_info("main", sapling_at(9_000_000))),
+            419_200
+        );
+    }
+
+    #[test]
+    fn a_node_claiming_a_higher_sapling_activation_does_not_raise_the_testnet_ingest_floor() {
+        assert_eq!(
+            default_start_height(&chain_info("test", sapling_at(9_000_000))),
+            280_000
+        );
+    }
+
+    #[test]
+    fn a_node_that_omits_the_upgrade_table_does_not_drop_the_ingest_floor_to_genesis() {
+        assert_eq!(
+            default_start_height(&chain_info("main", serde_json::json!({}))),
+            419_200
+        );
+    }
+
+    #[test]
+    fn regtest_ingests_from_genesis_rather_than_a_floor_the_node_picked() {
+        assert_eq!(
+            default_start_height(&chain_info("regtest", sapling_at(9_000_000))),
+            0
+        );
+    }
+
+    #[test]
+    fn a_node_that_names_an_unknown_chain_cannot_choose_the_ingest_floor() {
+        assert_eq!(
+            default_start_height(&chain_info("notachain", sapling_at(9_000_000))),
+            0
+        );
     }
 
     #[test]

@@ -170,6 +170,7 @@ Data flow and storage:
 - [0005](decisions/0005-shared-mempool-monitor.md): in live mode a single background task (`src/service/mempool_monitor.rs`) refreshes the mempool at most every ~2 s and fans a parsed-once snapshot out via `tokio::sync::watch`, so node load is independent of the connected-wallet count; darkside keeps the per-request path.
 - [0024](decisions/0024-snapshot-bootstrap.md): a fresh cache can be bootstrapped from a peer's epoch-chunked snapshot over HTTP instead of ingesting the whole range, with every block verified against the importer's own node.
 - [0028](decisions/0028-mvcc-chunked-cache-reads.md): a range reads the cache in 64-height chunks, one MVCC read transaction each, released before any node request: the cached blocks in a chunk come from one consistent snapshot even while the ingestor truncates a reorg.
+- [0033](decisions/0033-ingest-floor-from-network-parameters.md): the default ingest floor is Sapling activation from the compiled-in network parameters, not from the node's `getblockchaininfo`; that height also floors every rollback, so letting the node name it would have let the node decide how much of the cache a reorg destroys.
 
 Protocol upgrades:
 
@@ -263,8 +264,9 @@ cargo run -- --rpc-url http://127.0.0.1:18232 --rpc-user USER --rpc-password PAS
 cargo run -- --zcash-conf ~/.zcash/zcash.conf --no-tls-very-insecure
 ```
 
-On startup the server resolves the chain (which names the cache file under `--data-dir`) and the height to
-start ingesting from (`--start-height`, defaulting to Sapling activation), then spawns the ingestor and serves
+On startup the server resolves the chain, which names the cache file under `--data-dir`, and the height to
+start ingesting from: `--start-height`, defaulting to that network's Sapling activation from the compiled-in
+parameters ([ADR 0033](decisions/0033-ingest-floor-from-network-parameters.md)). It then spawns the ingestor and serves
 gRPC on `--grpc-bind` (default `127.0.0.1:9067`). For a quick plaintext run near the tip:
 
 ```sh
