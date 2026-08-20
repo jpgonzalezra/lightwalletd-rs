@@ -118,11 +118,13 @@ service DarksideStreamer {
 
     // Calls to the production gRPC SendTransaction() store the transaction in
     // a separate area (not the staging area); this method returns all transactions
-    // in this separate area, which is then cleared. The height returned
-    // with each transaction is -1 (invalid) since these transactions haven't
-    // been mined yet. The intention is that the transactions returned here can
-    // then, for example, be given to StageTransactions() to get them "mined"
-    // into a specified block on the next ApplyStaged().
+    // in this separate area and leaves it intact, so the same transaction comes back
+    // on every call; ClearIncomingTransactions() and Reset() are what empty the area.
+    // Each transaction is reported at height 0, the value service.proto defines as
+    // "in the mempool", since these transactions haven't been mined yet. The intention
+    // is that the transactions returned here can then, for example, be given to
+    // StageTransactions() to get them "mined" into a specified block on the next
+    // ApplyStaged().
     rpc GetIncomingTransactions(Empty) returns (stream RawTransaction) {}
 
     // Clear the incoming transaction pool.

@@ -26,7 +26,46 @@ async fn send_transaction_round_trips_through_incoming_pool() {
     assert_eq!(send.error_code, 0);
     assert_eq!(send.error_message, RECV_TXID_DISPLAY);
 
-    let mut incoming = server
+    // Height 0 is `service.proto`'s "in the mempool": these transactions have not been mined.
+    assert_eq!(
+        read_incoming(&mut server).await,
+        vec![RawTransaction {
+            data: raw,
+            height: 0
+        }]
+    );
+}
+
+/// Reading the pool does not drain it: `ClearIncomingTransactions` is what empties it, which is what
+/// `proto/darkside.proto` documents. A harness that polls therefore sees the same transaction on
+/// every cycle, and one written to expect a drain re-stages and re-mines it.
+#[tokio::test]
+async fn reading_the_incoming_pool_leaves_it_in_place() {
+    let mut server = TestServer::start().await;
+    server.reset(663150, "bad", "x").await;
+
+    let raw = recv_tx();
+    server
+        .compact
+        .send_transaction(RawTransaction {
+            data: raw.clone(),
+            height: 0,
+        })
+        .await
+        .unwrap();
+    read_incoming(&mut server).await;
+
+    assert_eq!(
+        read_incoming(&mut server).await,
+        vec![RawTransaction {
+            data: raw,
+            height: 0
+        }]
+    );
+}
+
+async fn read_incoming(server: &mut TestServer) -> Vec<RawTransaction> {
+    let mut stream = server
         .darkside
         .get_incoming_transactions(Empty {})
         .await
@@ -34,8 +73,8 @@ async fn send_transaction_round_trips_through_incoming_pool() {
         .into_inner();
 
     let mut received = Vec::new();
-    while let Some(tx) = incoming.message().await.unwrap() {
-        received.push(tx.data);
+    while let Some(transaction) = stream.message().await.unwrap() {
+        received.push(transaction);
     }
-    assert_eq!(received, vec![raw]);
+    received
 }
