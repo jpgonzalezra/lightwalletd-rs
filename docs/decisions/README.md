@@ -40,3 +40,4 @@ choice stays discoverable after the fact. The living overview is
 | [0031](0031-lightwallet-protocol-version.md) | Report the served lightwallet-protocol version as a constant |
 | [0032](0032-connection-gauge-at-the-listener.md) | Count connections at the listener |
 | [0033](0033-ingest-floor-from-network-parameters.md) | Take the default ingest floor from the network parameters, not the node |
+| [0034](0034-cap-the-node-response-body.md) | Cap how much of a node response body is held in memory |
