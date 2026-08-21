@@ -32,6 +32,9 @@ The gRPC contract is the standard Zcash light-client `.proto` set, so real walle
 
 The backend is **`zebrad`**. The connection is plain HTTP `POST` JSON-RPC (no TLS) with HTTP Basic auth, reading
 `rpcuser`/`rpcpassword` from flags or a `zcash.conf` file. Default ports: 8232 (mainnet), 18232 (testnet/regtest).
+A reply is read through a counted stream and refused past 64 MiB decompressed
+(ADR [0034](decisions/0034-cap-the-node-response-body.md)), so how much memory a reply can take is this
+server's decision, not the node's.
 
 `--backend` selects between two `NodeRpc` implementations. The default, `rpc`, is `NodeClient` above: every
 call, read or write, goes over JSON-RPC. `readstate` (ADR [0023](decisions/0023-zebra-readstate-backend.md),
@@ -195,6 +198,7 @@ Wallet-facing contract and hardening:
 - [0011](decisions/0011-up-front-input-validation.md): malformed requests are rejected up front, before any node round-trip or stream is opened.
 - [0012](decisions/0012-tls-default-insecure-flags.md): TLS is on by default; dangerous/testing features are gated behind off-by-default `*-very-insecure` flags.
 - [0013](decisions/0013-resource-limits.md): the server bounds the resources a client can hold or accumulate (configurable stream/keepalive limits plus per-request caps).
+- [0034](decisions/0034-cap-the-node-response-body.md): a node response body is read through a counted stream and refused past 64 MiB of decompressed bytes, so an oversized answer fails one call instead of the whole process.
 - [0026](decisions/0026-grpc-web-support.md): gRPC-web is served from the gRPC port behind an off-by-default `--grpc-web`, with an origin allowlist, so a browser wallet needs no translating proxy.
 - [0029](decisions/0029-mixnet-transport-scope.md): a mixnet transport stays out of the crate: carrying the service over one is nearly free in code, but a silent stream-failure rate measured between 2% and 51%, seconds of latency and a dependency larger than this project put it behind a sidecar rather than a Cargo feature.
 - [0025](decisions/0025-taddress-range-bounds.md): an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.

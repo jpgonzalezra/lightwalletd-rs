@@ -17,6 +17,7 @@ pub use types::{
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt;
 
 use crate::config::NodeConfig;
 
@@ -25,6 +26,12 @@ use crate::config::NodeConfig;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// TCP connect timeout for the node HTTP client.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most of a node response body this process will hold in memory, per call (ADR 0034).
+///
+/// Above zebrad's own 50 MiB response cap, so nothing an honest node can produce is refused, and
+/// far above what this client asks for: a block tops out at 2 MB, `getaddresstxids` at 10,000
+/// txids, a `getblockhash` batch at 250 hashes.
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A `reqwest` builder with this process's TLS crypto provider installed.
 ///
@@ -36,6 +43,25 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
     let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder()
+}
+
+/// Read a node response body, refusing to hold more than `max_bytes` of it.
+///
+/// `Response::json` buffers the whole body before parsing, with no size bound, and the request
+/// timeout bounds seconds rather than bytes: over loopback, tens of gigabytes fit inside it. The
+/// cap counts the decompressed stream that `bytes_stream` yields, since the client negotiates
+/// `gzip`/`zstd` and a few kilobytes on the wire can expand into gigabytes.
+async fn read_capped(response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, NodeError> {
+    let mut body: Vec<u8> = Vec::new();
+    let mut stream = std::pin::pin!(response.bytes_stream());
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len() as u64 + chunk.len() as u64 > max_bytes {
+            return Err(NodeError::ResponseTooLarge { limit: max_bytes });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Errors returned by the node client.
@@ -58,6 +84,12 @@ pub enum NodeError {
     /// A hex-encoded field could not be decoded.
     #[error("decoding hex: {0}")]
     Hex(#[from] hex::FromHexError),
+    /// The response body ran past [`MAX_RESPONSE_BYTES`] and the rest was never read.
+    #[error("node response body ran past the {limit}-byte cap")]
+    ResponseTooLarge {
+        /// The cap, in bytes.
+        limit: u64,
+    },
     /// The response had neither a `result` nor an `error`.
     #[error("RPC response had no result")]
     EmptyResult,
@@ -191,15 +223,15 @@ impl NodeClient {
             method,
             params,
         };
-        let response: RpcResponse = self
+        let http_response = self
             .http
             .post(&self.url)
             .basic_auth(&self.user, Some(&self.password))
             .json(&request)
             .send()
-            .await?
-            .json()
             .await?;
+        let body = read_capped(http_response, MAX_RESPONSE_BYTES).await?;
+        let response: RpcResponse = serde_json::from_slice(&body)?;
 
         if let Some(error) = response.error {
             return Err(NodeError::Rpc {
@@ -232,15 +264,15 @@ impl NodeClient {
             })
             .collect();
 
-        let responses: Vec<BatchResponse> = self
+        let http_response = self
             .http
             .post(&self.url)
             .basic_auth(&self.user, Some(&self.password))
             .json(&requests)
             .send()
-            .await?
-            .json()
             .await?;
+        let body = read_capped(http_response, MAX_RESPONSE_BYTES).await?;
+        let responses: Vec<BatchResponse> = serde_json::from_slice(&body)?;
 
         let mut results: Vec<Option<serde_json::Value>> = vec![None; expected];
         for response in responses {
@@ -722,5 +754,68 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, NodeError::Http(_)));
+    }
+
+    /// Serve `body` and read it back through `read_capped`. The mock server outlives the read, so
+    /// the cap sees the whole body rather than a connection cut short.
+    async fn read_body_capped(body: Vec<u8>, max_bytes: u64) -> Result<Vec<u8>, NodeError> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+        let response = http_client_builder()
+            .build()
+            .unwrap()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap();
+
+        read_capped(response, max_bytes).await
+    }
+
+    #[tokio::test]
+    async fn read_capped_accepts_a_body_that_ends_on_the_cap() {
+        let body = read_body_capped(vec![b'x'; 1024], 1024).await.unwrap();
+        assert_eq!(body, vec![b'x'; 1024]);
+    }
+
+    #[tokio::test]
+    async fn read_capped_rejects_a_body_one_byte_past_the_cap() {
+        let error = read_body_capped(vec![b'x'; 1025], 1024).await.unwrap_err();
+        assert!(matches!(error, NodeError::ResponseTooLarge { limit: 1024 }));
+    }
+
+    /// A few kilobytes on the wire expanding past the cap once decompressed. Pins the cap to
+    /// decompressed bytes: counted on the wire, this body is a few KB and passes.
+    #[tokio::test]
+    async fn raw_request_rejects_a_compressed_body_that_expands_past_the_cap() {
+        let compressed = zstd::stream::encode_all(
+            std::io::Read::take(std::io::repeat(b'0'), MAX_RESPONSE_BYTES + 1),
+            1,
+        )
+        .unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(compressed)
+                    .insert_header("content-encoding", "zstd"),
+            )
+            .mount(&server)
+            .await;
+
+        let error = client_for(&server)
+            .raw_request("getinfo", serde_json::json!([]))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            NodeError::ResponseTooLarge {
+                limit: MAX_RESPONSE_BYTES
+            }
+        ));
     }
 }
