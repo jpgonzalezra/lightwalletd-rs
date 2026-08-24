@@ -2430,6 +2430,7 @@ dependencies = [
  "prometheus",
  "proptest",
  "prost 0.14.4",
+ "prost-types",
  "rcgen",
  "redb",
  "reqwest 0.13.4",

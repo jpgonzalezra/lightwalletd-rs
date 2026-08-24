@@ -206,6 +206,11 @@ What it reports: request counts by method and gRPC status (`grpc_server_handled_
 histogram (`grpc_server_handling_seconds`), and how many client connections are open right now
 (`grpc_server_connections_current`). The per-method series need traffic before they appear.
 
+Method labels come from what this build serves, not from the request. Anything else a client asks
+for lands in a single `unknown` bucket, so the traffic still shows up and the registry does not grow
+a series per request ([ADR 0035](docs/decisions/0035-bounded-metric-labels.md)). `--no-metrics`
+stops the recording too, not just the endpoint.
+
 Because metrics are on by default, two instances on the same host collide on `:9068`: the second
 instance logs an `error` for the failed bind and keeps serving **without metrics** rather than
 exiting. Give each instance its own `--metrics-bind` address (or `--no-metrics`).

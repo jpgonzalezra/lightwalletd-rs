@@ -184,6 +184,7 @@ Protocol upgrades:
 - [0022](decisions/0022-ops-surface-parity.md): operational-surface parity with the Go reference: gRPC reflection always on, Prometheus metrics on by default at `127.0.0.1:9068`, `--log-level`/`--log-file` (JSON to file), `--gen-cert-very-insecure`, a darkside auto-shutdown timeout, and `--nocache`; the `./lightwalletd-rs-data` default data dir is kept as a deliberate divergence from Go's root-owned `/var/lib/lightwalletd`.
 - [0023](decisions/0023-zebra-readstate-backend.md): reads come from an in-process zebra `ReadStateService` (read-only secondary + `TrustedChainSync` over the indexer gRPC) behind `--backend readstate`; writes/mempool stay on JSON-RPC.
 - [0032](decisions/0032-connection-gauge-at-the-listener.md): `grpc_server_connections_current` is counted around the accepted socket, the one place a connection's lifetime is visible; the server installs the Prometheus registry itself so the gauge lands in the one `/metrics` encodes.
+- [0035](decisions/0035-bounded-metric-labels.md): metric labels are the methods this build serves, decoded from the descriptor set at startup, with everything else recorded under one `unknown` bucket; inventing paths or verbs no longer mints Prometheus series that are never reclaimed.
 
 Structure and seams:
 
@@ -366,8 +367,15 @@ cargo run -- --rpc-url http://127.0.0.1:8232 --no-tls-very-insecure --metrics-bi
 
 Notable series: `grpc_server_handled_total{grpc_service,grpc_method,grpc_code}` (request count by method and
 gRPC status), `grpc_server_handling_seconds` (latency histogram), and `grpc_server_connections_current`
-(open client connections). The per-method series appear only once there has been traffic, so a freshly
-started server reports the connection gauge and little else.
+(open client connections). A `function_calls_*` trio carries the same request counts and latencies keyed by
+HTTP verb and path, for scrapers built against older versions of the layer. The per-method series appear
+only once there has been traffic, so a freshly started server reports the connection gauge and little else.
+
+Label values come from the set of methods this build serves, never from the request. Anything else (a path
+no service claims, a verb that is not `POST`) is recorded under a single `grpc_service="unknown"`,
+`grpc_method="unknown"` bucket, so unrouted traffic still shows up as volume and no client can mint new
+series by inventing paths ([ADR 0035](decisions/0035-bounded-metric-labels.md)). `--no-metrics` removes the
+recording layer as well as the endpoint.
 
 The connection gauge comes from a wrapper around the listener, which counts an accepted socket for as long
 as it is alive; that puts gRPC, gRPC-web and TLS in one number

@@ -41,3 +41,4 @@ choice stays discoverable after the fact. The living overview is
 | [0032](0032-connection-gauge-at-the-listener.md) | Count connections at the listener |
 | [0033](0033-ingest-floor-from-network-parameters.md) | Take the default ingest floor from the network parameters, not the node |
 | [0034](0034-cap-the-node-response-body.md) | Cap how much of a node response body is held in memory |
+| [0035](0035-bounded-metric-labels.md) | Take metric label values from the server, not from the request |

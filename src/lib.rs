@@ -54,7 +54,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         });
     }
 
-    let mut server = server_builder(&config.limits, config.grpc_web.as_ref());
+    let mut server = server_builder(
+        &config.limits,
+        config.grpc_web.as_ref(),
+        config.metrics_bind.is_some(),
+    )?;
     if config.grpc_web.is_some() {
         tracing::info!(
             grpc_bind = %config.grpc_bind,
@@ -305,12 +309,15 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
 /// The middleware stack every served transport carries, from outermost to innermost: CORS, so a
 /// browser preflight is answered before anything else sees it; Prometheus metrics; and the gRPC-web
-/// translation, so the router below only ever sees a plain gRPC request. The two gRPC-web layers
-/// are `Either`s rather than a second builder branch, which keeps one concrete server type whether
-/// the transport is on or off.
+/// translation, so the router below only ever sees a plain gRPC request. The optional layers are
+/// `Either`s rather than extra builder branches, so the server has one concrete type with gRPC-web
+/// and metrics on or off.
 type TransportLayers = Stack<
     Either<GrpcWebLayer, NoLayer>,
-    Stack<tonic_prometheus_layer::MetricsLayer, Stack<Either<CorsLayer, NoLayer>, NoLayer>>,
+    Stack<
+        Either<metrics::BoundedMetricsLayer, NoLayer>,
+        Stack<Either<CorsLayer, NoLayer>, NoLayer>,
+    >,
 >;
 
 /// How long a browser may cache a gRPC-web preflight. One round trip per method per browser session
@@ -326,23 +333,31 @@ const GRPC_WEB_PREFLIGHT_MAX_AGE: Duration = Duration::from_secs(3600);
 /// Enabling gRPC-web also enables HTTP/1.1, which a browser needs on a plaintext port; over TLS it
 /// is redundant, since ALPN settles on HTTP/2 there and gRPC-web rides that just as well.
 ///
+/// `metrics_enabled` decides whether requests are recorded at all: `--no-metrics` takes the layer
+/// out of the stack, not just the endpoint. Fails when the compiled-in descriptor set cannot be
+/// decoded, since that set is what bounds the label values (ADR 0035).
+///
 /// Socket-level options are not set here: everything served goes through [`bind_grpc`], and the
 /// builder ignores its own `tcp_*` settings once the listener is supplied from outside.
 pub fn server_builder(
     limits: &config::ServerLimits,
     grpc_web: Option<&config::GrpcWebOrigins>,
-) -> Server<TransportLayers> {
+    metrics_enabled: bool,
+) -> anyhow::Result<Server<TransportLayers>> {
     // Before the layer below records anything, so both end up in the same registry.
     metrics::init();
-    Server::builder()
+    let metrics_layer = metrics_enabled
+        .then(metrics::BoundedMetricsLayer::new)
+        .transpose()?;
+    Ok(Server::builder()
         .concurrency_limit_per_connection(limits.max_concurrent_streams as usize)
         .max_concurrent_streams(Some(limits.max_concurrent_streams))
         .http2_keepalive_interval(Some(limits.keepalive_interval))
         .http2_keepalive_timeout(Some(limits.keepalive_timeout))
         .accept_http1(grpc_web.is_some())
         .layer(option_layer(grpc_web.map(cors_layer)))
-        .layer(tonic_prometheus_layer::MetricsLayer::new())
-        .layer(option_layer(grpc_web.map(|_| GrpcWebLayer::new())))
+        .layer(option_layer(metrics_layer))
+        .layer(option_layer(grpc_web.map(|_| GrpcWebLayer::new()))))
 }
 
 /// Bind the gRPC listener and count what it accepts into `grpc_server_connections_current`.
