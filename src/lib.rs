@@ -286,7 +286,12 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         // One shared mempool monitor fans the mempool out to all clients, so node load stays
         // independent of the number of connected wallets.
         let mempool = service::mempool_monitor::start(node.clone());
-        let mut streamer = service::Streamer::new(node, cache, chain_info.chain, None)
+        // Only the wallet-facing handlers go through the bulkhead. The ingestor and the monitor
+        // above keep the bare handle, which is the point: their share of the node cannot be taken
+        // by clients (ADR 0036).
+        let client_node: Arc<dyn NodeRpc> =
+            Arc::new(node::bulkhead::Bulkhead::new(node, config.client_node));
+        let mut streamer = service::Streamer::new(client_node, cache, chain_info.chain, None)
             .with_mempool_monitor(mempool)
             .with_ping_enabled(config.ping_enable)
             .with_donation_address(config.donation_address.clone());
