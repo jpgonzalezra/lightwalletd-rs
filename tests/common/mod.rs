@@ -58,7 +58,8 @@ impl TestServer {
 
         let server = tokio::spawn(async move {
             // The production builder, so the transport under test is the deployed one.
-            lightwalletd_rs::server_builder(&default_limits(), grpc_web.as_ref())
+            lightwalletd_rs::server_builder(&default_limits(), grpc_web.as_ref(), true)
+                .unwrap()
                 .add_service(CompactTxStreamerServer::new(streamer))
                 .add_service(DarksideStreamerServer::new(darkside_service))
                 .add_service(lightwalletd_rs::reflection_service().unwrap())

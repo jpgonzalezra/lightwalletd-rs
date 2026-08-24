@@ -148,7 +148,8 @@ pub struct Cli {
     #[arg(long, default_value = "127.0.0.1:9068")]
     pub metrics_bind: SocketAddr,
 
-    /// Disable the Prometheus metrics HTTP server.
+    /// Disable Prometheus metrics: neither the `/metrics` server nor the layer that records
+    /// requests into it.
     #[arg(long)]
     pub no_metrics: bool,
 

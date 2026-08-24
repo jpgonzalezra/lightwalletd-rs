@@ -33,7 +33,8 @@ async fn the_connection_gauge_rises_and_falls_with_a_client() {
         keepalive_timeout: Duration::from_secs(DEFAULT_KEEPALIVE_TIMEOUT_SECS),
     };
     tokio::spawn(async move {
-        lightwalletd_rs::server_builder(&limits, None)
+        lightwalletd_rs::server_builder(&limits, None, true)
+            .unwrap()
             .add_service(CompactTxStreamerServer::new(streamer))
             .serve_with_incoming(incoming)
             .await
