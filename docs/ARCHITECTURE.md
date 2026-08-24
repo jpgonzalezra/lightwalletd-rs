@@ -200,6 +200,7 @@ Wallet-facing contract and hardening:
 - [0012](decisions/0012-tls-default-insecure-flags.md): TLS is on by default; dangerous/testing features are gated behind off-by-default `*-very-insecure` flags.
 - [0013](decisions/0013-resource-limits.md): the server bounds the resources a client can hold or accumulate (configurable stream/keepalive limits plus per-request caps).
 - [0034](decisions/0034-cap-the-node-response-body.md): a node response body is read through a counted stream and refused past 64 MiB of decompressed bytes, so an oversized answer fails one call instead of the whole process.
+- [0036](decisions/0036-bulkhead-the-wallet-facing-node-calls.md): the node calls made for wallet clients go through two disjoint permit pools, one of them only for transparent-address queries, so a client cannot take the share of the node the ingestor needs to keep the cache at the tip.
 - [0026](decisions/0026-grpc-web-support.md): gRPC-web is served from the gRPC port behind an off-by-default `--grpc-web`, with an origin allowlist, so a browser wallet needs no translating proxy.
 - [0029](decisions/0029-mixnet-transport-scope.md): a mixnet transport stays out of the crate: carrying the service over one is nearly free in code, but a silent stream-failure rate measured between 2% and 51%, seconds of latency and a dependency larger than this project put it behind a sidecar rather than a Cargo feature.
 - [0025](decisions/0025-taddress-range-bounds.md): an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
@@ -250,13 +251,23 @@ with `InvalidArgument` before the node is contacted, and a single 30 s deadline
 (`TADDRESS_SCAN_DEADLINE`) covers the tip lookup, the scan, and the per-txid fetches, so an abandoned
 request cannot keep a node connection busy indefinitely.
 
+All of the above bound what a client can hold or accumulate *inside this process*. One more bounds
+what it can make the backend node do ([0036](decisions/0036-bulkhead-the-wallet-facing-node-calls.md)).
+The node handle the service is built with goes through a bulkhead with two disjoint permit pools:
+`--client-scan-concurrency` (default 2) for the transparent-address queries, whose node-side cost is
+set by how much history the named addresses have, and `--client-node-concurrency` (default 8) for
+every other node call. The ingestor and the mempool monitor sit outside both pools, so the share of
+the node that keeps the cache at the chain tip stays reserved. A call that waits more than 250 ms for
+a permit is answered `ResourceExhausted` rather than queued, and shows up per method in the metrics.
+
 Snapshot serving, when enabled, adds one more: `--snapshot-max-concurrent-downloads` (default 4)
 bounds how many epoch bodies are streamed at once, and a request past the cap is refused with `429`
 rather than queued, so a slow client cannot hold a slot indefinitely.
 
 The three server-builder limits are configurable at startup via `--max-concurrent-streams`,
 `--keepalive-interval-secs`, and `--keepalive-timeout-secs`, defaulting to the values above
-(256 / 60 s / 20 s). The three per-request caps (`MAX_BLOCK_RANGE`, `MAX_STREAMED_ADDRESSES`,
+(256 / 60 s / 20 s), as are the two bulkhead pools via `--client-node-concurrency` and
+`--client-scan-concurrency`. The three per-request caps (`MAX_BLOCK_RANGE`, `MAX_STREAMED_ADDRESSES`,
 `MAX_TADDRESS_TXIDS`) remain module-local, with generous defaults chosen so legitimate wallets are
 unaffected.
 

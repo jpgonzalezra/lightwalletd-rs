@@ -106,8 +106,12 @@ over the file.
 | `--zebra-indexer-url` | — | zebrad indexer gRPC `host:port`, required with `--backend readstate` |
 
 Run `lightwalletd-rs --help` for the full list, including cache resync (`--sync-from-height`,
-`--redownload`, `--nocache`) and per-connection resource limits (`--max-concurrent-streams`, `--keepalive-*`).
-`--ingest-window`/`--ingest-concurrency` and `--log-level`/`--log-file` also read from
+`--redownload`, `--nocache`) and per-connection resource limits (`--max-concurrent-streams`,
+`--keepalive-*`). Two flags cap how much of the backend node the wallet-facing path may use at once:
+`--client-node-concurrency` (default 8) and, for transparent-address queries,
+`--client-scan-concurrency` (default 2), both described under
+[Resource limits](docs/ARCHITECTURE.md#resource-limits). Those two, `--ingest-window`/`--ingest-concurrency`,
+and `--log-level`/`--log-file` also read from `LWD_CLIENT_NODE_CONCURRENCY`/`LWD_CLIENT_SCAN_CONCURRENCY`/
 `LWD_INGEST_WINDOW`/`LWD_INGEST_CONCURRENCY`/`LWD_LOG_LEVEL`/`LWD_LOG_FILE` when the flag is absent.
 
 ## Backends

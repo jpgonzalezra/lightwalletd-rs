@@ -16,6 +16,10 @@ pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 256;
 pub const DEFAULT_INGEST_WINDOW: usize = 64;
 /// Default concurrent block fetches from the node while catching up.
 pub const DEFAULT_INGEST_CONCURRENCY: usize = 8;
+/// Default concurrent backend-node calls the wallet-facing path may have in flight.
+pub const DEFAULT_CLIENT_NODE_CONCURRENCY: usize = 8;
+/// Default concurrent transparent-address queries the wallet-facing path may have in flight.
+pub const DEFAULT_CLIENT_SCAN_CONCURRENCY: usize = 2;
 /// Default keepalive ping interval, in seconds, on an idle connection.
 pub const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 60;
 /// Default time, in seconds, to wait for a keepalive ack before dropping a connection.
@@ -228,6 +232,18 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_INGEST_CONCURRENCY, env = "LWD_INGEST_CONCURRENCY")]
     pub ingest_concurrency: usize,
 
+    /// Backend-node calls the wallet-facing path may have in flight at once. Beyond it, a request
+    /// waits briefly and is then answered `RESOURCE_EXHAUSTED`. Transparent-address queries draw on
+    /// --client-scan-concurrency instead, and the ingestor on --ingest-concurrency.
+    #[arg(long, default_value_t = DEFAULT_CLIENT_NODE_CONCURRENCY, env = "LWD_CLIENT_NODE_CONCURRENCY")]
+    pub client_node_concurrency: usize,
+
+    /// Transparent-address queries (balance, UTXOs, txids) the wallet-facing path may have in
+    /// flight at once. A separate, smaller pool because the node-side cost of one query is set by
+    /// how much history the named addresses have, which the caller neither bounds nor pays for.
+    #[arg(long, default_value_t = DEFAULT_CLIENT_SCAN_CONCURRENCY, env = "LWD_CLIENT_SCAN_CONCURRENCY")]
+    pub client_scan_concurrency: usize,
+
     /// Tracing filter (a level like "info"/"debug", or full `EnvFilter` directives such as
     /// "lightwalletd_rs=debug,warn"). An explicit `RUST_LOG` environment variable always takes
     /// precedence over this flag, matching the usual `tracing-subscriber` convention.
@@ -323,6 +339,8 @@ pub struct Config {
     pub limits: ServerLimits,
     /// Ingestor catch-up tuning.
     pub ingest: IngestConfig,
+    /// Caps on the node calls the wallet-facing path may have in flight.
+    pub client_node: ClientNodeLimits,
     /// Which backend serves chain data, with the settings it needs.
     pub backend: BackendConfig,
 }
@@ -354,6 +372,18 @@ pub struct IngestConfig {
     pub window: usize,
     /// Concurrent block fetches from the node within a window.
     pub concurrency: usize,
+}
+
+/// How much backend-node work the wallet-facing path may have in flight, in two disjoint pools
+/// (ADR 0036). Neither pool touches the ingestor's, which is what keeps the cache advancing while
+/// clients are loading the node.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientNodeLimits {
+    /// Concurrent node calls whose cost the request itself bounds: a block, a transaction, a tree
+    /// state, a subtree range.
+    pub concurrency: usize,
+    /// Concurrent transparent-address queries, whose node-side cost the caller does not bound.
+    pub scan_concurrency: usize,
 }
 
 /// gRPC server resource limits applied to the shared tonic `Server` builder.
@@ -530,6 +560,11 @@ impl Cli {
         if self.ingest_window == 0 || self.ingest_concurrency == 0 {
             anyhow::bail!("--ingest-window and --ingest-concurrency must be greater than 0");
         }
+        if self.client_node_concurrency == 0 || self.client_scan_concurrency == 0 {
+            anyhow::bail!(
+                "--client-node-concurrency and --client-scan-concurrency must be greater than 0"
+            );
+        }
         let backend = match self.backend {
             Backend::Rpc => BackendConfig::Rpc,
             Backend::Readstate => {
@@ -575,6 +610,10 @@ impl Cli {
             ingest: IngestConfig {
                 window: self.ingest_window,
                 concurrency: self.ingest_concurrency,
+            },
+            client_node: ClientNodeLimits {
+                concurrency: self.client_node_concurrency,
+                scan_concurrency: self.client_scan_concurrency,
             },
             backend,
         })
@@ -926,6 +965,8 @@ mod tests {
             keepalive_timeout_secs: DEFAULT_KEEPALIVE_TIMEOUT_SECS,
             ingest_window: DEFAULT_INGEST_WINDOW,
             ingest_concurrency: DEFAULT_INGEST_CONCURRENCY,
+            client_node_concurrency: DEFAULT_CLIENT_NODE_CONCURRENCY,
+            client_scan_concurrency: DEFAULT_CLIENT_SCAN_CONCURRENCY,
             log_level: DEFAULT_LOG_LEVEL.to_string(),
             log_file: None,
             backend: Backend::Rpc,
@@ -1105,6 +1146,32 @@ mod tests {
             .unwrap();
         assert_eq!(config.ingest.window, DEFAULT_INGEST_WINDOW);
         assert_eq!(config.ingest.concurrency, DEFAULT_INGEST_CONCURRENCY);
+    }
+
+    #[test]
+    fn resolve_uses_default_client_node_limits() {
+        let config = cli_with(None, None, Some("http://node"), None, None, None)
+            .resolve()
+            .unwrap();
+        assert_eq!(
+            config.client_node.concurrency,
+            DEFAULT_CLIENT_NODE_CONCURRENCY
+        );
+        assert_eq!(
+            config.client_node.scan_concurrency,
+            DEFAULT_CLIENT_SCAN_CONCURRENCY
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_zero_client_node_limits() {
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.client_node_concurrency = 0;
+        assert!(cli.resolve().is_err());
+
+        let mut cli = cli_with(None, None, Some("http://node"), None, None, None);
+        cli.client_scan_concurrency = 0;
+        assert!(cli.resolve().is_err());
     }
 
     #[test]

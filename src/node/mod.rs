@@ -4,6 +4,7 @@
 //! [`NodeClient`] implements it over a generic [`NodeClient::raw_request`]. The transport is plain HTTP
 //! `POST` with HTTP Basic auth.
 
+pub mod bulkhead;
 #[cfg(feature = "readstate")]
 pub mod readstate;
 mod types;
@@ -93,6 +94,16 @@ pub enum NodeError {
     /// The response had neither a `result` nor an `error`.
     #[error("RPC response had no result")]
     EmptyResult,
+    /// The wallet-facing path already has as many node calls of this class in flight as it may
+    /// (ADR 0036), so this one was refused rather than queued behind them.
+    #[error("the wallet-facing {class} concurrency limit is full")]
+    Overloaded {
+        /// Which pool was full, for the operator reading the log.
+        class: &'static str,
+    },
+    /// The task carrying a node call panicked or was cancelled by runtime shutdown.
+    #[error("node call task failed: {0}")]
+    Task(#[from] tokio::task::JoinError),
     /// The in-process read state service failed (`readstate` backend, ADR 0023). Holds the
     /// underlying error as a boxed source (`zebra_state::BoxError` is an alias of exactly this
     /// type), preserving the cause chain for server-side logging; the client-facing gRPC mapping

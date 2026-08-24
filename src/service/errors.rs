@@ -33,6 +33,18 @@ impl From<NodeError> for Status {
             tracing::warn!(%err, "read state error");
             return Status::unavailable("read state unavailable");
         }
+        // Load shedding, not a node failure: the client is being told to come back, and
+        // `RESOURCE_EXHAUSTED` is what says so without implying the node is down (ADR 0036).
+        if let NodeError::Overloaded { class } = err {
+            return Status::resource_exhausted(format!(
+                "too many {class} queries in flight; retry shortly"
+            ));
+        }
+        // A panicked or cancelled call task is a bug on this side, not a backend condition.
+        if let NodeError::Task(_) = err {
+            tracing::error!(%err, "node call task failed");
+            return Status::internal("node call failed");
+        }
         Status::unavailable(err.to_string())
     }
 }
@@ -165,5 +177,32 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Unavailable);
         assert_eq!(status.message(), "backend node unavailable");
         assert!(!status.message().contains(&server_uri));
+    }
+
+    /// A shed request must not read as a node outage: `Unavailable` tells a wallet the backend is
+    /// down and invites it to fail over, where `ResourceExhausted` tells it to come back.
+    #[test]
+    fn a_refused_call_maps_to_resource_exhausted_naming_the_pool() {
+        let status: Status = NodeError::Overloaded {
+            class: "transparent-address",
+        }
+        .into();
+
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(
+            status.message(),
+            "too many transparent-address queries in flight; retry shortly"
+        );
+    }
+
+    /// Same mapping through the fetch path, which is how a cache miss reaches the node.
+    #[test]
+    fn a_refused_block_fetch_maps_to_resource_exhausted() {
+        let status = block_fetch_to_status(
+            FetchError::Node(NodeError::Overloaded { class: "node" }),
+            700_000,
+        );
+
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
     }
 }
