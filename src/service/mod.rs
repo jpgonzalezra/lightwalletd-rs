@@ -30,6 +30,7 @@ mod address;
 mod blocks;
 mod chain;
 mod errors;
+mod framing;
 mod mempool;
 pub mod mempool_monitor;
 mod ping;

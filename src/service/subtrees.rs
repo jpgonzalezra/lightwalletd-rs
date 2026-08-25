@@ -7,7 +7,7 @@ use crate::encoding;
 use crate::node::NodeError;
 use crate::proto::{BoxStream, GetSubtreeRootsArg, ShieldedProtocol, SubtreeRoot};
 
-use super::{Streamer, block_at, decode_hex};
+use super::{Streamer, block_at, decode_hex, framing};
 
 /// Substring zebrad's `z_get_subtrees_by_index` puts in its JSON-RPC error message when asked for a
 /// pool it doesn't recognize (`zebra-rpc` `methods.rs`: `"invalid pool name, must be one of: [...]"`).
@@ -80,7 +80,9 @@ pub(super) async fn get_subtree_roots(
     let node = streamer.node.clone();
     let cache = streamer.cache.clone();
 
-    let stream = try_stream! {
+    // A root is under 100 bytes and its completing block is fetched from the node whenever it
+    // falls outside the cached range, so the roots leave in batches (ADR 0037).
+    let stream = framing::coalesce(try_stream! {
         for subtree in subtrees.subtrees {
             let block = block_at(&cache, node.as_ref(), subtree.end_height).await?;
             let root_hash = decode_hex(&subtree.root, "subtree root")?;
@@ -92,6 +94,6 @@ pub(super) async fn get_subtree_roots(
                 completing_block_height: block.height,
             };
         }
-    };
+    });
     Ok(Response::new(Box::pin(stream)))
 }
