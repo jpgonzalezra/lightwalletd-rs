@@ -14,7 +14,7 @@ use crate::proto::{
     GetAddressUtxosReplyList, RawTransaction, TransparentAddressBlockFilter,
 };
 
-use super::{Streamer, decode_hex, mined_height};
+use super::{Streamer, decode_hex, framing, mined_height};
 
 /// Max addresses a single transparent-address request may carry before the server rejects it,
 /// bounding the per-request accumulation across `GetTaddressBalance`, its streaming variant, and
@@ -233,7 +233,9 @@ async fn taddress_transactions(
         )));
     }
 
-    Ok(Box::pin(try_stream! {
+    // One node fetch per txid, so the transactions leave in batches rather than one undersized
+    // DATA frame each (ADR 0037).
+    Ok(Box::pin(framing::coalesce(try_stream! {
         for txid in txids {
             let raw = with_deadline(deadline, node.get_raw_transaction(&txid))
                 .await?
@@ -241,7 +243,7 @@ async fn taddress_transactions(
             let data = decode_hex(&raw.hex, "transaction hex")?;
             yield RawTransaction { data, height: mined_height(raw.height) };
         }
-    }))
+    })))
 }
 
 /// Resolve the upper bound of a `GetTaddressTransactions` range, rejecting an over-wide span.

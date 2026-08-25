@@ -75,6 +75,7 @@ the `CompactTxStreamerClient` and `DarksideStreamerClient` stubs alongside the s
 | `src/node/readstate.rs` | `readstate` backend (ADR 0023, feature-gated): `ZebraStateNode`, a second `NodeRpc` implementation that maps reads onto an in-process `zebra_state::ReadStateService` and delegates writes/mempool/`getinfo` to an inner `NodeClient`. |
 | `src/service/` | Implementation of the `CompactTxStreamer` gRPC service, split by method family (`chain`, `blocks`, `transactions`, `address`, `mempool`, `treestate`, `subtrees`, `ping`); `mod.rs` holds the `Streamer` and a thin trait impl that dispatches each method to its submodule. |
 | `src/service/errors.rs` | Translates a backend JSON-RPC error into the per-method gRPC `Status` a wallet expects. |
+| `src/service/framing.rs` | Holds streamed messages until they add up to a full HTTP/2 DATA frame, so a stream that pends between messages does not leave as one undersized frame each. |
 | `src/service/mempool_monitor.rs` | Live-mode shared mempool monitor: one background task refreshes the mempool and fans a parsed-once snapshot out via `watch`. |
 | `src/compact.rs` | Raw block bytes → `CompactBlock`, via `librustzcash`. |
 | `src/encoding.rs` | Display-order ↔ wire-order (endianness) conversions for hashes and txids. |
@@ -205,6 +206,7 @@ Wallet-facing contract and hardening:
 - [0029](decisions/0029-mixnet-transport-scope.md): a mixnet transport stays out of the crate: carrying the service over one is nearly free in code, but a silent stream-failure rate measured between 2% and 51%, seconds of latency and a dependency larger than this project put it behind a sidecar rather than a Cargo feature.
 - [0025](decisions/0025-taddress-range-bounds.md): an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
 - [0027](decisions/0027-block-range-continuity.md): consecutive blocks in a served range must connect by hash, whichever source each came from; a discontinuity ends the stream with `Aborted` and reports the height so the ingestor truncates and re-ingests it.
+- [0037](decisions/0037-batch-streamed-messages-into-full-frames.md): streamed messages are held until they add up to 4 KiB before being yielded, so a range served block by block from the node leaves as full HTTP/2 DATA frames instead of one undersized frame per block, which peers close the connection over.
 - [0030](decisions/0030-subtree-index-range.md): subtree indexes are bounded to the node's `u16` range before any round-trip: an out-of-range start index is `InvalidArgument`, an out-of-range limit means no limit.
 - [0031](decisions/0031-lightwallet-protocol-version.md): `GetLightdInfo` reports the served lightwallet-protocol version as a constant, independent of the crate version and the build stamps, moving only once the server serves everything the named version specifies.
 - [0015](decisions/0015-layered-testing-strategy.md): testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.

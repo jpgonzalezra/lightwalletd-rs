@@ -13,7 +13,7 @@ use crate::proto::{BlockId, BlockRange, BoxStream, CompactBlock};
 use crate::repair::RepairSignal;
 use crate::{fetch, filter};
 
-use super::{Streamer, block_at, errors};
+use super::{Streamer, block_at, errors, framing};
 
 /// Maximum number of blocks a single `GetBlockRange(Nullifiers)` request may span.
 /// A wallet syncs in bounded windows; an unbounded span is a denial-of-service lever.
@@ -254,7 +254,9 @@ fn block_range_stream(
     } else {
         (start, end)
     };
-    Box::pin(try_stream! {
+    // Batched on the way out: the miss branch below pends on every fetch, so without it a
+    // node-served range would leave as one undersized DATA frame per block (ADR 0037).
+    Box::pin(framing::coalesce(try_stream! {
         let mut link: Option<ChainLink> = None;
         for chunk in cache_chunks(low, high, descending) {
             // One transaction per chunk, released before the node is awaited: the fetch below is the
@@ -282,7 +284,7 @@ fn block_range_stream(
                 yield transform(block);
             }
         }
-    })
+    }))
 }
 
 #[cfg(test)]

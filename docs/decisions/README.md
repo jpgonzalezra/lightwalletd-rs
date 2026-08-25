@@ -43,3 +43,4 @@ choice stays discoverable after the fact. The living overview is
 | [0034](0034-cap-the-node-response-body.md) | Cap how much of a node response body is held in memory |
 | [0035](0035-bounded-metric-labels.md) | Take metric label values from the server, not from the request |
 | [0036](0036-bulkhead-the-wallet-facing-node-calls.md) | Reserve node capacity for ingestion with a wallet-facing bulkhead |
+| [0037](0037-batch-streamed-messages-into-full-frames.md) | Batch small streamed messages into full DATA frames |
