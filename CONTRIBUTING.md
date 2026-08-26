@@ -10,7 +10,7 @@
 Run the full verification gate and make sure it passes:
 
 ```sh
-make verify   # fmt + clippy -D warnings + build + test
+make verify   # fmt + prose + clippy -D warnings + build + test
 ```
 
 ## Commit style
@@ -18,6 +18,20 @@ make verify   # fmt + clippy -D warnings + build + test
 - [Conventional Commits](https://www.conventionalcommits.org/): `type: subject`.
 - Single-line subject, imperative mood, no scope, no body.
 - Keep commits small and atomic; each one should build on its own.
+
+## Prose
+
+Markdown files and Rust doc comments go through a small linter, which `make verify` runs:
+
+```sh
+make prose
+```
+
+It flags em dashes, the vocabulary AI drafts overuse, wordy phrases that have a one-word
+equivalent, and connectives used as paragraph glue. Sentence length, contractions and modal
+verbs are left alone, since this project varies them on purpose. Code, URLs and link targets
+are never read. When a line quotes wording set elsewhere, such as a log message or an official
+spec title, add `prose-lint: allow` to it.
 
 ## Design decisions and protocol references
 

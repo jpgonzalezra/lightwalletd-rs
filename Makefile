@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt fmt-fix run verify
+.PHONY: build test lint fmt fmt-fix prose run verify
 
 build:
 	cargo build
@@ -15,7 +15,11 @@ fmt:
 fmt-fix:
 	cargo fmt
 
+prose:
+	python3 scripts/prose-lint.py --self-test
+	python3 scripts/prose-lint.py
+
 run:
 	cargo run --
 
-verify: fmt lint build test
+verify: fmt prose lint build test
