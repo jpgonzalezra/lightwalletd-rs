@@ -1,5 +1,11 @@
 # 0029. Keep a mixnet transport out of the crate, behind a sidecar
 
+> **Amended 2026-08-26.** The four findings below still hold for every `nym-sdk` release, so this
+> decision stands. One cause was wrong: the silent failures are not the transport losing payloads,
+> they are a first `Data` frame arriving before the `Open` that registers its stream, which the SDK
+> discards without a log. Fixed on `develop` in August 2026 and in no release. Evidence in
+> [lwd-mixnet-proxy](https://github.com/jpgonzalezra/lwd-mixnet-proxy/blob/main/docs/measurements/2026-08-24-reordering-not-loss.md).
+
 ## Context
 
 A light wallet reveals more to a lightwalletd operator than the protocol suggests. Every request

@@ -99,6 +99,18 @@ The echo side counts three stages separately, which turns a failure into a direc
 
 **It reproduces.** The defect is in the SDK or the network, not in the rig.
 
+> **Amended 2026-08-26.** It is the SDK, and nothing here is lost. The first `Data` frame can reach
+> the far side before the `Open` that registers its stream, and `nym-sdk` up to and including 1.21.5
+> discards frames for streams it does not yet know about, in a branch that logs nothing. Nym fixed
+> that on `develop` in August 2026 and it is in no release. Two measurements in the sibling repo
+> carry the evidence:
+> [reordering, not loss](https://github.com/jpgonzalezra/lwd-mixnet-proxy/blob/main/docs/measurements/2026-08-24-reordering-not-loss.md)
+> counted the mechanism, and
+> [six thousand trials](https://github.com/jpgonzalezra/lwd-mixnet-proxy/blob/main/docs/measurements/2026-08-25-six-thousand-trials.md)
+> found nothing lost on the fixed tree. The rates below are real and still describe every release;
+> the reading that the transport drops payloads is not, and the reply-block curve is the two messages
+> separating in time rather than reply blocks running short.
+
 | run | version | trials | failure rate |
 |---|---|---|---|
 | 2026-08-03 afternoon | 1.21.4 | 200 | 7.0% |
