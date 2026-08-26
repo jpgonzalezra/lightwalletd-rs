@@ -78,7 +78,7 @@ start to *lose*: 10,000 heights split into ten 1,000-height chunks spread badly 
 `LOOKUP_BATCH` is set to 250 on the co-located numbers, since that is the environment that matters,
 and it stays adequate on a slow link.
 
-Note that zebra accepts a batch only when its elements declare `"jsonrpc": "2.0"`, though it accepts
+zebra accepts a batch only when its elements declare `"jsonrpc": "2.0"`, though it accepts
 `"1.0"` for a single call.
 
 **Epoch sizes.** An epoch from the 2016 range is 49 MB (4.9 KB/block). An epoch from early

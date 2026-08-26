@@ -518,7 +518,7 @@ segments 310–374 blocks/s; both are node-bound per request.
 (node-bound, where client-side pipelining matters most) found concurrency is the dominant knob and keeps
 paying past 8: at the default window 64, going 8→16 concurrency is +37% and 16→32 is another +6%; at
 window 256 the same steps are +48% and +5%. Window size alone (at fixed concurrency) is nearly free,
-moving throughput only ±10% from 16→256, because it mostly acts as a ceiling on useful concurrency (at
+moving throughput only ±10% from 16→256, because it mostly caps useful concurrency (at
 window 16, the 16→32 concurrency step is exactly flat, since a 16-block window can never have more than
 16 fetches in flight). The **default 64/8 is conservative but sound** (within 3% of the concurrency-8
 ceiling); an operator catching up through a spam-era range on a well-provisioned node can get **~1.6× the

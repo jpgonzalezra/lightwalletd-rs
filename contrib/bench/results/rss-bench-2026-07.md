@@ -84,7 +84,7 @@ milliseconds. `rpc` logs are completely clean. No run was materially affected.
   full-sync cache in `mainnet-2026-07-phase2.md` (the on-disk compact-block cache format is
   identical regardless of backend, and both runs landed at nearly the same final chain height).
 - Errors: none. A full clean-log scan for mismatch/error/fatal/panic/corrupt returned zero lines;
-  the only `warn` match is the expected startup `"running without TLS (plaintext) — do not use in
+  the only `warn` match is the expected startup `"running without TLS (plaintext): do not use in
   production"`. No txid mismatches from the `get_block_verbose` / `TransactionIdsForBlock`
   cross-check.
 
