@@ -9,7 +9,7 @@ fsync: a full mainnet ingest (~3M blocks) was projected to be dramatically slowe
 implementation, whose production ingestor prefetches a sliding window of 64 blocks with 8 concurrent
 workers. Block fetches for distinct heights are independent, so the serialization bought nothing.
 
-Additionally, the block parse (librustzcash deserialization plus ZIP-244/229 txid hashing) ran on
+The block parse (librustzcash deserialization plus ZIP-244/229 txid hashing) also ran on
 the async runtime, and computed txids were never checked against the node's view, so a silent
 divergence would corrupt wallet spend detection (review item H4).
 

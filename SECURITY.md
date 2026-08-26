@@ -19,7 +19,7 @@ You should expect an initial response within **7 days**.
 
 ## Scope
 
-The server is designed to run behind TLS in production; running it with
+The server must run behind TLS in production; running it with
 `--no-tls-very-insecure` or other `*-very-insecure` flags is intended for
 local development and testing only, and issues that only manifest when those
 flags are used as documented are out of scope.
