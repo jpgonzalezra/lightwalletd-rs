@@ -83,6 +83,16 @@ jobs:
             exit 1
           fi
 
+  # No Rust toolchain and no protoc, so this lane finishes in seconds and gives a docs-only PR its
+  # answer without waiting on a build. The self-test runs first: the linter is regexes over prose,
+  # and a pattern that silently stops matching would turn the gate green for the wrong reason.
+  prose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - run: python3 scripts/prose-lint.py --self-test
+      - run: python3 scripts/prose-lint.py
+
   audit:
     runs-on: ubuntu-latest
     # audit-check publishes its result as a check run, which needs write access
