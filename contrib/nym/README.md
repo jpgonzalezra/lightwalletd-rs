@@ -74,6 +74,27 @@ TRIALS=400 BUDGETS=1,20,100,400 docker compose run --rm repro
 Budgets are rotated one per trial rather than run in blocks, so a drifting network hits every value
 equally. It exits when the trials are done and prints a per-budget table.
 
+Two flags exist for the reply-block reserve, the number a receiver holds back before it will spend
+any on a reply:
+
+```
+docker compose run --rm --entrypoint repro repro --trials 100 --budgets 1 --fresh-dialler --surb-threshold 0
+```
+
+`--surb-threshold` sets that reserve through `DebugConfig`. Left unset it takes the SDK's own path,
+so the default arm of a comparison is the real default rather than a restatement of it.
+
+`--fresh-dialler` builds a new dialling client for every trial. Reply blocks accumulate per sender
+tag and a tag lives as long as the client, so a persistent client stops being short after a few
+exchanges and the reserve stops binding. Rotating the dialler makes every trial a first exchange. It
+costs one registration per trial, which is slow and occasionally fails, so those registrations are
+retried and the count is reported at the end.
+
+The reserve is client configuration, so two settings cannot be interleaved inside one process the way
+budgets are. Comparing them means alternating blocks, which
+[the measurement](https://github.com/jpgonzalezra/lwd-mixnet-proxy/blob/main/docs/measurements/2026-08-27-surb-reserve-costs-nothing.md)
+explains.
+
 ## Notes
 
 - `sp` keeps its identity in a Docker volume. That directory holds private keys: the Nym address is
