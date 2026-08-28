@@ -25,6 +25,32 @@ pub(super) const MAX_STREAMED_ADDRESSES: usize = 10_000;
 /// the server rejects it, bounding the per-txid node fetches one request can trigger.
 pub(super) const MAX_TADDRESS_TXIDS: usize = 10_000;
 
+/// Max unspent outputs a single `GetAddressUtxos`/`GetAddressUtxosStream` request may return before
+/// the server rejects it, bounding the result one request keeps resident.
+///
+/// `maxEntries` cannot do this job: the protocol reads zero as unlimited and that is what
+/// light-client SDKs send, so without a server-side cap the reply count is set by how many outputs
+/// the named addresses hold. Results are ordered by height, so a client past the cap pages with
+/// `startHeight`/`maxEntries` (ADR 0038).
+///
+/// The value has to clear [`MAX_INDEXED_OUTPUTS_PER_BLOCK`]. `startHeight` selects a block and not
+/// an output, so a height whose outputs do not fit in one reply could never be read in full.
+pub(super) const MAX_ADDRESS_UTXOS: usize = 100_000;
+
+/// Upper bound on the transparent outputs one block can add to the address index, and so on the
+/// largest group of unspent outputs that can share a single height.
+///
+/// Consensus caps a block at 2,000,000 bytes, and the smallest output the index can hold is 32
+/// bytes: 8 for the value, 1 for the script length, 23 for a P2SH script. This ignores the header,
+/// the transaction overhead and the inputs every transaction carries, so the real limit is lower.
+pub(super) const MAX_INDEXED_OUTPUTS_PER_BLOCK: usize = 2_000_000 / 32;
+
+const _: () = assert!(
+    MAX_ADDRESS_UTXOS > MAX_INDEXED_OUTPUTS_PER_BLOCK,
+    "the reply cap has to clear one block's worth of outputs: a height that does not fit in one \
+     reply can never be read, and paging by startHeight stalls on it"
+);
+
 /// Max height span a single `GetTaddressTransactions`/`GetTaddressTxids` request may scan.
 /// Deliberately generous (beyond a full-history scan of the current chain), so it never rejects a
 /// legitimate wallet request, while still rejecting an `end` near `u64::MAX`.
@@ -156,6 +182,9 @@ pub(super) async fn get_address_utxos_stream(
 /// The address count is capped before the node call: `getaddressutxos` cannot push down
 /// `startHeight`/`maxEntries`, so the whole backend result is materialized before those filters
 /// apply, and an uncapped address list would turn one request into unbounded backend work.
+///
+/// The reply count is capped at [`MAX_ADDRESS_UTXOS`] as the replies are built. Both the unary and
+/// the streaming method go through here, so one check covers both.
 pub(super) async fn collect_utxos(
     streamer: &Streamer,
     arg: &GetAddressUtxosArg,
@@ -180,6 +209,13 @@ pub(super) async fn collect_utxos(
         }
         if arg.max_entries > 0 && replies.len() as u32 >= arg.max_entries {
             break;
+        }
+        // After the `maxEntries` break, so a request that states its own bound within the cap is
+        // always served, however many outputs the addresses hold.
+        if replies.len() >= MAX_ADDRESS_UTXOS {
+            return Err(Status::resource_exhausted(format!(
+                "get_address_utxos: more than {MAX_ADDRESS_UTXOS} unspent outputs match; raise startHeight or set maxEntries to read them in pages"
+            )));
         }
         let txid = encoding::display_hex_to_wire(&utxo.txid)
             .map_err(|e| Status::internal(format!("decoding utxo txid: {e}")))?;

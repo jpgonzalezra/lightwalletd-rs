@@ -205,6 +205,7 @@ Wallet-facing contract and hardening:
 - [0026](decisions/0026-grpc-web-support.md): gRPC-web is served from the gRPC port behind an off-by-default `--grpc-web`, with an origin allowlist, so a browser wallet needs no translating proxy.
 - [0029](decisions/0029-mixnet-transport-scope.md): a mixnet transport stays out of the crate: carrying the service over one is nearly free in code, but a silent stream-failure rate measured between 2% and 51%, seconds of latency and a dependency larger than this project put it behind a sidecar rather than a Cargo feature.
 - [0025](decisions/0025-taddress-range-bounds.md): an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
+- [0038](decisions/0038-bound-the-unspent-outputs-one-request-returns.md): `GetAddressUtxos` and its streaming variant return at most 100,000 unspent outputs and refuse a larger result rather than truncating it, so what one held response can pin no longer depends on how many outputs the named addresses hold. The cap clears what a single block can add to the address index, so no height is ever too large to read in one page.
 - [0027](decisions/0027-block-range-continuity.md): consecutive blocks in a served range must connect by hash, whichever source each came from; a discontinuity ends the stream with `Aborted` and reports the height so the ingestor truncates and re-ingests it.
 - [0037](decisions/0037-batch-streamed-messages-into-full-frames.md): streamed messages are held until they add up to 4 KiB before being yielded, so a range served block by block from the node leaves as full HTTP/2 DATA frames instead of one undersized frame per block, which peers close the connection over.
 - [0030](decisions/0030-subtree-index-range.md): subtree indexes are bounded to the node's `u16` range before any round-trip: an out-of-range start index is `InvalidArgument`, an out-of-range limit means no limit.
@@ -234,7 +235,7 @@ the integration tests) sets:
   `--keepalive-timeout-secs` (default 20 s). A quiet connection is pinged and dropped if it stops
   answering, so a dead peer cannot pin a long-lived stream indefinitely.
 
-Three per-request caps bound the work a single request can accumulate or trigger:
+Four per-request caps bound the work a single request can accumulate or trigger:
 
 - `GetTaddressBalanceStream` drains a client-streamed list of addresses into a `Vec`; it stops at
   `MAX_STREAMED_ADDRESSES` (10,000) and rejects a longer stream with `ResourceExhausted`.
@@ -244,6 +245,16 @@ Three per-request caps bound the work a single request can accumulate or trigger
   `MAX_TADDRESS_TXIDS` (10,000): the txid list is fetched first and a wider result is rejected with
   `ResourceExhausted` before any per-txid fetch, so one request cannot pin the node on an unbounded
   fetch loop. The client narrows its block range to proceed.
+- `GetAddressUtxos`/`GetAddressUtxosStream` cap the replies one request returns at
+  `MAX_ADDRESS_UTXOS` (100,000) and reject a larger result with `ResourceExhausted`
+  ([0038](decisions/0038-bound-the-unspent-outputs-one-request-returns.md)). `maxEntries` cannot
+  bound this on its own, since the protocol reads zero as unlimited and that is what light-client
+  SDKs send. The check runs after the `maxEntries` break, so a request that states its own bound
+  within the cap is always served. Past the cap the client pages with `startHeight`, since results
+  come back ordered by height. The cap clears what one block can contribute to the address index
+  (`MAX_INDEXED_OUTPUTS_PER_BLOCK`, under 62,500), which is what makes that paging terminate.
+  `startHeight` names a block and not an output, so a height too large for one reply could never be
+  read in full.
 
 The same two methods also bound the address-index scan that produces those txids
 ([0025](decisions/0025-taddress-range-bounds.md)): a range with no `end` (or an `end` of zero, which
@@ -269,9 +280,9 @@ rather than queued, so a slow client cannot hold a slot indefinitely.
 The three server-builder limits are configurable at startup via `--max-concurrent-streams`,
 `--keepalive-interval-secs`, and `--keepalive-timeout-secs`, defaulting to the values above
 (256 / 60 s / 20 s), as are the two bulkhead pools via `--client-node-concurrency` and
-`--client-scan-concurrency`. The three per-request caps (`MAX_BLOCK_RANGE`, `MAX_STREAMED_ADDRESSES`,
-`MAX_TADDRESS_TXIDS`) remain module-local, with generous defaults chosen so legitimate wallets are
-unaffected.
+`--client-scan-concurrency`. The four per-request caps (`MAX_BLOCK_RANGE`, `MAX_STREAMED_ADDRESSES`,
+`MAX_TADDRESS_TXIDS`, `MAX_ADDRESS_UTXOS`) remain module-local, with generous defaults chosen so
+legitimate wallets are unaffected.
 
 ## Running
 

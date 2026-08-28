@@ -20,9 +20,12 @@ chain.
 - **[Light wallet gRPC interface (`CompactTxStreamer`)](https://github.com/zcash/lightwallet-protocol)**: the
   canonical light-client `.proto` set; the gRPC contract this server implements. The vendored copy is v0.5.0,
   the version reported to clients in `LightdInfo.lightwalletProtocolVersion` and the one a wallet checks
-  before requesting non-default `poolTypes` (`proto/service.proto:35-38`).
+  before requesting non-default `poolTypes` (`proto/service.proto:35-38`). It also sets the paging
+  contract for unspent outputs: results come back ordered by height so a caller can resume where the
+  last request stopped, and a `maxEntries` of zero means unlimited (`proto/service.proto:203-208`).
   *Where:* `proto/service.proto`, `proto/compact_formats.proto`, `src/proto.rs`,
-  `src/service/chain.rs` (`LIGHTWALLET_PROTOCOL_VERSION`).
+  `src/service/chain.rs` (`LIGHTWALLET_PROTOCOL_VERSION`), `src/service/address.rs`
+  (`collect_utxos`, `MAX_ADDRESS_UTXOS`).
 
 ## Transaction format & identifiers
 
@@ -138,3 +141,8 @@ chain.
 - **`addressindex` RPCs (`getaddressbalance`, `getaddressutxos`, `getaddresstxids`)**: the Bitcoin addressindex /
   Insight extension exposed by zebra for transparent-address queries.
   *Where:* `src/service/address.rs`, `src/node` (`get_address_balance`, `get_address_utxos`, `get_address_txids`).
+- **[Zcash Protocol Specification §7.6 — Block Header Encoding and Consensus](https://zips.z.cash/protocol/protocol.pdf#blockheader)**:
+  a block is at most 2,000,000 bytes, and the smallest output the address index can hold is 32 bytes.
+  That caps how many unspent outputs can share one height, which is what makes `startHeight` paging terminate
+  under the `GetAddressUtxos` reply cap ([ADR 0038](decisions/0038-bound-the-unspent-outputs-one-request-returns.md)).
+  *Where:* `src/service/address.rs` (`MAX_INDEXED_OUTPUTS_PER_BLOCK`, `MAX_ADDRESS_UTXOS`).
