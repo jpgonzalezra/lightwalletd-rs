@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use nym_sdk::mixnet::MixnetClient;
+use nym_sdk::DebugConfig;
+use nym_sdk::mixnet::{MixnetClient, MixnetClientBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Small enough to ride in a single packet, so payload size is never a variable.
@@ -42,6 +43,19 @@ struct Arguments {
     /// trips measured 2 to 4 seconds, so this is ample.
     #[arg(long, default_value_t = 20)]
     timeout_secs: u64,
+
+    /// `minimum_reply_surb_storage_threshold`, the reply blocks a receiver holds back before it will
+    /// spend any on a reply. Unset leaves the SDK default of 10.
+    #[arg(long)]
+    surb_threshold: Option<usize>,
+
+    /// Build a new dialling client for every trial, so no reply blocks carry over between them.
+    ///
+    /// The reserve threshold only binds while the receiver's store is small, and the store is keyed
+    /// by sender tag, which a client keeps for the life of the process. Rotating the dialler is what
+    /// makes each trial a first exchange; it costs one registration per trial.
+    #[arg(long)]
+    fresh_dialler: bool,
 }
 
 #[derive(Default)]
@@ -62,6 +76,22 @@ impl EchoStages {
     }
 }
 
+/// A client with the SDK defaults, except for the reply-block reserve when one is asked for.
+///
+/// `connect_new` is this without the `debug_config` call, so an unset threshold reproduces it
+/// exactly rather than merely closely.
+async fn connect(surb_threshold: Option<usize>) -> Result<MixnetClient> {
+    let mut debug = DebugConfig::default();
+    if let Some(threshold) = surb_threshold {
+        debug.reply_surbs.minimum_reply_surb_storage_threshold = threshold;
+    }
+    Ok(MixnetClientBuilder::new_ephemeral()
+        .debug_config(debug)
+        .build()?
+        .connect_to_mixnet()
+        .await?)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -70,7 +100,7 @@ async fn main() -> Result<()> {
     let arguments = Arguments::parse();
     let timeout = Duration::from_secs(arguments.timeout_secs);
 
-    let mut echo_client = MixnetClient::connect_new()
+    let mut echo_client = connect(arguments.surb_threshold)
         .await
         .context("connecting the echo client")?;
     let echo_address = *echo_client.nym_address();
@@ -113,7 +143,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    let mut dial_client = MixnetClient::connect_new()
+    let mut dial_client = connect(arguments.surb_threshold)
         .await
         .context("connecting the dialling client")?;
 
@@ -135,10 +165,31 @@ async fn main() -> Result<()> {
     let mut echo_write_failed = 0usize;
     let mut return_loss = 0usize;
     let mut dial_errors = 0usize;
+    let mut registration_retries = 0usize;
     let mut latencies = Vec::new();
 
     for trial in 1..=arguments.trials {
         let budget = arguments.budgets[(trial - 1) % arguments.budgets.len()];
+        if arguments.fresh_dialler && trial > 1 {
+            // Registering a fresh client is itself flaky: gateways time out during authentication
+            // often enough to end a run on the second trial. Those failures are noise here, so they
+            // are retried and counted rather than fatal, and the count is reported at the end.
+            let mut attempt = 1;
+            dial_client = loop {
+                match connect(arguments.surb_threshold).await {
+                    Ok(client) => break client,
+                    Err(error) if attempt < 5 => {
+                        registration_retries += 1;
+                        println!("      registration attempt {attempt} failed: {error}");
+                        attempt += 1;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    Err(error) => {
+                        return Err(error).context("reconnecting the dialling client, five attempts");
+                    }
+                }
+            };
+        }
         let before = stages.snapshot();
         let started = Instant::now();
 
@@ -204,6 +255,9 @@ async fn main() -> Result<()> {
     let failures = outbound_loss + echo_write_failed + return_loss + dial_errors;
     println!("\n--- summary ---");
     println!("trials                       {}", arguments.trials);
+    if arguments.fresh_dialler {
+        println!("registration retries         {registration_retries}");
+    }
     println!("ok                           {ok}");
     println!("lost outbound                {outbound_loss}");
     println!("echo failed to write         {echo_write_failed}");
