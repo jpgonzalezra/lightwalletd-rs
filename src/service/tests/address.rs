@@ -12,7 +12,8 @@ use crate::proto::{
     RawTransaction, TransparentAddressBlockFilter,
 };
 use crate::service::address::{
-    MAX_STREAMED_ADDRESSES, MAX_TADDRESS_BLOCK_SPAN, MAX_TADDRESS_TXIDS, collect_utxos,
+    MAX_ADDRESS_UTXOS, MAX_INDEXED_OUTPUTS_PER_BLOCK, MAX_STREAMED_ADDRESSES,
+    MAX_TADDRESS_BLOCK_SPAN, MAX_TADDRESS_TXIDS, collect_utxos,
 };
 use crate::testutil::FakeNode;
 
@@ -106,6 +107,66 @@ async fn collect_utxos_rejects_too_many_addresses() {
     .unwrap_err();
 
     assert_eq!(status.code(), Code::ResourceExhausted);
+}
+
+/// A node holding `count` unspent outputs, all at the same height, for whatever addresses are asked.
+fn node_holding_utxos(count: usize) -> Arc<FakeNode> {
+    Arc::new(FakeNode {
+        address_utxos: Some(vec![address_utxo("00112233", 100); count]),
+        ..Default::default()
+    })
+}
+
+fn utxos_arg(max_entries: u32) -> GetAddressUtxosArg {
+    GetAddressUtxosArg {
+        addresses: vec![taddr()],
+        start_height: 0,
+        max_entries,
+    }
+}
+
+#[tokio::test]
+async fn collect_utxos_accepts_a_result_at_the_reply_cap() {
+    let (_dir, streamer) = streamer_with(node_holding_utxos(MAX_ADDRESS_UTXOS));
+
+    let replies = collect_utxos(&streamer, &utxos_arg(0)).await.unwrap();
+
+    assert_eq!(replies.len(), MAX_ADDRESS_UTXOS);
+}
+
+#[tokio::test]
+async fn collect_utxos_rejects_a_result_over_the_reply_cap() {
+    let (_dir, streamer) = streamer_with(node_holding_utxos(MAX_ADDRESS_UTXOS + 1));
+
+    let status = collect_utxos(&streamer, &utxos_arg(0)).await.unwrap_err();
+
+    assert_eq!(status.code(), Code::ResourceExhausted);
+}
+
+#[tokio::test]
+async fn collect_utxos_serves_a_bounded_max_entries_over_an_oversized_result() {
+    let (_dir, streamer) = streamer_with(node_holding_utxos(MAX_ADDRESS_UTXOS + 1));
+
+    let replies = collect_utxos(&streamer, &utxos_arg(5)).await.unwrap();
+
+    assert_eq!(replies.len(), 5);
+}
+
+/// `startHeight` selects a block, so a client can only page past a height it has read in full. A
+/// group as large as one block can produce still fits in a single reply, which is what keeps paging
+/// moving; the cap itself is held above that bound by a `const` assertion in `address.rs`.
+#[tokio::test]
+async fn collect_utxos_serves_a_whole_height_group_the_size_of_a_full_block() {
+    let utxos = vec![address_utxo("00112233", 100); MAX_INDEXED_OUTPUTS_PER_BLOCK];
+    let fake = Arc::new(FakeNode {
+        address_utxos: Some(utxos),
+        ..Default::default()
+    });
+    let (_dir, streamer) = streamer_with(fake);
+
+    let replies = collect_utxos(&streamer, &utxos_arg(0)).await.unwrap();
+
+    assert_eq!(replies.len(), MAX_INDEXED_OUTPUTS_PER_BLOCK);
 }
 
 #[tokio::test]

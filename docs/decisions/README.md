@@ -44,3 +44,4 @@ choice stays discoverable after the fact. The living overview is
 | [0035](0035-bounded-metric-labels.md) | Take metric label values from the server, not from the request |
 | [0036](0036-bulkhead-the-wallet-facing-node-calls.md) | Reserve node capacity for ingestion with a wallet-facing bulkhead |
 | [0037](0037-batch-streamed-messages-into-full-frames.md) | Batch small streamed messages into full DATA frames |
+| [0038](0038-bound-the-unspent-outputs-one-request-returns.md) | Bound the unspent outputs one address request returns |
