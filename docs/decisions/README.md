@@ -46,3 +46,4 @@ choice stays discoverable after the fact. The living overview is
 | [0037](0037-batch-streamed-messages-into-full-frames.md) | Batch small streamed messages into full DATA frames |
 | [0038](0038-bound-the-unspent-outputs-one-request-returns.md) | Bound the unspent outputs one address request returns |
 | [0039](0039-refuse-block-ranges-below-the-ingest-floor.md) | Refuse block ranges below the ingest floor |
+| [0040](0040-bound-the-cache-read-chunk-by-bytes.md) | Bound the cache read chunk by bytes, not only by height count |

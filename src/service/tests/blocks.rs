@@ -11,6 +11,7 @@ use crate::proto::{
     CompactTxIn, PoolType,
 };
 use crate::repair::RepairSignal;
+use crate::service::blocks::CACHE_READ_CHUNK_BYTES;
 use crate::testutil::{FakeNode, fake_node_serving, temp_cache, testdata_blocks};
 
 use super::super::Streamer;
@@ -67,6 +68,18 @@ fn chained_block(height: u64, prev_hash: Vec<u8>) -> CompactBlock {
 fn chain(heights: std::ops::RangeInclusive<u64>) -> Vec<CompactBlock> {
     heights
         .map(|height| chained_block(height, vec![(height - 1) as u8; 32]))
+        .collect()
+}
+
+/// A contiguous chain whose blocks are heavy enough that the cache read runs out of byte budget
+/// well before it runs out of heights: eight of them come to twice what one chunk may hold.
+fn heavy_chain(heights: std::ops::RangeInclusive<u64>) -> Vec<CompactBlock> {
+    chain(heights)
+        .into_iter()
+        .map(|block| CompactBlock {
+            header: vec![0; CACHE_READ_CHUNK_BYTES / 4],
+            ..block
+        })
         .collect()
 }
 
@@ -473,6 +486,57 @@ async fn get_block_range_serves_a_contiguous_range_spanning_several_cache_chunks
     let (served, status) = collect_range(&streamer, 1, 70).await;
 
     assert_eq!((served.len(), status.is_none()), (70, true));
+}
+
+#[tokio::test]
+async fn a_range_of_heavy_blocks_is_served_whole_though_the_byte_budget_splits_it() {
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&heavy_chain(1..=8), &[]);
+
+    let (served, status) = collect_range(&streamer, 1, 8).await;
+
+    assert_eq!(
+        (
+            served.iter().map(|block| block.height).collect::<Vec<_>>(),
+            status.is_none()
+        ),
+        (vec![1, 2, 3, 4, 5, 6, 7, 8], true)
+    );
+}
+
+#[tokio::test]
+async fn a_block_that_does_not_decode_ends_the_stream_after_the_blocks_ahead_of_it() {
+    // The budget counts stored bytes, so a block is decoded only when the stream reaches it. The
+    // client gets everything ahead of a corrupt block and then the error, not one error for the
+    // whole chunk.
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&chain(1..=3), &[]);
+    streamer.cache.insert_raw(2, &[0x08, 0xff]).unwrap();
+
+    let (served, status) = collect_range(&streamer, 1, 3).await;
+
+    assert_eq!(
+        (
+            served.iter().map(|block| block.height).collect::<Vec<_>>(),
+            status.map(|status| status.code())
+        ),
+        (vec![1], Some(Code::Internal))
+    );
+}
+
+#[tokio::test]
+async fn a_descending_range_of_heavy_blocks_is_served_whole_though_the_byte_budget_splits_it() {
+    // The direction that a byte budget filled from the low end would break: the high end is what a
+    // descending range serves first, so that is the end the read has to fill from.
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&heavy_chain(1..=8), &[]);
+
+    let (served, status) = collect_range(&streamer, 8, 1).await;
+
+    assert_eq!(
+        (
+            served.iter().map(|block| block.height).collect::<Vec<_>>(),
+            status.is_none()
+        ),
+        (vec![8, 7, 6, 5, 4, 3, 2, 1], true)
+    );
 }
 
 #[tokio::test]

@@ -85,6 +85,17 @@ pub enum CacheError {
     },
 }
 
+/// What one bounded cache read returned: the stored blocks, and how much of the request they cover.
+pub struct CachedChunk {
+    /// The stored protobuf encoding of each block read, keyed by height.
+    pub blocks: BTreeMap<u64, Vec<u8>>,
+    /// The part of the requested range this read resolved. Shorter than the request when the byte
+    /// budget ran out. Inside it a missing height is a real miss, to be served from the node.
+    /// Outside it nothing was read at all, so those heights say nothing about what the cache holds
+    /// and the caller has to come back for them.
+    pub covered: RangeInclusive<u64>,
+}
+
 /// A `redb`-backed store of compact blocks.
 pub struct Cache {
     db: Database,
@@ -240,23 +251,61 @@ impl Cache {
         Ok(())
     }
 
-    /// Read every cached block in `range` under a single read transaction, keyed by height. Heights
-    /// the cache does not hold are absent from the result.
+    /// Read the cached blocks in `range` under a single read transaction, stopping once they add up
+    /// to `max_bytes`. Heights the cache does not hold are absent from [`CachedChunk::blocks`] and
+    /// cost nothing against the budget.
     ///
-    /// Reading a whole range in one transaction is what makes a served range self-consistent: `redb`
-    /// reads are MVCC, so the blocks come from one point in time even if the ingestor truncates a
-    /// reorg mid-read. Resolving each height on its own would let a range straddle the truncation and
-    /// mix two chains.
-    pub fn get_range(
+    /// One transaction is what makes a served range self-consistent: `redb` reads are MVCC, so the
+    /// blocks come from one point in time even if the ingestor truncates a reorg mid-read. Resolving
+    /// each height on its own would let a range straddle the truncation and mix two chains.
+    ///
+    /// `descending` fills from the high end instead of the low one, so what gets read is what gets
+    /// served first. The caller resumes from whichever side of [`CachedChunk::covered`] it has not
+    /// served yet.
+    ///
+    /// The result holds stored bytes, not decoded blocks: the budget is then the resident size, in
+    /// the units the wire-size benchmark measures, instead of that size times whatever decoding
+    /// inflates it to. See ADR 0040.
+    pub fn read_chunk(
         &self,
         range: RangeInclusive<u64>,
-    ) -> Result<BTreeMap<u64, CompactBlock>, CacheError> {
-        let mut blocks = BTreeMap::new();
-        self.for_each_raw(range, |height, bytes| {
-            blocks.insert(height, CompactBlock::decode(bytes)?);
-            Ok::<(), CacheError>(())
-        })?;
-        Ok(blocks)
+        descending: bool,
+        max_bytes: usize,
+    ) -> Result<CachedChunk, CacheError> {
+        let (low, high) = (*range.start(), *range.end());
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BLOCKS)?;
+        let mut entries = table.range(range)?;
+        let mut blocks: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        let mut held_bytes = 0usize;
+        let mut stopped_before = None;
+        loop {
+            let entry = if descending {
+                entries.next_back()
+            } else {
+                entries.next()
+            };
+            let Some(entry) = entry else { break };
+            let (height, value) = entry?;
+            let (height, bytes) = (height.value(), value.value());
+            // Emptiness first: a block larger than the whole budget still has to go somewhere, and
+            // refusing it would stall the range on that height forever.
+            if !blocks.is_empty() && held_bytes + bytes.len() > max_bytes {
+                stopped_before = Some(height);
+                break;
+            }
+            held_bytes += bytes.len();
+            blocks.insert(height, bytes.to_vec());
+        }
+        // Stopping early splits the request: what fit is covered, and the caller comes back for the
+        // rest. `stopped_before` is never `low`/`high` itself, since the first block read is always
+        // kept, so the covered range cannot come back empty.
+        let covered = match (stopped_before, descending) {
+            (Some(height), true) => height.saturating_add(1)..=high,
+            (Some(height), false) => low..=height.saturating_sub(1),
+            (None, _) => low..=high,
+        };
+        Ok(CachedChunk { blocks, covered })
     }
 
     /// The lowest and highest cached heights, read together, or `None` if the cache is empty.
@@ -484,6 +533,9 @@ mod tests {
     use super::*;
     use crate::testutil::temp_cache;
 
+    /// A budget no fixture in these tests comes close to, for the reads that are not about the bound.
+    const NO_BUDGET_PRESSURE: usize = 1 << 20;
+
     fn block(height: u64, hash_byte: u8) -> CompactBlock {
         CompactBlock {
             height,
@@ -492,42 +544,168 @@ mod tests {
         }
     }
 
+    /// A block at `height` whose encoding is a little over `size` bytes.
+    fn block_of_size(height: u64, size: usize) -> CompactBlock {
+        CompactBlock {
+            height,
+            hash: vec![height as u8; 32],
+            header: vec![0; size],
+            ..Default::default()
+        }
+    }
+
+    /// The decoded blocks a chunk holds, in height order.
+    fn decoded(chunk: &CachedChunk) -> Vec<CompactBlock> {
+        chunk
+            .blocks
+            .values()
+            .map(|bytes| CompactBlock::decode(bytes.as_slice()).unwrap())
+            .collect()
+    }
+
+    /// What a chunk holds against its budget: the stored bytes, which is what the budget counts.
+    fn held_bytes(chunk: &CachedChunk) -> usize {
+        chunk.blocks.values().map(Vec::len).sum()
+    }
+
     #[test]
-    fn get_range_returns_the_blocks_it_holds_keyed_by_height() {
+    fn read_chunk_returns_the_blocks_it_holds_keyed_by_height() {
         let (_dir, cache) = temp_cache();
         for height in 100..=104 {
             cache.add(height, &block(height, height as u8)).unwrap();
         }
 
-        let blocks = cache.get_range(101..=103).unwrap();
+        let chunk = cache
+            .read_chunk(101..=103, false, NO_BUDGET_PRESSURE)
+            .unwrap();
 
         assert_eq!(
-            blocks.into_iter().collect::<Vec<_>>(),
-            vec![
-                (101, block(101, 101)),
-                (102, block(102, 102)),
-                (103, block(103, 103))
-            ]
+            decoded(&chunk),
+            vec![block(101, 101), block(102, 102), block(103, 103)]
         );
     }
 
     #[test]
-    fn get_range_omits_the_heights_past_the_cached_tip() {
+    fn read_chunk_covers_the_whole_request_when_it_fits() {
+        let (_dir, cache) = temp_cache();
+        for height in 100..=104 {
+            cache.add(height, &block(height, height as u8)).unwrap();
+        }
+
+        let chunk = cache
+            .read_chunk(101..=103, false, NO_BUDGET_PRESSURE)
+            .unwrap();
+
+        assert_eq!(chunk.covered, 101..=103);
+    }
+
+    #[test]
+    fn read_chunk_omits_the_heights_past_the_cached_tip() {
         // Appends are monotonic, so the only heights a range can miss are the ones beyond the tip
         // (served from the node) and the ones below the cache floor.
         let (_dir, cache) = temp_cache();
         cache.add(100, &block(100, 100)).unwrap();
         cache.add(101, &block(101, 101)).unwrap();
 
-        let blocks = cache.get_range(99..=103).unwrap();
+        let chunk = cache
+            .read_chunk(99..=103, false, NO_BUDGET_PRESSURE)
+            .unwrap();
 
-        assert_eq!(blocks.keys().copied().collect::<Vec<_>>(), vec![100, 101]);
+        assert_eq!(
+            chunk.blocks.keys().copied().collect::<Vec<_>>(),
+            vec![100, 101]
+        );
     }
 
     #[test]
-    fn get_range_of_an_empty_cache_is_empty() {
+    fn read_chunk_of_an_empty_cache_is_empty() {
         let (_dir, cache) = temp_cache();
-        assert_eq!(cache.get_range(1..=10).unwrap().len(), 0);
+        assert_eq!(
+            cache
+                .read_chunk(1..=10, false, NO_BUDGET_PRESSURE)
+                .unwrap()
+                .blocks
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn read_chunk_stops_once_the_blocks_reach_the_budget() {
+        let (_dir, cache) = temp_cache();
+        for height in 100..=163 {
+            cache.add(height, &block_of_size(height, 100_000)).unwrap();
+        }
+
+        let chunk = cache.read_chunk(100..=163, false, 512 * 1024).unwrap();
+
+        assert!(
+            held_bytes(&chunk) <= 512 * 1024,
+            "{} blocks / {} bytes held against a 512 KiB budget",
+            chunk.blocks.len(),
+            held_bytes(&chunk)
+        );
+    }
+
+    #[test]
+    fn read_chunk_covers_only_what_it_read_when_the_budget_runs_out() {
+        let (_dir, cache) = temp_cache();
+        for height in 100..=163 {
+            cache.add(height, &block_of_size(height, 100_000)).unwrap();
+        }
+
+        let chunk = cache.read_chunk(100..=163, false, 512 * 1024).unwrap();
+
+        assert_eq!(chunk.covered, 100..=104);
+    }
+
+    #[test]
+    fn read_chunk_descending_fills_from_the_high_end() {
+        let (_dir, cache) = temp_cache();
+        for height in 100..=163 {
+            cache.add(height, &block_of_size(height, 100_000)).unwrap();
+        }
+
+        let chunk = cache.read_chunk(100..=163, true, 512 * 1024).unwrap();
+
+        assert_eq!(chunk.covered, 159..=163);
+    }
+
+    #[test]
+    fn read_chunk_holds_one_block_larger_than_the_whole_budget() {
+        // Otherwise a range containing such a block would never get past it.
+        let (_dir, cache) = temp_cache();
+        cache.add(100, &block_of_size(100, 900_000)).unwrap();
+        cache.add(101, &block_of_size(101, 900_000)).unwrap();
+
+        let chunk = cache.read_chunk(100..=101, false, 512 * 1024).unwrap();
+
+        assert_eq!(chunk.covered, 100..=100);
+    }
+
+    #[test]
+    fn read_chunk_covers_from_the_cursor_end_when_the_cache_starts_partway_into_the_window() {
+        // `covered` starts at the request edge, not at the first height the cache holds. Taking it
+        // from the blocks read would start it at 150, and the serving loop would skip 100..=149.
+        let (_dir, cache) = temp_cache();
+        for height in 150..=163 {
+            cache.add(height, &block_of_size(height, 100_000)).unwrap();
+        }
+
+        let chunk = cache.read_chunk(100..=163, false, 512 * 1024).unwrap();
+
+        assert_eq!(chunk.covered, 100..=154);
+    }
+
+    #[test]
+    fn read_chunk_charges_nothing_for_heights_the_cache_does_not_hold() {
+        // A gap costs no bytes, so it must not shorten the covered range.
+        let (_dir, cache) = temp_cache();
+        cache.add(160, &block_of_size(160, 100_000)).unwrap();
+
+        let chunk = cache.read_chunk(100..=163, false, 512 * 1024).unwrap();
+
+        assert_eq!(chunk.covered, 100..=163);
     }
 
     #[test]

@@ -35,9 +35,16 @@ store's page reclamation for the duration with nothing gained.
 - One read transaction per 64 heights instead of one per height, so a long range does less
   transaction setup.
 - A chunk's blocks are held in memory together, where the per-height reads held one at a time: peak
-  memory per in-flight stream goes up 64-fold. That is the price of the intra-chunk guarantee, and it
-  is small in absolute terms (a compact block is far smaller than the full block it summarizes), but
-  it is a cost, not a saving.
+  memory per in-flight stream goes up 64-fold. That is the price of the intra-chunk guarantee, and a
+  cost rather than a saving.
+
+  This originally read "small in absolute terms (a compact block is far smaller than the full block
+  it summarizes)". That is wrong. The wire-size benchmark puts a compact block at 90,580 bytes on
+  average in the sandblasting era, so 64 of them come to 5.8 MB, and the figure that matters is not
+  the peak per stream but the sum: chunk bytes x `--max-concurrent-streams` x connections. A height
+  count bounds none of it, since the client picks the heights.
+  [0040](0040-bound-the-cache-read-chunk-by-bytes.md) adds a byte budget on top of the height count
+  and makes this chunk size a maximum.
 - Page reclamation is delayed by at most one chunk's service time, not by a whole range's, so a slow
   client cannot pin the cache file's growth.
 - The chunk size is a fixed constant, not a flag: it trades two costs that no operator is positioned
