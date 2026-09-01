@@ -207,6 +207,7 @@ Wallet-facing contract and hardening:
 - [0025](decisions/0025-taddress-range-bounds.md): an open-ended transparent-address range is pinned to the chain tip at request time, a span wider than 10,000,000 blocks is rejected, and one deadline covers the whole scan plus its per-txid fan-out.
 - [0038](decisions/0038-bound-the-unspent-outputs-one-request-returns.md): `GetAddressUtxos` and its streaming variant return at most 100,000 unspent outputs and refuse a larger result rather than truncating it, so what one held response can pin no longer depends on how many outputs the named addresses hold. The cap clears what a single block can add to the address index, so no height is ever too large to read in one page.
 - [0027](decisions/0027-block-range-continuity.md): consecutive blocks in a served range must connect by hash, whichever source each came from; a discontinuity ends the stream with `Aborted` and reports the height so the ingestor truncates and re-ingests it.
+- [0039](decisions/0039-refuse-block-ranges-below-the-ingest-floor.md): a block range reaching below the ingest floor is refused with `OutOfRange` before the stream opens, because nothing below that floor is ever cached and the range would otherwise be answered at two node round-trips per block, up to 10,000 blocks at a time.
 - [0037](decisions/0037-batch-streamed-messages-into-full-frames.md): streamed messages are held until they add up to 4 KiB before being yielded, so a range served block by block from the node leaves as full HTTP/2 DATA frames instead of one undersized frame per block, which peers close the connection over.
 - [0030](decisions/0030-subtree-index-range.md): subtree indexes are bounded to the node's `u16` range before any round-trip: an out-of-range start index is `InvalidArgument`, an out-of-range limit means no limit.
 - [0031](decisions/0031-lightwallet-protocol-version.md): `GetLightdInfo` reports the served lightwallet-protocol version as a constant, independent of the crate version and the build stamps, moving only once the server serves everything the named version specifies.
@@ -235,12 +236,20 @@ the integration tests) sets:
   `--keepalive-timeout-secs` (default 20 s). A quiet connection is pinged and dropped if it stops
   answering, so a dead peer cannot pin a long-lived stream indefinitely.
 
-Four per-request caps bound the work a single request can accumulate or trigger:
+Five per-request limits bound the work a single request can accumulate or trigger:
 
 - `GetTaddressBalanceStream` drains a client-streamed list of addresses into a `Vec`; it stops at
   `MAX_STREAMED_ADDRESSES` (10,000) and rejects a longer stream with `ResourceExhausted`.
 - `GetBlockRange`/`GetBlockRangeNullifiers` cap the requested span at `MAX_BLOCK_RANGE` (10,000
   blocks); see [Input validation](#input-validation).
+- `GetBlockRange`/`GetBlockRangeNullifiers` also refuse a range reaching below the ingest floor,
+  with `OutOfRange` before the stream opens
+  ([0039](decisions/0039-refuse-block-ranges-below-the-ingest-floor.md)). The span cap bounds the
+  blocks in the answer. The floor bounds the node round-trips behind them for the one window where a
+  miss is permanent: a height the cache does not hold costs two, and nothing below the floor is ever
+  cached. Above the cached tip the fallback is untouched, since that gap is the instance's own lag
+  and not something a client picks. Darkside and `--nocache` have no floor and keep serving from the
+  node.
 - `GetTaddressTransactions`/`GetTaddressTxids` cap the number of matching txids at
   `MAX_TADDRESS_TXIDS` (10,000): the txid list is fetched first and a wider result is rejected with
   `ResourceExhausted` before any per-txid fetch, so one request cannot pin the node on an unbounded

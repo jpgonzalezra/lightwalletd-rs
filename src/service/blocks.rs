@@ -36,6 +36,25 @@ fn validate_block_range(start: u64, end: u64) -> Result<(), Status> {
     Ok(())
 }
 
+/// Refuse a range that reaches below the lowest height this instance serves (ADR 0039).
+///
+/// Below that height every block is a permanent miss: the cache never held it, and the ingestor
+/// only extends its own tip, so it never will. Each one costs two node RPCs, up to
+/// [`MAX_BLOCK_RANGE`] of them in a request the client can repeat as often as it likes. The floor is
+/// the cache's own base once it holds anything, and the configured ingest floor until then.
+fn check_ingest_floor(streamer: &Streamer, method: &str, low: u64) -> Result<(), Status> {
+    let Some(configured) = streamer.ingest_floor else {
+        return Ok(());
+    };
+    let floor = streamer.cache.range()?.map_or(configured, |(base, _)| base);
+    if low < floor {
+        return Err(Status::out_of_range(format!(
+            "{method}: height {low} is below {floor}, the lowest block this server holds"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) async fn get_block(
     streamer: &Streamer,
     request: Request<BlockId>,
@@ -88,6 +107,7 @@ pub(super) async fn get_block_range(
     };
     let (start, end) = (start.height, end.height);
     validate_block_range(start, end)?;
+    check_ingest_floor(streamer, "get_block_range", start.min(end))?;
     let stream = block_range_stream(
         streamer.cache.clone(),
         streamer.node.clone(),
@@ -117,6 +137,7 @@ pub(super) async fn get_block_range_nullifiers(
     };
     let (start, end) = (start.height, end.height);
     validate_block_range(start, end)?;
+    check_ingest_floor(streamer, "get_block_range_nullifiers", start.min(end))?;
     let stream = block_range_stream(
         streamer.cache.clone(),
         streamer.node.clone(),

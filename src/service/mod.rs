@@ -61,6 +61,9 @@ pub struct Streamer {
     /// Where a chain discontinuity seen while serving a range is reported, so the ingestor repairs
     /// the cache instead of leaving every retry to hit it; `None` when no ingestor is running.
     repair: Option<crate::repair::RepairSignal>,
+    /// The configured ingest floor, used to refuse block ranges reaching below what this instance
+    /// holds (ADR 0039); `None` in darkside and under `--nocache`, which run no ingestor.
+    ingest_floor: Option<u64>,
 }
 
 impl Streamer {
@@ -82,6 +85,7 @@ impl Streamer {
             ping_count: Arc::new(AtomicI64::new(0)),
             donation_address: None,
             repair: None,
+            ingest_floor: None,
         }
     }
 
@@ -108,6 +112,14 @@ impl Streamer {
     /// Set the donation address advertised in `GetLightdInfo`.
     pub fn with_donation_address(mut self, address: Option<String>) -> Self {
         self.donation_address = address;
+        self
+    }
+
+    /// Set the ingest floor, below which block ranges are refused instead of fetched from the node
+    /// one height at a time (ADR 0039). Live mode with an ingestor only: darkside and `--nocache`
+    /// keep an empty cache on purpose, so there the node is the source rather than the fallback.
+    pub fn with_ingest_floor(mut self, height: u64) -> Self {
+        self.ingest_floor = Some(height);
         self
     }
 }

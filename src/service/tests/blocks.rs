@@ -76,11 +76,14 @@ async fn collect_range(
     start: u64,
     end: u64,
 ) -> (Vec<CompactBlock>, Option<tonic::Status>) {
-    let mut stream = streamer
+    let mut stream = match streamer
         .get_block_range(Request::new(nullifiers_range(start, end, vec![])))
         .await
-        .unwrap()
-        .into_inner();
+    {
+        Ok(response) => response.into_inner(),
+        // A below-floor range is refused before the stream opens.
+        Err(status) => return (Vec::new(), Some(status)),
+    };
     let mut blocks = Vec::new();
     while let Some(item) = stream.next().await {
         match item {
@@ -511,4 +514,140 @@ async fn get_block_range_nullifiers_aborts_on_a_discontinuity_too() {
     }
 
     assert_eq!(codes, vec![Code::Aborted]);
+}
+
+/// A streamer that refuses ranges below `floor` the way a live instance with an ingestor does: the
+/// cache holds `blocks` and the node serves `raws`. The node handle comes back so a test can assert
+/// what a request cost it.
+fn streamer_with_ingest_floor(
+    blocks: &[CompactBlock],
+    raws: &[Vec<u8>],
+    floor: u64,
+) -> (tempfile::TempDir, Streamer, Arc<FakeNode>) {
+    let (dir, cache) = temp_cache();
+    for block in blocks {
+        cache.add(block.height, block).unwrap();
+    }
+    let node = Arc::new(fake_node_serving(raws));
+    let streamer = Streamer::new(node.clone(), Arc::new(cache), "main".to_string(), None)
+        .with_ingest_floor(floor);
+    (dir, streamer, node)
+}
+
+#[tokio::test]
+async fn get_block_range_below_the_ingest_floor_is_out_of_range() {
+    // The node holds the whole chain, so without the floor it would serve the two below-floor
+    // heights one at a time.
+    let (raws, parsed) = testdata_chain();
+    let floor = parsed[2].height;
+    let (_dir, streamer, _node) = streamer_with_ingest_floor(&parsed[2..], &raws, floor);
+
+    let (served, status) = collect_range(&streamer, parsed[0].height, parsed[3].height).await;
+
+    assert_eq!(
+        (served.len(), status.map(|status| status.code())),
+        (0, Some(Code::OutOfRange))
+    );
+}
+
+#[tokio::test]
+async fn a_range_below_the_ingest_floor_costs_the_node_nothing() {
+    let (raws, parsed) = testdata_chain();
+    let floor = parsed[2].height;
+    let (_dir, streamer, node) = streamer_with_ingest_floor(&parsed[2..], &raws, floor);
+
+    let _ = collect_range(&streamer, parsed[0].height, parsed[3].height).await;
+
+    assert_eq!(*node.block_verbose_calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn get_block_range_starting_at_the_ingest_floor_still_serves() {
+    let (raws, parsed) = testdata_chain();
+    let floor = parsed[2].height;
+    let (_dir, streamer, _node) = streamer_with_ingest_floor(&parsed[2..], &raws, floor);
+
+    let (served, status) = collect_range(&streamer, floor, parsed[3].height).await;
+
+    assert_eq!(
+        (
+            served.iter().map(|block| block.height).collect::<Vec<_>>(),
+            status.is_none()
+        ),
+        (vec![parsed[2].height, parsed[3].height], true)
+    );
+}
+
+#[tokio::test]
+async fn a_descending_range_reaching_below_the_ingest_floor_is_out_of_range() {
+    let (raws, parsed) = testdata_chain();
+    let floor = parsed[2].height;
+    let (_dir, streamer, _node) = streamer_with_ingest_floor(&parsed[2..], &raws, floor);
+
+    let (_served, status) = collect_range(&streamer, parsed[3].height, parsed[0].height).await;
+
+    assert_eq!(status.map(|status| status.code()), Some(Code::OutOfRange));
+}
+
+#[tokio::test]
+async fn an_empty_cache_falls_back_to_the_configured_ingest_floor() {
+    // Cold start: nothing is cached yet, so the floor is the one the ingestor was given.
+    let (raws, parsed) = testdata_chain();
+    let (_dir, streamer, _node) = streamer_with_ingest_floor(&[], &raws, parsed[2].height);
+
+    let (_served, status) = collect_range(&streamer, parsed[0].height, parsed[3].height).await;
+
+    assert_eq!(status.map(|status| status.code()), Some(Code::OutOfRange));
+}
+
+#[tokio::test]
+async fn without_an_ingest_floor_a_range_still_falls_back_to_the_node() {
+    // Darkside and `--nocache` keep an empty cache on purpose: there the node is the source, not
+    // the fallback.
+    let (raws, parsed) = testdata_chain();
+    let (_dir, streamer, _repair) = streamer_with_cache_and_node(&parsed[2..], &raws);
+
+    let (served, status) = collect_range(&streamer, parsed[0].height, parsed[3].height).await;
+
+    assert_eq!(
+        (
+            served.iter().map(|block| block.height).collect::<Vec<_>>(),
+            status.is_none()
+        ),
+        (
+            parsed.iter().map(|block| block.height).collect::<Vec<_>>(),
+            true
+        )
+    );
+}
+
+#[tokio::test]
+async fn get_block_range_nullifiers_below_the_ingest_floor_is_out_of_range() {
+    let (raws, parsed) = testdata_chain();
+    let floor = parsed[2].height;
+    let (_dir, streamer, _node) = streamer_with_ingest_floor(&parsed[2..], &raws, floor);
+
+    let status = streamer
+        .get_block_range_nullifiers(Request::new(nullifiers_range(
+            parsed[0].height,
+            parsed[3].height,
+            vec![],
+        )))
+        .await
+        .err()
+        .map(|status| status.code());
+
+    assert_eq!(status, Some(Code::OutOfRange));
+}
+
+#[tokio::test]
+async fn the_cache_base_wins_over_a_lower_configured_floor() {
+    // An operator restarting with a `--start-height` under what the cache already covers: the
+    // ingestor never backfills those heights, so the base is what this instance serves from.
+    let (raws, parsed) = testdata_chain();
+    let (_dir, streamer, _node) = streamer_with_ingest_floor(&parsed[2..], &raws, parsed[0].height);
+
+    let (_served, status) = collect_range(&streamer, parsed[0].height, parsed[3].height).await;
+
+    assert_eq!(status.map(|status| status.code()), Some(Code::OutOfRange));
 }

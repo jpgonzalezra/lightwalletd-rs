@@ -296,7 +296,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             .with_ping_enabled(config.ping_enable)
             .with_donation_address(config.donation_address.clone());
         if !config.nocache {
-            streamer = streamer.with_repair_signal(repair);
+            streamer = streamer
+                .with_repair_signal(repair)
+                .with_ingest_floor(start_height);
         }
         server
             .add_service(CompactTxStreamerServer::new(streamer))
