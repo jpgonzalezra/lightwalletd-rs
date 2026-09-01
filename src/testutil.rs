@@ -149,6 +149,9 @@ pub struct FakeNode {
     /// Per-height `get_block_verbose` responses; used when non-empty (a missing height then yields
     /// an RPC error instead of falling back to `block_verbose`). Lets a test serve a whole chain.
     pub verbose_by_height: HashMap<u64, GetBlockVerbose>,
+    /// How many times `get_block_verbose` was called, so a test can assert what a request cost the
+    /// node, not just what it returned to the client.
+    pub block_verbose_calls: Mutex<u32>,
     /// Per-hash `get_block_raw` responses; used when non-empty, analogous to `verbose_by_height`.
     pub raw_by_hash: HashMap<String, Vec<u8>>,
     pub raw_transaction: Option<GetRawTransaction>,
@@ -202,6 +205,7 @@ impl NodeRpc for FakeNode {
     }
 
     async fn get_block_verbose(&self, height: u64) -> Result<GetBlockVerbose, NodeError> {
+        *self.block_verbose_calls.lock().unwrap() += 1;
         if let Some((code, message)) = self.block_verbose_err.clone() {
             return Err(NodeError::Rpc { code, message });
         }
