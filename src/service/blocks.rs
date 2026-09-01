@@ -5,9 +5,10 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use async_stream::try_stream;
+use prost::Message;
 use tonic::{Request, Response, Status};
 
-use crate::cache::Cache;
+use crate::cache::{Cache, CacheError};
 use crate::node::NodeRpc;
 use crate::proto::{BlockId, BlockRange, BoxStream, CompactBlock};
 use crate::repair::RepairSignal;
@@ -149,12 +150,21 @@ pub(super) async fn get_block_range_nullifiers(
     Ok(Response::new(stream))
 }
 
-/// Number of consecutive heights read from the cache under one read transaction. Bounds both how
-/// much of a range is held in memory at once and how long a transaction stays open: an open read
-/// transaction keeps `redb` from reclaiming superseded pages, and a stream advances at the client's
-/// pace, so spanning a whole 10,000-block range in one transaction would let a slow wallet pin the
-/// cache file's growth.
+/// Most consecutive heights read from the cache under one read transaction. Caps how long that
+/// transaction stays open: while one is held `redb` cannot reclaim superseded pages, and a stream
+/// advances at the client's pace, so covering a whole 10,000-block range in one transaction would
+/// let a slow wallet pin the cache file's growth.
 const CACHE_READ_CHUNK: u64 = 64;
+
+/// Most stored block bytes one cache read holds, which cuts the chunk short of
+/// [`CACHE_READ_CHUNK`] heights when the blocks are large. A height count on its own bounds nothing
+/// an operator can size: the client picks the heights, so the client sets what a chunk costs, and
+/// the sum across concurrent streams is what a host has to survive (ADR 0040).
+///
+/// 512 KiB clears the largest compact block on record (425,046 bytes, at Sapling activation), so a
+/// chunk holds at least one block on size alone, and it leaves a full 64-height chunk intact in every
+/// measured era but the sandblasting one, where 64 blocks come to 5.8 MB.
+pub(super) const CACHE_READ_CHUNK_BYTES: usize = 512 * 1024;
 
 /// Where a block in the stream came from. A discontinuity between two node-served blocks is the node
 /// reorging between two fetches, which the cache had no part in and cannot repair.
@@ -236,22 +246,17 @@ impl ChainLink {
     }
 }
 
-/// The sub-ranges of `low..=high` to read from the cache, in the order they are served.
-fn cache_chunks(low: u64, high: u64, descending: bool) -> Vec<RangeInclusive<u64>> {
-    let mut chunks = Vec::new();
-    let mut chunk_low = low;
-    loop {
-        let chunk_high = chunk_low.saturating_add(CACHE_READ_CHUNK - 1).min(high);
-        chunks.push(chunk_low..=chunk_high);
-        if chunk_high >= high {
-            break;
-        }
-        chunk_low = chunk_high + 1;
-    }
+/// The next window of `low..=high` to ask the cache for, starting at `cursor` and running up to
+/// [`CACHE_READ_CHUNK`] heights in the direction the stream is moving.
+///
+/// How much of it comes back is the cache's call: a window too heavy for the byte budget is answered
+/// in part, and the caller resumes from where it stopped.
+fn chunk_from(cursor: u64, low: u64, high: u64, descending: bool) -> RangeInclusive<u64> {
     if descending {
-        chunks.reverse();
+        cursor.saturating_sub(CACHE_READ_CHUNK - 1).max(low)..=cursor
+    } else {
+        cursor..=cursor.saturating_add(CACHE_READ_CHUNK - 1).min(high)
     }
-    chunks
 }
 
 /// Stream the blocks in the range (ascending if `start <= end`, otherwise descending), reading them
@@ -279,18 +284,30 @@ fn block_range_stream(
     // node-served range would leave as one undersized DATA frame per block (ADR 0037).
     Box::pin(framing::coalesce(try_stream! {
         let mut link: Option<ChainLink> = None;
-        for chunk in cache_chunks(low, high, descending) {
+        let mut cursor = if descending { high } else { low };
+        loop {
             // One transaction per chunk, released before the node is awaited: the fetch below is the
             // slow part, and holding a read transaction across it would pin the cache for no gain.
-            let mut cached = cache.get_range(chunk.clone())?;
+            let chunk = cache.read_chunk(
+                chunk_from(cursor, low, high, descending),
+                descending,
+                CACHE_READ_CHUNK_BYTES,
+            )?;
+            let covered = chunk.covered;
+            let mut cached = chunk.blocks;
             let heights: Vec<u64> = if descending {
-                chunk.rev().collect()
+                covered.clone().rev().collect()
             } else {
-                chunk.collect()
+                covered.clone().collect()
             };
             for height in heights {
+                // Decoded one at a time as it is served: across the yield the chunk holds the stored
+                // bytes the budget counted, not their larger decoded form.
                 let (block, source) = match cached.remove(&height) {
-                    Some(block) => (block, BlockSource::Cache),
+                    Some(bytes) => (
+                        CompactBlock::decode(bytes.as_slice()).map_err(CacheError::from)?,
+                        BlockSource::Cache,
+                    ),
                     None => (
                         fetch::compact_block(node.as_ref(), height)
                             .await
@@ -303,6 +320,17 @@ fn block_range_stream(
                 }
                 link = Some(ChainLink::after(height, &block, descending, source));
                 yield transform(block);
+            }
+            if descending {
+                if *covered.start() <= low {
+                    break;
+                }
+                cursor = covered.start() - 1;
+            } else {
+                if *covered.end() >= high {
+                    break;
+                }
+                cursor = covered.end() + 1;
             }
         }
     }))
@@ -387,35 +415,34 @@ mod tests {
     }
 
     #[test]
-    fn cache_chunks_covers_a_short_range_in_one_chunk() {
-        assert_eq!(super::cache_chunks(10, 20, false), vec![10..=20]);
+    fn chunk_from_covers_a_short_range_in_one_window() {
+        assert_eq!(super::chunk_from(10, 10, 20, false), 10..=20);
     }
 
     #[test]
-    fn cache_chunks_splits_a_long_range_at_the_chunk_size() {
+    fn chunk_from_stops_a_long_range_at_the_chunk_size() {
         assert_eq!(
-            super::cache_chunks(1, 2 * super::CACHE_READ_CHUNK, false),
-            vec![
-                1..=super::CACHE_READ_CHUNK,
-                (super::CACHE_READ_CHUNK + 1)..=(2 * super::CACHE_READ_CHUNK)
-            ]
+            super::chunk_from(1, 1, 2 * super::CACHE_READ_CHUNK, false),
+            1..=super::CACHE_READ_CHUNK
         );
     }
 
     #[test]
-    fn cache_chunks_are_ordered_high_to_low_when_descending() {
+    fn chunk_from_runs_downward_from_the_cursor_when_descending() {
         assert_eq!(
-            super::cache_chunks(1, 2 * super::CACHE_READ_CHUNK, true),
-            vec![
-                (super::CACHE_READ_CHUNK + 1)..=(2 * super::CACHE_READ_CHUNK),
-                1..=super::CACHE_READ_CHUNK
-            ]
+            super::chunk_from(
+                2 * super::CACHE_READ_CHUNK,
+                1,
+                2 * super::CACHE_READ_CHUNK,
+                true
+            ),
+            (super::CACHE_READ_CHUNK + 1)..=(2 * super::CACHE_READ_CHUNK)
         );
     }
 
     #[test]
-    fn cache_chunks_covers_a_single_height() {
-        assert_eq!(super::cache_chunks(7, 7, false), vec![7..=7]);
+    fn chunk_from_covers_a_single_height() {
+        assert_eq!(super::chunk_from(7, 7, 7, false), 7..=7);
     }
 
     #[test]
