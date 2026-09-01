@@ -7,7 +7,7 @@ use tonic::Status;
 use crate::proto::{CompactBlock, CompactTx, PoolType};
 
 /// Which value pools to keep when pruning.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pools {
     pub transparent: bool,
     pub sapling: bool,
@@ -19,19 +19,58 @@ impl Pools {
     /// Resolve a gRPC `pool_types` list into the pools to keep. An empty list means the legacy
     /// default: shielded (Sapling + Orchard + Ironwood) only, with transparent inputs/outputs
     /// stripped.
+    ///
+    /// Resolve once per request and pass the result down: [`Pools`] is `Copy`, and the list itself
+    /// is client-supplied, so re-deriving it per block would put the client in charge of how often
+    /// the server walks it.
     pub fn from_pool_types(pool_types: &[i32]) -> Self {
+        Self::resolve(
+            pool_types,
+            pool_types.contains(&(PoolType::Transparent as i32)),
+            pool_types.is_empty(),
+        )
+    }
+
+    /// Resolve as [`Pools::from_pool_types`] would for the same request with every `Transparent`
+    /// entry removed. `GetBlockRangeNullifiers` never returns transparent data (a wallet that
+    /// wants it calls `GetBlockRange`), so it drops a transparent entry instead of honoring it,
+    /// the same removal Go makes in `frontend/service.go` before delegating to the pool-filtering
+    /// path `GetBlockRange` uses. A request naming transparent alone then has nothing left to
+    /// honor, and falls back to the shielded default exactly as an empty request does.
+    pub fn from_pool_types_dropping_transparent(pool_types: &[i32]) -> Self {
+        let names_only_transparent = pool_types
+            .iter()
+            .all(|&pool_type| pool_type == PoolType::Transparent as i32);
+        Self::resolve(pool_types, false, names_only_transparent)
+    }
+
+    fn resolve(pool_types: &[i32], transparent: bool, defaults_to_shielded: bool) -> Self {
         Self {
-            transparent: pool_types.contains(&(PoolType::Transparent as i32)),
-            sapling: pool_types.is_empty() || pool_types.contains(&(PoolType::Sapling as i32)),
-            orchard: pool_types.is_empty() || pool_types.contains(&(PoolType::Orchard as i32)),
-            ironwood: pool_types.is_empty() || pool_types.contains(&(PoolType::Ironwood as i32)),
+            transparent,
+            sapling: defaults_to_shielded || pool_types.contains(&(PoolType::Sapling as i32)),
+            orchard: defaults_to_shielded || pool_types.contains(&(PoolType::Orchard as i32)),
+            ironwood: defaults_to_shielded || pool_types.contains(&(PoolType::Ironwood as i32)),
         }
     }
 }
 
-/// Reject a `pool_types` list that contains `PoolType::Invalid`. Shared by the
-/// block-range and mempool methods so they validate the same contract identically.
+/// Most entries a `pool_types` filter may carry. Four pools exist, so anything past four is
+/// already redundant, but the cap is not four: `PoolType` is an open proto3 enum, so a client
+/// built against a newer protocol may name a pool this build has never heard of, and nothing
+/// forbids duplicates. Four times the current set covers both and survives a new pool without
+/// anyone revisiting the number. Any small constant would do. Without one the ceiling is the
+/// 4 MiB gRPC decode limit, about 4.19 million single-byte entries.
+pub const MAX_POOL_TYPES: usize = 16;
+
+/// Reject a `pool_types` list that is longer than [`MAX_POOL_TYPES`] or contains
+/// `PoolType::Invalid`. Shared by the block-range and mempool methods so they validate the same
+/// contract identically.
 pub fn validate_pool_types(pool_types: &[i32]) -> Result<(), Status> {
+    if pool_types.len() > MAX_POOL_TYPES {
+        return Err(Status::resource_exhausted(format!(
+            "more than {MAX_POOL_TYPES} pool types requested"
+        )));
+    }
     if pool_types.contains(&(PoolType::Invalid as i32)) {
         return Err(Status::invalid_argument("invalid pool type requested"));
     }
@@ -41,8 +80,7 @@ pub fn validate_pool_types(pool_types: &[i32]) -> Result<(), Status> {
 /// Prune every transaction in a compact block to the requested value pools, then drop any transaction
 /// left with no components. Empty *blocks* are kept (a wallet still needs every height); only the empty
 /// transactions within them are removed.
-pub fn filter_block_to_pools(mut block: CompactBlock, pool_types: &[i32]) -> CompactBlock {
-    let pools = Pools::from_pool_types(pool_types);
+pub fn filter_block_to_pools(mut block: CompactBlock, pools: Pools) -> CompactBlock {
     for tx in &mut block.vtx {
         filter_tx_to_pools(tx, pools);
     }
@@ -75,18 +113,6 @@ pub fn filter_tx_to_pools(tx: &mut CompactTx, pools: Pools) {
     }
 }
 
-/// Strip `PoolType::Transparent` from a `pool_types` filter. `GetBlockRangeNullifiers` never returns
-/// transparent data (a wallet wanting that uses `GetBlockRange` instead), so a transparent request is
-/// dropped rather than honored, matching Go's explicit removal (`frontend/service.go`
-/// `GetBlockRangeNullifiers`) before it delegates to the same pool-filtering path as `GetBlockRange`.
-fn drop_transparent(pool_types: &[i32]) -> Vec<i32> {
-    pool_types
-        .iter()
-        .copied()
-        .filter(|&pool_type| pool_type != PoolType::Transparent as i32)
-        .collect()
-}
-
 /// `GetBlockRangeNullifiers`'s transform: prune to the requested (shielded) value pools exactly as
 /// `GetBlockRange` does (including dropping any transaction the pool filter leaves with no
 /// components), then reduce what survives to nullifiers only.
@@ -100,12 +126,11 @@ fn drop_transparent(pool_types: &[i32]) -> Vec<i32> {
 /// transaction can (as in Go) end up in the response with only its `index`/`txid`/`fee` set if the
 /// pool filter kept it for a component (e.g. a Sapling output) that the nullifier reduction then
 /// clears. This is intentional parity with Go, not an oversight.
-pub fn filter_block_to_pools_nullifiers_only(
-    block: CompactBlock,
-    pool_types: &[i32],
-) -> CompactBlock {
-    let pool_types = drop_transparent(pool_types);
-    nullifiers_only(filter_block_to_pools(block, &pool_types))
+///
+/// `pools` is the request's filter with transparent already dropped, as
+/// [`Pools::from_pool_types_dropping_transparent`] builds it.
+pub fn filter_block_to_pools_nullifiers_only(block: CompactBlock, pools: Pools) -> CompactBlock {
+    nullifiers_only(filter_block_to_pools(block, pools))
 }
 
 /// Reduce a compact block to shielded nullifiers only: Sapling spend nullifiers and the nullifier of
@@ -132,11 +157,21 @@ pub fn nullifiers_only(mut block: CompactBlock) -> CompactBlock {
 
 #[cfg(test)]
 mod tests {
+    use tonic::Code;
+
     use super::*;
     use crate::proto::{
         ChainMetadata, CompactOrchardAction, CompactSaplingOutput, CompactSaplingSpend,
         CompactTxIn, TxOut,
     };
+
+    fn pools(pool_types: &[i32]) -> Pools {
+        Pools::from_pool_types(pool_types)
+    }
+
+    fn nullifier_pools(pool_types: &[i32]) -> Pools {
+        Pools::from_pool_types_dropping_transparent(pool_types)
+    }
 
     fn block_with_every_pool() -> CompactBlock {
         let tx = CompactTx {
@@ -156,7 +191,7 @@ mod tests {
 
     #[test]
     fn empty_pool_types_keeps_shielded_and_strips_transparent() {
-        let block = filter_block_to_pools(block_with_every_pool(), &[]);
+        let block = filter_block_to_pools(block_with_every_pool(), pools(&[]));
         let tx = &block.vtx[0];
         assert!(tx.vin.is_empty() && tx.vout.is_empty());
         assert!(!tx.outputs.is_empty() && !tx.actions.is_empty() && !tx.spends.is_empty());
@@ -165,7 +200,10 @@ mod tests {
 
     #[test]
     fn transparent_only_strips_shielded() {
-        let block = filter_block_to_pools(block_with_every_pool(), &[PoolType::Transparent as i32]);
+        let block = filter_block_to_pools(
+            block_with_every_pool(),
+            pools(&[PoolType::Transparent as i32]),
+        );
         let tx = &block.vtx[0];
         assert!(!tx.vin.is_empty() && !tx.vout.is_empty());
         assert!(tx.spends.is_empty() && tx.outputs.is_empty() && tx.actions.is_empty());
@@ -174,7 +212,8 @@ mod tests {
 
     #[test]
     fn ironwood_only_strips_every_other_pool() {
-        let block = filter_block_to_pools(block_with_every_pool(), &[PoolType::Ironwood as i32]);
+        let block =
+            filter_block_to_pools(block_with_every_pool(), pools(&[PoolType::Ironwood as i32]));
         let tx = &block.vtx[0];
         assert!(!tx.ironwood_actions.is_empty());
         assert!(tx.spends.is_empty() && tx.outputs.is_empty() && tx.actions.is_empty());
@@ -193,7 +232,7 @@ mod tests {
             ..Default::default()
         };
 
-        let filtered = filter_block_to_pools(block, &[PoolType::Ironwood as i32]);
+        let filtered = filter_block_to_pools(block, pools(&[PoolType::Ironwood as i32]));
         assert_eq!(filtered.vtx.len(), 1);
         assert!(!filtered.vtx[0].ironwood_actions.is_empty());
     }
@@ -214,7 +253,7 @@ mod tests {
         };
 
         // Keep sapling only: the transparent-only tx is left empty and dropped.
-        let filtered = filter_block_to_pools(block, &[PoolType::Sapling as i32]);
+        let filtered = filter_block_to_pools(block, pools(&[PoolType::Sapling as i32]));
         assert_eq!(filtered.vtx.len(), 1);
         assert!(!filtered.vtx[0].spends.is_empty());
     }
@@ -232,7 +271,7 @@ mod tests {
         };
 
         // Filtering to sapling-only empties the sole tx; the block itself is still returned.
-        let filtered = filter_block_to_pools(block, &[PoolType::Sapling as i32]);
+        let filtered = filter_block_to_pools(block, pools(&[PoolType::Sapling as i32]));
         assert!(filtered.vtx.is_empty());
         assert_eq!(filtered.height, 42);
     }
@@ -291,15 +330,17 @@ mod tests {
             vtx: vec![transparent_only],
             ..Default::default()
         };
-        let filtered =
-            filter_block_to_pools_nullifiers_only(block, &[PoolType::Transparent as i32]);
+        let filtered = filter_block_to_pools_nullifiers_only(
+            block,
+            nullifier_pools(&[PoolType::Transparent as i32]),
+        );
         assert!(filtered.vtx.is_empty());
     }
 
     #[test]
     fn range_nullifiers_empty_pool_types_keeps_shielded_nullifiers_only() {
         let block = block_with_every_pool();
-        let filtered = filter_block_to_pools_nullifiers_only(block, &[]);
+        let filtered = filter_block_to_pools_nullifiers_only(block, nullifier_pools(&[]));
         assert_eq!(filtered.vtx.len(), 1);
         let tx = &filtered.vtx[0];
         assert!(!tx.spends.is_empty());
@@ -311,7 +352,10 @@ mod tests {
     #[test]
     fn range_nullifiers_sapling_only_excludes_orchard_and_ironwood() {
         let block = block_with_every_pool();
-        let filtered = filter_block_to_pools_nullifiers_only(block, &[PoolType::Sapling as i32]);
+        let filtered = filter_block_to_pools_nullifiers_only(
+            block,
+            nullifier_pools(&[PoolType::Sapling as i32]),
+        );
         assert_eq!(filtered.vtx.len(), 1);
         let tx = &filtered.vtx[0];
         assert!(!tx.spends.is_empty());
@@ -321,7 +365,10 @@ mod tests {
     #[test]
     fn range_nullifiers_orchard_only_excludes_sapling_and_ironwood() {
         let block = block_with_every_pool();
-        let filtered = filter_block_to_pools_nullifiers_only(block, &[PoolType::Orchard as i32]);
+        let filtered = filter_block_to_pools_nullifiers_only(
+            block,
+            nullifier_pools(&[PoolType::Orchard as i32]),
+        );
         assert_eq!(filtered.vtx.len(), 1);
         let tx = &filtered.vtx[0];
         assert!(!tx.actions.is_empty());
@@ -331,7 +378,10 @@ mod tests {
     #[test]
     fn range_nullifiers_ironwood_only_excludes_sapling_and_orchard() {
         let block = block_with_every_pool();
-        let filtered = filter_block_to_pools_nullifiers_only(block, &[PoolType::Ironwood as i32]);
+        let filtered = filter_block_to_pools_nullifiers_only(
+            block,
+            nullifier_pools(&[PoolType::Ironwood as i32]),
+        );
         assert_eq!(filtered.vtx.len(), 1);
         let tx = &filtered.vtx[0];
         assert!(!tx.ironwood_actions.is_empty());
@@ -359,7 +409,10 @@ mod tests {
         };
 
         // Request Sapling only: the transparent-only tx and the orchard-only tx both end up empty.
-        let filtered = filter_block_to_pools_nullifiers_only(block, &[PoolType::Sapling as i32]);
+        let filtered = filter_block_to_pools_nullifiers_only(
+            block,
+            nullifier_pools(&[PoolType::Sapling as i32]),
+        );
         assert!(filtered.vtx.is_empty());
     }
 
@@ -381,7 +434,10 @@ mod tests {
             ..Default::default()
         };
 
-        let filtered = filter_block_to_pools_nullifiers_only(block, &[PoolType::Sapling as i32]);
+        let filtered = filter_block_to_pools_nullifiers_only(
+            block,
+            nullifier_pools(&[PoolType::Sapling as i32]),
+        );
         assert_eq!(filtered.vtx.len(), 1);
         let tx = &filtered.vtx[0];
         assert!(tx.spends.is_empty() && tx.outputs.is_empty());
@@ -407,8 +463,81 @@ mod tests {
             ..Default::default()
         };
 
-        let filtered = filter_block_to_pools_nullifiers_only(block, &[PoolType::Sapling as i32]);
+        let filtered = filter_block_to_pools_nullifiers_only(
+            block,
+            nullifier_pools(&[PoolType::Sapling as i32]),
+        );
         assert_eq!(filtered.vtx.len(), 1);
         assert_eq!(filtered.vtx[0].index, 1);
+    }
+
+    #[test]
+    fn pool_types_up_to_the_limit_are_accepted() {
+        let pool_types = vec![PoolType::Sapling as i32; MAX_POOL_TYPES];
+        assert!(validate_pool_types(&pool_types).is_ok());
+    }
+
+    #[test]
+    fn pool_types_past_the_limit_are_rejected() {
+        let pool_types = vec![PoolType::Sapling as i32; MAX_POOL_TYPES + 1];
+        let code = validate_pool_types(&pool_types)
+            .err()
+            .map(|status| status.code());
+        assert_eq!(code, Some(Code::ResourceExhausted));
+    }
+
+    #[test]
+    fn unrecognized_pool_types_pass_validation_and_keep_nothing() {
+        // An open proto3 enum admits values this build does not know. They are not the `Invalid`
+        // sentinel, so they are accepted, and they name no pool, so nothing survives the filter.
+        let unrecognized = 7;
+        assert!(validate_pool_types(&[unrecognized]).is_ok());
+        let filtered = filter_block_to_pools(block_with_every_pool(), pools(&[unrecognized]));
+        assert!(filtered.vtx.is_empty());
+    }
+
+    #[test]
+    fn dropping_transparent_resolves_as_if_the_entry_had_been_removed() {
+        let transparent = PoolType::Transparent as i32;
+        let sapling = PoolType::Sapling as i32;
+        let unrecognized = 7;
+        let every_shielded = Pools {
+            transparent: false,
+            sapling: true,
+            orchard: true,
+            ironwood: true,
+        };
+        let nothing = Pools {
+            transparent: false,
+            sapling: false,
+            orchard: false,
+            ironwood: false,
+        };
+
+        // Nothing left to name falls back to the shielded default, which is what an empty request
+        // gets; a list that named something else does not fall back.
+        assert_eq!(nullifier_pools(&[]), every_shielded);
+        assert_eq!(nullifier_pools(&[transparent]), every_shielded);
+        assert_eq!(nullifier_pools(&[transparent, transparent]), every_shielded);
+        assert_eq!(nullifier_pools(&[unrecognized]), nothing);
+        assert_eq!(
+            nullifier_pools(&[transparent, sapling]),
+            Pools {
+                sapling: true,
+                ..nothing
+            }
+        );
+    }
+
+    #[test]
+    fn range_nullifiers_transparent_only_falls_back_to_the_shielded_default() {
+        // Dropping transparent from a request that named nothing else leaves an empty filter, which
+        // is the legacy shielded default: the wallet still gets its shielded nullifiers.
+        let filtered = filter_block_to_pools_nullifiers_only(
+            block_with_every_pool(),
+            nullifier_pools(&[PoolType::Transparent as i32]),
+        );
+        let tx = &filtered.vtx[0];
+        assert!(!tx.spends.is_empty() && !tx.actions.is_empty() && !tx.ironwood_actions.is_empty());
     }
 }

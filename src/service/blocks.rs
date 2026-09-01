@@ -99,8 +99,8 @@ pub(super) async fn get_block_range(
     request: Request<BlockRange>,
 ) -> Result<Response<BoxStream<CompactBlock>>, Status> {
     let range = request.into_inner();
-    let pool_types = range.pool_types;
-    filter::validate_pool_types(&pool_types)?;
+    filter::validate_pool_types(&range.pool_types)?;
+    let pools = filter::Pools::from_pool_types(&range.pool_types);
     let (Some(start), Some(end)) = (range.start, range.end) else {
         return Err(Status::invalid_argument(
             "get_block_range: must specify start and end heights",
@@ -115,7 +115,7 @@ pub(super) async fn get_block_range(
         streamer.repair.clone(),
         start,
         end,
-        move |block| filter::filter_block_to_pools(block, &pool_types),
+        move |block| filter::filter_block_to_pools(block, pools),
     );
     Ok(Response::new(stream))
 }
@@ -126,11 +126,11 @@ pub(super) async fn get_block_range_nullifiers(
 ) -> Result<Response<BoxStream<CompactBlock>>, Status> {
     let range = request.into_inner();
     // An invalid pool type is rejected up front, for parity with `get_block_range`. The requested
-    // pools are otherwise honored (transparent is always dropped; see
-    // `filter::filter_block_to_pools_nullifiers_only`): this is not the legacy "ignore pool_types
-    // entirely" behavior.
+    // pools are otherwise honored, with transparent always dropped (see
+    // `filter::Pools::from_pool_types_dropping_transparent`): this is not the legacy "ignore
+    // pool_types entirely" behavior.
     filter::validate_pool_types(&range.pool_types)?;
-    let pool_types = range.pool_types;
+    let pools = filter::Pools::from_pool_types_dropping_transparent(&range.pool_types);
     let (Some(start), Some(end)) = (range.start, range.end) else {
         return Err(Status::invalid_argument(
             "get_block_range_nullifiers: must specify start and end heights",
@@ -145,7 +145,7 @@ pub(super) async fn get_block_range_nullifiers(
         streamer.repair.clone(),
         start,
         end,
-        move |block| filter::filter_block_to_pools_nullifiers_only(block, &pool_types),
+        move |block| filter::filter_block_to_pools_nullifiers_only(block, pools),
     );
     Ok(Response::new(stream))
 }
@@ -342,6 +342,7 @@ mod tests {
 
     use tonic::{Code, Request};
 
+    use crate::filter::MAX_POOL_TYPES;
     use crate::proto::compact_tx_streamer_server::CompactTxStreamer;
     use crate::proto::{BlockId, BlockRange, PoolType};
     use crate::testutil::{FakeNode, temp_cache};
@@ -459,15 +460,8 @@ mod tests {
     async fn get_block_range_rejects_invalid_pool_type() {
         let (_dir, streamer) = streamer();
         let request = BlockRange {
-            start: Some(BlockId {
-                height: 1,
-                hash: vec![],
-            }),
-            end: Some(BlockId {
-                height: 10,
-                hash: vec![],
-            }),
             pool_types: vec![PoolType::Invalid as i32],
+            ..range(1, 10)
         };
         let status = streamer
             .get_block_range(Request::new(request))
@@ -478,18 +472,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_block_range_rejects_too_many_pool_types() {
+        let (_dir, streamer) = streamer();
+        let request = BlockRange {
+            pool_types: vec![PoolType::Sapling as i32; MAX_POOL_TYPES + 1],
+            ..range(1, 10)
+        };
+        let status = streamer
+            .get_block_range(Request::new(request))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status.code(), Code::ResourceExhausted);
+    }
+
+    #[tokio::test]
     async fn get_block_range_nullifiers_rejects_invalid_pool_type() {
         let (_dir, streamer) = streamer();
         let request = BlockRange {
-            start: Some(BlockId {
-                height: 1,
-                hash: vec![],
-            }),
-            end: Some(BlockId {
-                height: 10,
-                hash: vec![],
-            }),
             pool_types: vec![PoolType::Invalid as i32],
+            ..range(1, 10)
         };
         let status = streamer
             .get_block_range_nullifiers(Request::new(request))
@@ -497,5 +499,20 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_block_range_nullifiers_rejects_too_many_pool_types() {
+        let (_dir, streamer) = streamer();
+        let request = BlockRange {
+            pool_types: vec![PoolType::Sapling as i32; MAX_POOL_TYPES + 1],
+            ..range(1, 10)
+        };
+        let status = streamer
+            .get_block_range_nullifiers(Request::new(request))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(status.code(), Code::ResourceExhausted);
     }
 }

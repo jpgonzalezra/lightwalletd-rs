@@ -143,8 +143,9 @@ stream.
   `InvalidArgument`.
 - `SendTransaction` rejects empty transaction data.
 - `GetMempoolTx`, `GetBlockRange`, and `GetBlockRangeNullifiers` reject an invalid pool type
-  (`PoolType::Invalid`) in the requested pools, through the shared `filter::validate_pool_types`;
-  `GetMempoolTx` additionally rejects an exclude-suffix longer than 32 bytes.
+  (`PoolType::Invalid`) in the requested pools, and a list longer than `MAX_POOL_TYPES`, through
+  the shared `filter::validate_pool_types`; `GetMempoolTx` additionally rejects an exclude-suffix
+  longer than 32 bytes.
 - The transparent-address methods validate the address shape locally (a `t` followed by 34
   alphanumeric characters) before reaching the node, and `GetTaddressTransactions`/`GetTaddressTxids`
   additionally require a block `range` with a `start` height.
@@ -209,6 +210,7 @@ Wallet-facing contract and hardening:
 - [0038](decisions/0038-bound-the-unspent-outputs-one-request-returns.md): `GetAddressUtxos` and its streaming variant return at most 100,000 unspent outputs and refuse a larger result rather than truncating it, so what one held response can pin no longer depends on how many outputs the named addresses hold. The cap clears what a single block can add to the address index, so no height is ever too large to read in one page.
 - [0027](decisions/0027-block-range-continuity.md): consecutive blocks in a served range must connect by hash, whichever source each came from; a discontinuity ends the stream with `Aborted` and reports the height so the ingestor truncates and re-ingests it.
 - [0039](decisions/0039-refuse-block-ranges-below-the-ingest-floor.md): a block range reaching below the ingest floor is refused with `OutOfRange` before the stream opens, because nothing below that floor is ever cached and the range would otherwise be answered at two node round-trips per block, up to 10,000 blocks at a time.
+- [0041](decisions/0041-cap-the-pool-type-filter.md): a `poolTypes` filter carries at most 16 entries and is resolved to four bools once per request, not once per block, so what the filter costs no longer scales with a list the client picks. A stream then holds four bools instead of whatever the client uploaded.
 - [0037](decisions/0037-batch-streamed-messages-into-full-frames.md): streamed messages are held until they add up to 4 KiB before being yielded, so a range served block by block from the node leaves as full HTTP/2 DATA frames instead of one undersized frame per block, which peers close the connection over.
 - [0030](decisions/0030-subtree-index-range.md): subtree indexes are bounded to the node's `u16` range before any round-trip: an out-of-range start index is `InvalidArgument`, an out-of-range limit means no limit.
 - [0031](decisions/0031-lightwallet-protocol-version.md): `GetLightdInfo` reports the served lightwallet-protocol version as a constant, independent of the crate version and the build stamps, moving only once the server serves everything the named version specifies.
@@ -237,12 +239,18 @@ the integration tests) sets:
   `--keepalive-timeout-secs` (default 20 s). A quiet connection is pinged and dropped if it stops
   answering, so a dead peer cannot pin a long-lived stream indefinitely.
 
-Five per-request limits bound the work a single request can accumulate or trigger:
+Six per-request limits bound the work a single request can accumulate or trigger:
 
 - `GetTaddressBalanceStream` drains a client-streamed list of addresses into a `Vec`; it stops at
   `MAX_STREAMED_ADDRESSES` (10,000) and rejects a longer stream with `ResourceExhausted`.
 - `GetBlockRange`/`GetBlockRangeNullifiers` cap the requested span at `MAX_BLOCK_RANGE` (10,000
   blocks); see [Input validation](#input-validation).
+- `GetBlockRange`/`GetBlockRangeNullifiers` cap the `poolTypes` filter at `MAX_POOL_TYPES` (16) and
+  reject a longer list with `ResourceExhausted`
+  ([0041](decisions/0041-cap-the-pool-type-filter.md)). `GetMempoolTx` goes through the same shared
+  validator, so it gets the cap too. The span cap does not bound this one: the filter used to be
+  re-resolved per yielded block, so a longer list cost more on every block of the range. It is now
+  resolved once per request, into four bools.
 - `GetBlockRange`/`GetBlockRangeNullifiers` also refuse a range reaching below the ingest floor,
   with `OutOfRange` before the stream opens
   ([0039](decisions/0039-refuse-block-ranges-below-the-ingest-floor.md)). The span cap bounds the
@@ -290,9 +298,9 @@ rather than queued, so a slow client cannot hold a slot indefinitely.
 The three server-builder limits are configurable at startup via `--max-concurrent-streams`,
 `--keepalive-interval-secs`, and `--keepalive-timeout-secs`, defaulting to the values above
 (256 / 60 s / 20 s), as are the two bulkhead pools via `--client-node-concurrency` and
-`--client-scan-concurrency`. The four per-request caps (`MAX_BLOCK_RANGE`, `MAX_STREAMED_ADDRESSES`,
-`MAX_TADDRESS_TXIDS`, `MAX_ADDRESS_UTXOS`) remain module-local, with generous defaults chosen so
-legitimate wallets are unaffected.
+`--client-scan-concurrency`. The five per-request caps (`MAX_BLOCK_RANGE`, `MAX_POOL_TYPES`,
+`MAX_STREAMED_ADDRESSES`, `MAX_TADDRESS_TXIDS`, `MAX_ADDRESS_UTXOS`) remain module-local, with
+generous defaults chosen so legitimate wallets are unaffected.
 
 ## Running
 

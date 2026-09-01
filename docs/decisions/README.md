@@ -47,3 +47,4 @@ choice stays discoverable after the fact. The living overview is
 | [0038](0038-bound-the-unspent-outputs-one-request-returns.md) | Bound the unspent outputs one address request returns |
 | [0039](0039-refuse-block-ranges-below-the-ingest-floor.md) | Refuse block ranges below the ingest floor |
 | [0040](0040-bound-the-cache-read-chunk-by-bytes.md) | Bound the cache read chunk by bytes, not only by height count |
+| [0041](0041-cap-the-pool-type-filter.md) | Cap the pool-type filter and resolve it once per request |
