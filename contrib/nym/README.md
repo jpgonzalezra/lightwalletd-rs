@@ -95,6 +95,34 @@ budgets are. Comparing them means alternating blocks, which
 [the measurement](https://github.com/jpgonzalezra/lwd-mixnet-proxy/blob/main/docs/measurements/2026-08-27-surb-reserve-costs-nothing.md)
 explains.
 
+## The establishment acknowledgement
+
+This branch builds against an SDK revision rather than a release, because the rest of this section
+depends on an API that no published version has: `Cargo.toml` pins the commit, and `main` keeps
+`=1.21.5-rc.3`.
+
+```
+docker compose run --rm --entrypoint repro repro \
+  --trials 500 --budgets default,10 --wait-established --dead-peer-trials 10 --timeout-secs 40
+```
+
+`--wait-established` waits for the peer's acknowledgement before writing the payload, and each trial
+is then scored twice: whether the peer acknowledged and whether the echo came back. Waiting before
+writing is the point. The acknowledgement is never retransmitted and inbound data also resolves the
+wait, so a rig that wrote first would be measuring the echo and calling it the acknowledgement.
+
+`--dead-peer-trials` dials an address whose client registered with a live gateway and then
+disconnected. The gateway is routable, so nothing below the stream layer objects, and there is
+nobody there. It is the case a dialler had no way to detect before the acknowledgement existed.
+
+`default` is accepted in `--budgets` alongside numbers, and leaves the count to the SDK. Since the
+counts now differ between the `Open` and the `Data` frames, that is the only way to exercise the
+values the SDK actually ships.
+
+Give `--timeout-secs` room above `--establish-timeout-secs`, which defaults to 15. A trial that
+waits out the acknowledgement still has to run the echo afterwards, and a deadline that leaves no
+time for it turns every unacknowledged stream into a failed one by construction.
+
 ## Notes
 
 - `sp` keeps its identity in a Docker volume. That directory holds private keys: the Nym address is
