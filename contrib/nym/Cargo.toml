@@ -10,7 +10,9 @@ publish = false
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.5", features = ["derive", "env"] }
-nym-sdk = "=1.21.5-rc.3"
+# This branch tracks an unreleased SDK branch: the establishment acknowledgement the rig waits on
+# does not exist in any published version. `main` keeps the release pin, `=1.21.5-rc.3`.
+nym-sdk = { git = "https://github.com/nymtech/nym", rev = "f5e46b7d8287869221cd6632c63444d4b32da59c" }
 tokio = { version = "1.52.3", features = [
     "rt-multi-thread",
     "macros",

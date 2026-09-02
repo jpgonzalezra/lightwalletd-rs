@@ -13,6 +13,11 @@
 //! Those stages are global counters sampled around each trial, and the echo side advances them from
 //! spawned tasks. A stage landing after a trial's deadline is therefore credited to the next trial:
 //! the failure count is exact, the direction it is attributed to is not.
+//!
+//! With `--wait-established` the dialler also waits for the SDK's establishment acknowledgement
+//! before writing anything, and every trial is scored twice: whether the peer acknowledged, and
+//! whether the echo came back. A layer that discards unacknowledged streams is only safe if those
+//! two agree.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -36,8 +41,9 @@ struct Arguments {
 
     /// Reply-block budgets to compare, rotated one per trial. Interleaving them inside a single
     /// process is what keeps a drifting network from being mistaken for an effect of the budget.
+    /// `default` leaves the count to the SDK, which is the only way to exercise its own numbers.
     #[arg(long, value_delimiter = ',', default_value = "1,20,100,400")]
-    budgets: Vec<u32>,
+    budgets: Vec<String>,
 
     /// How long one trial may wait for its echo before counting as a failure. Successful round
     /// trips measured 2 to 4 seconds, so this is ample.
@@ -56,6 +62,37 @@ struct Arguments {
     /// makes each trial a first exchange; it costs one registration per trial.
     #[arg(long)]
     fresh_dialler: bool,
+
+    /// Wait for the peer's establishment acknowledgement before writing the payload.
+    #[arg(long)]
+    wait_established: bool,
+
+    /// How long to wait for that acknowledgement. The SDK's own default is 15 seconds.
+    #[arg(long, default_value_t = 15)]
+    establish_timeout_secs: u64,
+
+    /// Before the main run, dial this many streams at an address whose client registered with a
+    /// live gateway and then disconnected. Nothing is listening, and nothing below the stream layer
+    /// can tell: the gateway accepts and stores for an absent client either way.
+    #[arg(long, default_value_t = 0)]
+    dead_peer_trials: usize,
+}
+
+/// A reply-block budget for one trial, or the SDK's own choice.
+type Budget = Option<u32>;
+
+fn parse_budget(token: &str) -> Result<Budget> {
+    match token.trim() {
+        "default" | "d" => Ok(None),
+        number => Ok(Some(number.parse().context("parsing a reply-block budget")?)),
+    }
+}
+
+fn budget_label(budget: Budget) -> String {
+    match budget {
+        Some(count) => format!("b{count}"),
+        None => "bdef".to_owned(),
+    }
 }
 
 #[derive(Default)]
@@ -99,6 +136,12 @@ async fn main() -> Result<()> {
         .init();
     let arguments = Arguments::parse();
     let timeout = Duration::from_secs(arguments.timeout_secs);
+    let establish_timeout = Duration::from_secs(arguments.establish_timeout_secs);
+    let budgets = arguments
+        .budgets
+        .iter()
+        .map(|token| parse_budget(token))
+        .collect::<Result<Vec<_>>>()?;
 
     let mut echo_client = connect(arguments.surb_threshold)
         .await
@@ -150,15 +193,31 @@ async fn main() -> Result<()> {
     println!("echo   {echo_address}");
     println!("dial   {}", dial_client.nym_address());
     println!(
-        "trials {} | budgets {:?} interleaved | timeout {}s\n",
+        "trials {} | budgets {:?} interleaved | timeout {}s",
         arguments.trials, arguments.budgets, arguments.timeout_secs
     );
+    if arguments.wait_established {
+        println!(
+            "establishment ack awaited before each write | ack timeout {}s",
+            arguments.establish_timeout_secs
+        );
+    }
+    println!();
+
+    if arguments.dead_peer_trials > 0 {
+        dead_peer_arm(
+            &mut dial_client,
+            arguments.surb_threshold,
+            arguments.dead_peer_trials,
+            establish_timeout,
+        )
+        .await?;
+    }
 
     let payload = vec![0xA5u8; PAYLOAD];
-    let mut per_budget: std::collections::BTreeMap<u32, (usize, usize, Vec<u128>)> = arguments
-        .budgets
+    let mut per_budget: std::collections::BTreeMap<String, (usize, usize, Vec<u128>)> = budgets
         .iter()
-        .map(|b| (*b, (0, 0, Vec::new())))
+        .map(|budget| (budget_label(*budget), (0, 0, Vec::new())))
         .collect();
     let mut ok = 0usize;
     let mut outbound_loss = 0usize;
@@ -167,9 +226,13 @@ async fn main() -> Result<()> {
     let mut dial_errors = 0usize;
     let mut registration_retries = 0usize;
     let mut latencies = Vec::new();
+    let mut establish_latencies = Vec::new();
+    // established/not against echoed/not, in that order.
+    let mut establishment_matrix = [[0usize; 2]; 2];
 
     for trial in 1..=arguments.trials {
-        let budget = arguments.budgets[(trial - 1) % arguments.budgets.len()];
+        let budget = budgets[(trial - 1) % budgets.len()];
+        let label = budget_label(budget);
         if arguments.fresh_dialler && trial > 1 {
             // Registering a fresh client is itself flaky: gateways time out during authentication
             // often enough to end a run on the second trial. Those failures are noise here, so they
@@ -192,9 +255,19 @@ async fn main() -> Result<()> {
         }
         let before = stages.snapshot();
         let started = Instant::now();
+        let mut establishment: Option<std::result::Result<u128, String>> = None;
 
         let attempt = tokio::time::timeout(timeout, async {
-            let mut stream = dial_client.open_stream(echo_address, Some(budget)).await?;
+            let mut stream = dial_client.open_stream(echo_address, budget).await?;
+            if arguments.wait_established {
+                let waited = Instant::now();
+                establishment = Some(
+                    match stream.wait_established_with_timeout(establish_timeout).await {
+                        Ok(()) => Ok(waited.elapsed().as_millis()),
+                        Err(error) => Err(error.to_string()),
+                    },
+                );
+            }
             stream.write_all(&payload).await?;
             stream.flush().await?;
             let mut back = vec![0u8; PAYLOAD];
@@ -209,48 +282,65 @@ async fn main() -> Result<()> {
         let read = after.1 > before.1;
         let written = after.2 > before.2;
 
-        let entry = per_budget.entry(budget).or_insert((0, 0, Vec::new()));
-        if matches!(&attempt, Ok(Ok(back)) if *back == payload) {
+        let echoed = matches!(&attempt, Ok(Ok(back)) if *back == payload);
+        let entry = per_budget
+            .entry(label.clone())
+            .or_insert((0, 0, Vec::new()));
+        if echoed {
             entry.0 += 1;
             entry.2.push(elapsed);
         } else {
             entry.1 += 1;
         }
 
+        let mark = match &establishment {
+            None => String::new(),
+            Some(Ok(waited)) => {
+                establish_latencies.push(*waited);
+                establishment_matrix[0][usize::from(!echoed)] += 1;
+                format!("  ack {waited:>5} ms")
+            }
+            Some(Err(_)) => {
+                establishment_matrix[1][usize::from(!echoed)] += 1;
+                "  NO-ACK".to_owned()
+            }
+        };
+
         match attempt {
             Ok(Ok(back)) if back == payload => {
                 ok += 1;
                 latencies.push(elapsed);
-                println!("{trial:>4}  b{budget:<4} ok         {elapsed:>6} ms");
+                println!("{trial:>4}  {label:<5} ok         {elapsed:>6} ms{mark}");
             }
             Ok(Ok(_)) => {
                 dial_errors += 1;
-                println!("{trial:>4}  b{budget:<4} CORRUPT    {elapsed:>6} ms");
+                println!("{trial:>4}  {label:<5} CORRUPT    {elapsed:>6} ms{mark}");
             }
             Ok(Err(error)) => {
                 dial_errors += 1;
-                println!("{trial:>4}  b{budget:<4} ERROR      {elapsed:>6} ms  {error}");
+                println!("{trial:>4}  {label:<5} ERROR      {elapsed:>6} ms{mark}  {error}");
             }
             Err(_) if accepted && !read => {
                 outbound_loss += 1;
-                println!("{trial:>4}  b{budget:<4} LOST-OUT   {elapsed:>6} ms");
+                println!("{trial:>4}  {label:<5} LOST-OUT   {elapsed:>6} ms{mark}");
             }
             Err(_) if read && !written => {
                 echo_write_failed += 1;
-                println!("{trial:>4}  b{budget:<4} ECHO-WRITE {elapsed:>6} ms");
+                println!("{trial:>4}  {label:<5} ECHO-WRITE {elapsed:>6} ms{mark}");
             }
             Err(_) if written => {
                 return_loss += 1;
-                println!("{trial:>4}  b{budget:<4} LOST-BACK  {elapsed:>6} ms");
+                println!("{trial:>4}  {label:<5} LOST-BACK  {elapsed:>6} ms{mark}");
             }
             Err(_) => {
                 outbound_loss += 1;
-                println!("{trial:>4}  b{budget:<4} NO-ACCEPT  {elapsed:>6} ms");
+                println!("{trial:>4}  {label:<5} NO-ACCEPT  {elapsed:>6} ms{mark}");
             }
         }
     }
 
     latencies.sort_unstable();
+    establish_latencies.sort_unstable();
 
     let failures = outbound_loss + echo_write_failed + return_loss + dial_errors;
     println!("\n--- summary ---");
@@ -274,17 +364,38 @@ async fn main() -> Result<()> {
         percentile(&latencies, 0.90),
         percentile(&latencies, 0.99)
     );
+
+    if arguments.wait_established {
+        println!("\n--- establishment ack against outcome ---");
+        println!("{:>17}  {:>8}  {:>11}", "", "echo ok", "echo failed");
+        println!(
+            "{:>17}  {:>8}  {:>11}",
+            "acknowledged", establishment_matrix[0][0], establishment_matrix[0][1]
+        );
+        println!(
+            "{:>17}  {:>8}  {:>11}",
+            "no ack", establishment_matrix[1][0], establishment_matrix[1][1]
+        );
+        println!(
+            "ack latency  p50 {} ms | p90 {} ms | p99 {} ms | max {} ms",
+            percentile(&establish_latencies, 0.50),
+            percentile(&establish_latencies, 0.90),
+            percentile(&establish_latencies, 0.99),
+            establish_latencies.last().copied().unwrap_or(0)
+        );
+    }
+
     println!("\n--- by reply-block budget (interleaved) ---");
     println!(
         "{:>6}  {:>8}  {:>3}  {:>6}  {:>6}  {:>9}",
         "budget", "trials", "ok", "fails", "rate", "p50"
     );
-    for (budget, (good, bad, mut samples)) in per_budget {
+    for (label, (good, bad, mut samples)) in per_budget {
         samples.sort_unstable();
         let p50 = percentile(&samples, 0.50);
         let total = good + bad;
         println!(
-            "{budget:>6}  {total:>8}  {good:>3}  {bad:>6}  {:>5.1}%  {p50:>6} ms",
+            "{label:>6}  {total:>8}  {good:>3}  {bad:>6}  {:>5.1}%  {p50:>6} ms",
             100.0 * bad as f64 / total.max(1) as f64
         );
     }
@@ -306,7 +417,55 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Nearest-rank percentile over an already sorted slice.
+/// Dial an address that routes but has nobody behind it, and see what the caller is told.
+///
+/// The client is registered and then disconnected, so its gateway stays in the topology and keeps
+/// accepting for it. This is the failure the dialling side could not detect at all: an address
+/// whose owner is not running.
+async fn dead_peer_arm(
+    dial_client: &mut MixnetClient,
+    surb_threshold: Option<usize>,
+    trials: usize,
+    establish_timeout: Duration,
+) -> Result<()> {
+    let absent = connect(surb_threshold)
+        .await
+        .context("connecting the client that is about to leave")?;
+    let absent_address = *absent.nym_address();
+    absent.disconnect().await;
+    println!("--- dead peer arm ---");
+    println!("dead   {absent_address}  (registered, then disconnected)");
+
+    let mut acknowledged = 0usize;
+    let mut refused = 0usize;
+    for trial in 1..=trials {
+        let started = Instant::now();
+        match dial_client.open_stream(absent_address, None).await {
+            Ok(mut stream) => {
+                let outcome = stream.wait_established_with_timeout(establish_timeout).await;
+                let elapsed = started.elapsed().as_millis();
+                match outcome {
+                    Ok(()) => {
+                        acknowledged += 1;
+                        println!("{trial:>4}  dead  ACKNOWLEDGED {elapsed:>6} ms");
+                    }
+                    Err(error) => println!("{trial:>4}  dead  no ack      {elapsed:>6} ms  {error}"),
+                }
+            }
+            Err(error) => {
+                refused += 1;
+                let elapsed = started.elapsed().as_millis();
+                println!("{trial:>4}  dead  OPEN-REFUSED {elapsed:>6} ms  {error}");
+            }
+        }
+    }
+    println!(
+        "dead peer: {trials} dials | opens refused {refused} | acknowledged {acknowledged}\n"
+    );
+    Ok(())
+}
+
+/// Percentile over an already sorted slice, at index `round((n - 1) * fraction)`.
 fn percentile(sorted: &[u128], fraction: f64) -> u128 {
     if sorted.is_empty() {
         return 0;

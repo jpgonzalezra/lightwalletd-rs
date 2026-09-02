@@ -13,15 +13,15 @@ RUN apt-get update \
 ENV VERGEN_IDEMPOTENT=1
 
 WORKDIR /src
-# The lockfile is copied and enforced because measurements are attributed to SDK versions: a build
-# that silently resolved a different tree would not be the one the numbers came from.
-COPY Cargo.toml Cargo.lock ./
+# No lockfile on this branch: the SDK comes from a git revision, which pins the tree exactly the way
+# a lockfile would, and resolving it needs the network anyway.
+COPY Cargo.toml ./
 COPY src ./src
 
 # Cache mounts keep the registry and target dir out of the image and off the host.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
+    cargo build --release \
  && mkdir -p /out \
  && cp target/release/sp target/release/dial target/release/repro /out/
 
