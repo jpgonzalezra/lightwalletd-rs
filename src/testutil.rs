@@ -170,6 +170,14 @@ pub struct FakeNode {
     /// Captures the `(protocol, start_index, max_entries)` the service passed to `get_subtrees`.
     /// Stays `None` when the service answers without consulting the node.
     pub requested_subtree_params: Mutex<Option<(String, u32, u32)>>,
+    /// How long `get_subtrees` waits before answering, so a test can drive a request deadline.
+    pub subtrees_delay: Option<std::time::Duration>,
+    /// How long `get_block_hash` waits before answering, so a test can drive a request deadline
+    /// through a height lookup rather than through the call that precedes it.
+    pub block_hash_delay: Option<std::time::Duration>,
+    /// How many times `get_block_hash` was called, so a test can assert a height came from the
+    /// cache and never reached the node.
+    pub block_hash_calls: Mutex<u32>,
     pub raw_mempool: Option<Vec<String>>,
     /// Captures the txid string the service passed to `get_raw_transaction`.
     pub requested_txid: Mutex<Option<String>>,
@@ -232,6 +240,10 @@ impl NodeRpc for FakeNode {
     }
 
     async fn get_block_hash(&self, height: u64) -> Result<String, NodeError> {
+        *self.block_hash_calls.lock().unwrap() += 1;
+        if let Some(delay) = self.block_hash_delay {
+            tokio::time::sleep(delay).await;
+        }
         self.hash_by_height
             .get(&height)
             .cloned()
@@ -336,6 +348,9 @@ impl NodeRpc for FakeNode {
     ) -> Result<GetSubtrees, NodeError> {
         *self.requested_subtree_params.lock().unwrap() =
             Some((protocol.to_string(), start_index, max_entries));
+        if let Some(delay) = self.subtrees_delay {
+            tokio::time::sleep(delay).await;
+        }
         if let Some((code, message)) = self.subtrees_err.clone() {
             return Err(NodeError::Rpc { code, message });
         }

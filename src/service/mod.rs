@@ -13,6 +13,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 
+use tokio::time::{Instant, timeout_at};
 use tonic::{Request, Response, Status};
 
 use crate::cache::Cache;
@@ -132,6 +133,21 @@ async fn block_at(cache: &Cache, node: &dyn NodeRpc, height: u64) -> Result<Comp
             .await
             .map_err(|err| errors::block_fetch_to_status(err, height)),
     }
+}
+
+/// Run `call` under `deadline`, reporting a timeout as `DeadlineExceeded` tagged with `context`.
+///
+/// A deadline here bounds the node work one request can trigger, not the stream that delivers the
+/// result: a client reading slowly paces itself and holds nothing the server has to keep working
+/// on, while a node that stops answering pins a connection until someone gives up.
+async fn with_deadline<T, E>(
+    deadline: Instant,
+    context: &str,
+    call: impl Future<Output = Result<T, E>>,
+) -> Result<Result<T, E>, Status> {
+    timeout_at(deadline, call).await.map_err(|_| {
+        Status::deadline_exceeded(format!("{context}: timed out waiting for the node"))
+    })
 }
 
 /// Decode a hex string, tagging a failure as an internal error mentioning `context`.

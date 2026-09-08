@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use async_stream::try_stream;
-use tokio::time::{Instant, timeout_at};
+use tokio::time::Instant;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
@@ -14,7 +14,7 @@ use crate::proto::{
     GetAddressUtxosReplyList, RawTransaction, TransparentAddressBlockFilter,
 };
 
-use super::{Streamer, decode_hex, framing, mined_height};
+use super::{Streamer, decode_hex, framing, mined_height, with_deadline};
 
 /// Max addresses a single transparent-address request may carry before the server rejects it,
 /// bounding the per-request accumulation across `GetTaddressBalance`, its streaming variant, and
@@ -260,9 +260,13 @@ async fn taddress_transactions(
     let end = resolve_range_end(streamer, range.end.map(|block| block.height), start).await?;
 
     let addresses = [filter.address];
-    let txids = with_deadline(deadline, node.get_address_txids(&addresses, start, end))
-        .await?
-        .map_err(super::errors::address_query_to_status)?;
+    let txids = with_deadline(
+        deadline,
+        "get_taddress_transactions",
+        node.get_address_txids(&addresses, start, end),
+    )
+    .await?
+    .map_err(super::errors::address_query_to_status)?;
     if txids.len() > MAX_TADDRESS_TXIDS {
         return Err(Status::resource_exhausted(format!(
             "get_taddress_transactions: more than {MAX_TADDRESS_TXIDS} matching transactions; narrow the block range"
@@ -273,7 +277,7 @@ async fn taddress_transactions(
     // DATA frame each (ADR 0037).
     Ok(Box::pin(framing::coalesce(try_stream! {
         for txid in txids {
-            let raw = with_deadline(deadline, node.get_raw_transaction(&txid))
+            let raw = with_deadline(deadline, "get_taddress_transactions", node.get_raw_transaction(&txid))
                 .await?
                 .map_err(super::errors::transaction_lookup_to_status)?;
             let data = decode_hex(&raw.hex, "transaction hex")?;
@@ -304,16 +308,6 @@ async fn resolve_range_end(
         )));
     }
     Ok(end)
-}
-
-/// Run a node call under the request's overall `deadline`, mapping expiry to `DeadlineExceeded`.
-async fn with_deadline<T, E>(
-    deadline: Instant,
-    call: impl Future<Output = Result<T, E>>,
-) -> Result<Result<T, E>, Status> {
-    timeout_at(deadline, call).await.map_err(|_| {
-        Status::deadline_exceeded("get_taddress_transactions: timed out waiting for the node")
-    })
 }
 
 #[cfg(test)]

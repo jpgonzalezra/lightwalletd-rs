@@ -48,3 +48,4 @@ choice stays discoverable after the fact. The living overview is
 | [0039](0039-refuse-block-ranges-below-the-ingest-floor.md) | Refuse block ranges below the ingest floor |
 | [0040](0040-bound-the-cache-read-chunk-by-bytes.md) | Bound the cache read chunk by bytes, not only by height count |
 | [0041](0041-cap-the-pool-type-filter.md) | Cap the pool-type filter and resolve it once per request |
+| [0042](0042-resolve-subtree-completing-blocks-by-hash-lookup.md) | Resolve a subtree's completing block by hash lookup, under a deadline |
