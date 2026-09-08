@@ -31,7 +31,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Above zebrad's own 50 MiB response cap, so nothing an honest node can produce is refused, and
 /// far above what this client asks for: a block tops out at 2 MB, `getaddresstxids` at 10,000
-/// txids, a `getblockhash` batch at 250 hashes.
+/// txids, a `getblockhash` batch at 1,000 hashes.
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A `reqwest` builder with this process's TLS crypto provider installed.

@@ -85,6 +85,18 @@ pub enum CacheError {
     },
 }
 
+/// A stored `CompactBlock` read down to its `hash` field.
+///
+/// Prost skips the fields a message does not declare, so decoding into this steps over each
+/// transaction's length prefix instead of building the transaction: no `CompactTx` and none of its
+/// spends or outputs are allocated to reach 32 bytes of hash. Tag 3 is `CompactBlock.hash`
+/// (`proto/compact_formats.proto`).
+#[derive(Clone, PartialEq, Message)]
+struct StoredBlockHash {
+    #[prost(bytes = "vec", tag = "3")]
+    hash: Vec<u8>,
+}
+
 /// What one bounded cache read returned: the stored blocks, and how much of the request they cover.
 pub struct CachedChunk {
     /// The stored protobuf encoding of each block read, keyed by height.
@@ -225,6 +237,26 @@ impl Cache {
             Some(guard) => Ok(Some(CompactBlock::decode(guard.value())?)),
             None => Ok(None),
         }
+    }
+
+    /// The hashes of the cached blocks at `heights`, keyed by height. A height the cache does not
+    /// hold is absent from the result rather than an error, so the caller can tell the misses apart
+    /// and resolve them elsewhere.
+    ///
+    /// One read transaction covers the whole set, so the hashes come from a single point in time
+    /// even if the ingestor truncates a reorg mid-read (ADR 0028). Only the `hash` field is decoded,
+    /// so a lookup costs a walk over the stored bytes rather than a whole block's worth of
+    /// transactions.
+    pub fn hashes_at(&self, heights: &[u64]) -> Result<BTreeMap<u64, Vec<u8>>, CacheError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BLOCKS)?;
+        let mut hashes = BTreeMap::new();
+        for &height in heights {
+            if let Some(guard) = table.get(height)? {
+                hashes.insert(height, StoredBlockHash::decode(guard.value())?.hash);
+            }
+        }
+        Ok(hashes)
     }
 
     /// Visit the raw stored value for each cached height in `range`, ascending, under a single read
@@ -706,6 +738,39 @@ mod tests {
         let chunk = cache.read_chunk(100..=163, false, 512 * 1024).unwrap();
 
         assert_eq!(chunk.covered, 100..=163);
+    }
+
+    #[test]
+    fn hashes_at_reads_the_cached_heights_and_omits_the_rest() {
+        let (_dir, cache) = temp_cache();
+        cache.add(1, &block(1, 0xaa)).unwrap();
+        cache.add(2, &block(2, 0xbb)).unwrap();
+
+        let hashes = cache.hashes_at(&[1, 2, 3]).unwrap();
+
+        assert_eq!(
+            hashes,
+            BTreeMap::from([(1, vec![0xaa; 32]), (2, vec![0xbb; 32])])
+        );
+    }
+
+    /// The point of reading a hash out of the cache without decoding the block: a stored block whose
+    /// transactions cannot be decoded still answers with its hash. Field 7 (`vtx`) is framed
+    /// correctly but holds a truncated varint, so anything that walks into it fails and anything
+    /// that skips over it does not.
+    #[test]
+    fn hashes_at_does_not_decode_the_transactions() {
+        let (_dir, cache) = temp_cache();
+        let mut stored = vec![0x1a, 32];
+        stored.extend_from_slice(&[0xcc; 32]);
+        stored.extend_from_slice(&[0x3a, 1, 0x08]);
+        cache.insert_raw(7, &stored).unwrap();
+
+        assert!(cache.get(7).is_err());
+        assert_eq!(
+            cache.hashes_at(&[7]).unwrap(),
+            BTreeMap::from([(7, vec![0xcc; 32])])
+        );
     }
 
     #[test]

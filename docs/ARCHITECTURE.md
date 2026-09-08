@@ -213,6 +213,7 @@ Wallet-facing contract and hardening:
 - [0041](decisions/0041-cap-the-pool-type-filter.md): a `poolTypes` filter carries at most 16 entries and is resolved to four bools once per request, not once per block, so what the filter costs no longer scales with a list the client picks. A stream then holds four bools instead of whatever the client uploaded.
 - [0037](decisions/0037-batch-streamed-messages-into-full-frames.md): streamed messages are held until they add up to 4 KiB before being yielded, so a range served block by block from the node leaves as full HTTP/2 DATA frames instead of one undersized frame per block, which peers close the connection over.
 - [0030](decisions/0030-subtree-index-range.md): subtree indexes are bounded to the node's `u16` range before any round-trip: an out-of-range start index is `InvalidArgument`, an out-of-range limit means no limit.
+- [0042](decisions/0042-resolve-subtree-completing-blocks-by-hash-lookup.md): a subtree's completing block is resolved by looking up its hash, from the cache without decoding the transactions or from the node in batched height lookups, so `GetSubtreeRoots` no longer reads one whole historical block per root. A 30 s deadline covers the node work behind the request.
 - [0031](decisions/0031-lightwallet-protocol-version.md): `GetLightdInfo` reports the served lightwallet-protocol version as a constant, independent of the crate version and the build stamps, moving only once the server serves everything the named version specifies.
 - [0015](decisions/0015-layered-testing-strategy.md): testing is layered: a fake node, a `wiremock` HTTP layer, golden parser fixtures, and in-process darkside E2E.
 - [0016](decisions/0016-test-placement-by-visibility.md): tests are placed by visibility: handler tests grouped by family under `service/tests/`, private internals tested inline in their own module.
@@ -239,7 +240,7 @@ the integration tests) sets:
   `--keepalive-timeout-secs` (default 20 s). A quiet connection is pinged and dropped if it stops
   answering, so a dead peer cannot pin a long-lived stream indefinitely.
 
-Six per-request limits bound the work a single request can accumulate or trigger:
+Seven per-request limits bound the work a single request can accumulate or trigger:
 
 - `GetTaddressBalanceStream` drains a client-streamed list of addresses into a `Vec`; it stops at
   `MAX_STREAMED_ADDRESSES` (10,000) and rejects a longer stream with `ResourceExhausted`.
@@ -259,6 +260,14 @@ Six per-request limits bound the work a single request can accumulate or trigger
   cached. Above the cached tip the fallback is untouched, since that gap is the instance's own lag
   and not something a client picks. Darkside and `--nocache` have no floor and keep serving from the
   node.
+- `GetSubtreeRoots` resolves each root's completing block with a hash lookup rather than a block
+  read, and takes from the node's answer only the subtrees it can address from the requested start
+  index ([0042](decisions/0042-resolve-subtree-completing-blocks-by-hash-lookup.md)). A count cap is
+  not the lever here: `maxEntries` reads zero as unlimited, that is what light-client SDKs send, and
+  the list is taken whole rather than paged, so a cap below the real subtree count would hand a
+  wallet a tree missing its newest shards. The per-root cost is bounded instead: a hundred-byte reply
+  no longer costs the server a block read. A 30 s deadline covers the subtree query and the hash
+  lookups.
 - `GetTaddressTransactions`/`GetTaddressTxids` cap the number of matching txids at
   `MAX_TADDRESS_TXIDS` (10,000): the txid list is fetched first and a wider result is rejected with
   `ResourceExhausted` before any per-txid fetch, so one request cannot pin the node on an unbounded
