@@ -1,5 +1,16 @@
 # 0027. Serve only self-consistent block ranges
 
+> **Amended 2026-09-21.** The ingestor's second guard covers both ends of the cached range, not only
+> the tip. A report below the cache's base names a height the cache never held, yet acting on it
+> truncates below the ingest floor and empties the whole cache.
+> [0039](0039-refuse-block-ranges-below-the-ingest-floor.md) refuses ranges below the base before the
+> stream opens, but it checks once, and a stream can run for minutes: one that passed the check before
+> the base moved can still report a height below the new base. The ingestor reads the cached range at
+> the moment it truncates, so the guard belongs there. Such a report is ignored rather than clamped
+> to the base, because truncating from the base also empties the whole cache, and a reorg that
+> really reaches the base is one the ingestor handles on its own: it detects reorgs at the cached
+> tip and rolls back one block per step until it gets there.
+
 ## Context
 
 `GetBlockRange` and `GetBlockRangeNullifiers` resolve each height in the requested span

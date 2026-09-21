@@ -619,8 +619,11 @@ mismatch ends the stream with `Aborted` and, when the cache served at least one 
 lower height, which the ingestor drains at the top of its loop and truncates from, so re-ingestion repairs the
 cache and the client's retry succeeds instead of hitting the same seam. A seam between two node-served blocks
 is the node reorging between two per-height fetches, above the cached tip where nothing is cached to drop: it
-aborts the range and leaves the cache untouched. Truncations are charged to a budget of five per ten-minute
-window, so a node the cache cannot reconcile with cannot drive an endless truncate/re-ingest cycle.
+aborts the range and leaves the cache untouched. The ingestor also ignores a reported height below the cache's
+base or above its tip: truncating from a height the cache never held would empty it. The read path refuses
+ranges below the base before the stream opens, but a stream that opened before the base moved can still
+report a height below the new base. Truncations are charged to a budget of five per ten-minute window, so a
+node the cache cannot reconcile with cannot drive an endless truncate/re-ingest cycle.
 
 `--nocache` bypasses all of the above: the ingestor is not spawned and the cache is opened in a throwaway
 `tempfile::tempdir()` instead of `--data-dir`, so it starts (and stays) empty and every read falls through
