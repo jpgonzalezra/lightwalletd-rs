@@ -146,21 +146,22 @@ fn repair_reported(
     repair: &RepairSignal,
     budget: &mut RepairBudget,
 ) {
-    // A report above the cached tip is a seam between two blocks the node served, and there is
-    // nothing cached at those heights to drop. Truncating anyway would reach the cache floor and
-    // empty it for a reorg the cache never held.
-    match cache.latest_height() {
-        Ok(Some(tip)) if height <= tip => {}
-        Ok(tip) => {
+    // Only a height the cache holds is the cache's to repair: truncating from any other height
+    // empties the whole cache. Above the tip the seam is between two node-served blocks. Below the
+    // base, ADR 0039 refuses the range, but it checks once, before a stream that can last minutes,
+    // so one that opened before the base moved can still report a height below the new base.
+    match cache.range() {
+        Ok(Some((base, tip))) if (base..=tip).contains(&height) => {}
+        Ok(cached_range) => {
             tracing::debug!(
                 height,
-                cached_tip = tip,
-                "chain discontinuity reported above the cached tip; nothing to repair"
+                ?cached_range,
+                "chain discontinuity reported outside the cached range; nothing to repair"
             );
             return;
         }
         Err(error) => {
-            tracing::error!(%error, height, "reading the cached tip for a reported discontinuity failed");
+            tracing::error!(%error, height, "reading the cached range for a reported discontinuity failed");
             return;
         }
     }
@@ -1039,6 +1040,51 @@ mod tests {
         repair_reported(&cache, 106, 100, &repair, &mut budget);
 
         assert_eq!(budget.spent, 0);
+    }
+
+    #[test]
+    fn a_discontinuity_reported_below_the_cached_base_leaves_the_cache_alone() {
+        let (_dir, cache) = cache_holding(100..=105);
+        let repair = RepairSignal::new();
+        let mut budget = RepairBudget::new(Instant::now());
+
+        repair_reported(&cache, 99, 100, &repair, &mut budget);
+
+        assert_eq!(cache.range().unwrap(), Some((100, 105)));
+    }
+
+    #[test]
+    fn a_discontinuity_reported_below_the_cached_base_does_not_spend_the_budget() {
+        let (_dir, cache) = cache_holding(100..=105);
+        let repair = RepairSignal::new();
+        let mut budget = RepairBudget::new(Instant::now());
+
+        repair_reported(&cache, 99, 100, &repair, &mut budget);
+
+        assert_eq!(budget.spent, 0);
+    }
+
+    #[test]
+    fn a_discontinuity_reported_below_the_cached_base_is_ignored_under_a_lower_start_height() {
+        let (_dir, cache) = cache_holding(100..=105);
+        let repair = RepairSignal::new();
+        let mut budget = RepairBudget::new(Instant::now());
+
+        repair_reported(&cache, 99, 90, &repair, &mut budget);
+
+        assert_eq!(cache.range().unwrap(), Some((100, 105)));
+    }
+
+    #[test]
+    fn a_discontinuity_reported_at_the_cached_base_empties_the_cache() {
+        // On purpose: the base is a cached block, and dropping it drops everything above it.
+        let (_dir, cache) = cache_holding(100..=105);
+        let repair = RepairSignal::new();
+        let mut budget = RepairBudget::new(Instant::now());
+
+        repair_reported(&cache, 100, 100, &repair, &mut budget);
+
+        assert_eq!(cache.range().unwrap(), None);
     }
 
     #[test]
