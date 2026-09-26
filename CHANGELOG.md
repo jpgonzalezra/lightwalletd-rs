@@ -5,6 +5,56 @@ All notable changes to this project are documented here. The format is loosely b
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-26
+
+This release refuses or bounds several requests that 0.1.1 served, which is why the minor version
+moves. A light wallet syncing normally hits none of the new limits.
+
+### Added
+- Wallet-facing calls that reach the node draw from two separate pools of permits, so a burst of
+  wallet traffic cannot take the node capacity the ingestor needs (ADR 0036). Transparent-address
+  queries share `--client-scan-concurrency` (default 2); every other node-backed call shares
+  `--client-node-concurrency` (default 8). A call that waits more than 250 ms for a permit is
+  refused with `RESOURCE_EXHAUSTED`. Reads served from the cache never enter a pool, and the
+  ingestor keeps its own connection budget.
+
+### Changed
+- A block range that starts below the ingest floor is refused with `OUT_OF_RANGE`, and the message
+  names the floor (ADR 0039). Once the cache holds blocks, the floor is its base. A single
+  `GetBlock` below the floor is still served from the node. Darkside and `--nocache` have no floor.
+- `GetAddressUtxos` and `GetAddressUtxosStream` refuse a result larger than 100,000 unspent outputs
+  with `RESOURCE_EXHAUSTED` and point the caller at `startHeight` and `maxEntries` for paging
+  (ADR 0038). A request whose `maxEntries` is within the cap is always served.
+- A `poolTypes` list longer than 16 entries is refused with `RESOURCE_EXHAUSTED`, in block ranges
+  and in `GetMempoolTx` (ADR 0041). The filter is resolved once per request, not once per block.
+- The default ingest floor comes from the network parameters compiled into the binary: 419,200 on
+  mainnet, 280,000 on testnet, genesis on regtest and unknown chains (ADR 0033). A node that reports
+  a different Sapling activation height gets a warning and is overruled.
+- Block ranges, `GetSubtreeRoots` and `GetTaddressTransactions` send their messages in batches of
+  about 4 KiB, so a range served from the node leaves as full HTTP/2 frames instead of one small
+  frame per block (ADR 0037). The mempool streams still send each transaction as it arrives.
+- `GetSubtreeRoots` finds each completing block by its hash, from the cache or from one batched
+  `getblockhash`, and never reads the block itself (ADR 0042). The reply is the same. When the node
+  cannot resolve a completing block, which only happens if a reorg lands between two calls, the
+  status is `UNAVAILABLE` instead of `OUT_OF_RANGE`.
+- Metric labels are limited to the gRPC methods this server serves, and every other path is counted
+  under `/unknown/unknown` (ADR 0035). `--no-metrics` removes the recording layer along with the
+  endpoint.
+
+### Fixed
+- Node responses are read against a 64 MiB cap on the decompressed body. An oversized answer fails
+  that one call with `UNAVAILABLE` and is dropped as it arrives (ADR 0034).
+- A cache read inside a block range stops at 512 KiB as well as at 64 heights. The memory one stream
+  holds is capped at 128 MiB in every chain era, where the worst case per connection was about
+  2.8 GB (ADR 0040).
+- A chain discontinuity reported below the cache's base leaves the cache alone. Truncating from that
+  height used to empty the whole cache.
+- `Ping` gives back its in-flight slot when the client cancels the call, so the count it reports
+  stays correct.
+
+### Dependencies
+- `h2` 0.4.18 for RUSTSEC-2026-0258 and `rustls` 0.23.45 for RUSTSEC-2026-0285.
+
 ## [0.1.1] - 2026-08-11
 
 ### Added
