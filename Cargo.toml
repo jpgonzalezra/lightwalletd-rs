@@ -66,6 +66,7 @@ tonic-web = "0.14.6"
 tonic_prometheus_layer = "0.3.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+webpki-roots = "1.0.10"
 zcash_address = "=0.13.0"
 zcash_encoding = "0.4.0"
 zcash_primitives = "=0.29.0"

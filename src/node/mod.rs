@@ -34,16 +34,24 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// txids, a `getblockhash` batch at 1,000 hashes.
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// A `reqwest` builder with this process's TLS crypto provider installed.
+/// A `reqwest` builder with this process's TLS crypto provider and trust roots installed.
 ///
 /// Every outbound HTTP client in the crate must come from here. `reqwest` is built with
 /// `rustls-no-provider`, so the binary carries one crypto stack (`ring`, the one `tonic` and `rcgen`
 /// already use) instead of two, but it then **panics when a client is constructed** without a
-/// provider, even a plaintext one that will never negotiate TLS. Installing returns `Err` only if
-/// something already did it, which is the outcome we want anyway.
+/// provider, even a plaintext one that will never negotiate TLS. The explicit `webpki-roots`
+/// configuration also makes certificate-authority distrust updates part of the binary instead of
+/// waiting for the host's CA package to catch up. Installing returns `Err` only if something
+/// already did it, which is the outcome we want anyway.
 pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
+    let root_store = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let tls = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    reqwest::Client::builder().tls_backend_preconfigured(tls)
 }
 
 /// Read a node response body, refusing to hold more than `max_bytes` of it.
